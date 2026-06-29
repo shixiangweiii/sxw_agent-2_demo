@@ -275,12 +275,12 @@ report.aggregate(records) -> reports/<ts>/
 
 **矩阵** = `引擎 {agent_loop, plan_execute}` × `case（按 engines 适配）`。
 
-**引擎切换难点**：`ENGINE` 是服务端启动配置，单请求不可切。采用**双实例并行**（推荐，免重启、可同时跑）：
+**引擎切换难点**：`ENGINE` 是服务端启动配置，单请求不可切。采用**双实例并行**（推荐，免重启、可同时跑）。下表中的 `$PY` 按仓库约定选择：`env_sxw_demo/bin/python` 存在则优先，否则使用 `.venv/bin/python`。
 
 | 实例 | 命令（env） | 端口 |
 |---|---|---|
-| agent_loop | `ENGINE=agent_loop AGENT_PORT=8000 uvicorn agent.main:app --port 8000` | 8000 |
-| plan_execute | `ENGINE=plan_execute AGENT_PORT=8001 uvicorn agent.main:app --port 8001` | 8001 |
+| agent_loop | `ENGINE=agent_loop AGENT_PORT=8000 $PY -m uvicorn agent.main:app --port 8000` | 8000 |
+| plan_execute | `ENGINE=plan_execute AGENT_PORT=8001 $PY -m uvicorn agent.main:app --port 8001` | 8001 |
 
 harness `--engine agent_loop|plan_execute` 选对应端口，只跑 `engines` 含该引擎的 case。
 
@@ -318,26 +318,31 @@ harness `--engine agent_loop|plan_execute` 选对应端口，只跑 `engines` �
 ```bash
 cd sxw_optimization_demo
 export DASHSCOPE_API_KEY=sk-***          # 仅 env，切勿写入任何文件
+if [ -x env_sxw_demo/bin/python ]; then
+  PY=env_sxw_demo/bin/python
+else
+  PY=.venv/bin/python
+fi
 
 # 1) 起下游 + 双引擎实例 + 入库样本知识
 bash scripts/run_all.sh                   # 起 a2a_service/skill-center/arag/agent(8000=agent_loop) + seed
 ENGINE=plan_execute AGENT_PORT=8001 \
-  env_sxw_demo/bin/python -m uvicorn agent.main:app --port 8001 &   # 第二实例
+  "$PY" -m uvicorn agent.main:app --port 8001 &   # 第二实例
 
 # 2) 准备多模态资产（知识样本里引用的 OSS 图）
 curl -L -o eval/dataset/assets/dog_and_girl.jpeg \
   https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg
 
 # 3) 主 pass（arag 在线）：两引擎各跑一遍
-env_sxw_demo/bin/python -m eval.harness.runner --engine agent_loop   --base-url http://127.0.0.1:8000
-env_sxw_demo/bin/python -m eval.harness.runner --engine plan_execute --base-url http://127.0.0.1:8001
+"$PY" -m eval.harness.runner --engine agent_loop   --base-url http://127.0.0.1:8000
+"$PY" -m eval.harness.runner --engine plan_execute --base-url http://127.0.0.1:8001
 
 # 4) 鲁棒性 arag-down pass：停 arag，只跑 arag=down 子集
 #    （kill arag 进程后）
-env_sxw_demo/bin/python -m eval.harness.runner --engine agent_loop --suite robustness --only-arag-down
+"$PY" -m eval.harness.runner --engine agent_loop --suite robustness --only-arag-down
 
 # 5) 出报告
-env_sxw_demo/bin/python -m eval.harness.report --latest
+"$PY" -m eval.harness.report --latest
 open eval/reports/<timestamp>/summary.md
 ```
 

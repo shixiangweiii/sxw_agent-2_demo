@@ -68,9 +68,9 @@ cd sxw_optimization_demo
 # 1) 配置（填入真实 DASHSCOPE_API_KEY，切勿提交）
 cp .env.example .env
 
-# 2) 依赖（已安装在 env_sxw_demo/）；如需重建：
-#    python3.12 -m venv env_sxw_demo
-#    env_sxw_demo/bin/pip install -r requirements.txt
+# 2) 依赖（当前默认虚拟环境为 .venv/；如兼容旧路径 env_sxw_demo/ 存在则优先使用）
+#    如需重建：python3.12 -m venv .venv
+#    .venv/bin/pip install -r requirements.txt
 
 # 3) 一键启动 a2a_service(:8300)+skill-center(:8200)+arag(:8100)+agent(:8000)，自动等待健康检查并入库样本
 bash scripts/run_all.sh

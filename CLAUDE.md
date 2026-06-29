@@ -10,10 +10,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 常用命令
 
-所有 Python 命令都走仓库自带虚拟环境 `env_sxw_demo/`（**不要用系统 python**）：
+所有 Python 命令都走仓库自带虚拟环境（**不要用系统 python**）。解释器选择规则：若 `env_sxw_demo/bin/python` 存在则优先使用它；否则使用当前默认的 `.venv/bin/python`：
 
 ```bash
-PY=env_sxw_demo/bin/python
+if [ -x env_sxw_demo/bin/python ]; then
+  PY=env_sxw_demo/bin/python
+else
+  PY=.venv/bin/python
+fi
 
 # 一键启动全部 4 服务（先下游后 agent，自动健康检查 + 入库样本知识库），Ctrl-C 一并退出
 bash scripts/run_all.sh
@@ -27,14 +31,14 @@ $PY -m uvicorn agent.main:app       --port 8000
 # 入库样本知识库（知识问答前必须执行一次；本地存储为内存态，每次重启 arag 后都要重跑）
 curl -X POST http://127.0.0.1:8100/v1/index/sample
 
-# 重建虚拟环境（仅当 env_sxw_demo/ 不存在）
-python3.12 -m venv env_sxw_demo && env_sxw_demo/bin/pip install -r requirements.txt
+# 重建虚拟环境（仅当 env_sxw_demo/ 与 .venv/ 都不存在；默认新建 .venv/）
+python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
 
 **本仓库没有单元测试**。`py_compile` 是约定的编译校验门（替代单测）：
 
 ```bash
-find agent arag common skillcenter a2a_service -name '*.py' | xargs env_sxw_demo/bin/python -m py_compile
+find agent arag common skillcenter a2a_service -name '*.py' | xargs "$PY" -m py_compile
 ```
 
 端到端评测（真实 LLM 黑盒、解析 SSE）走 `eval/` harness；它依赖**两个 agent 实例**（8000=agent_loop / 8001=plan_execute，因 `ENGINE` 是启动期配置不可单请求切换）：

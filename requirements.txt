@@ -1,5 +1,5 @@
 # sxw_optimization_demo — Python 3.12 依赖清单
-# 安装：env_sxw_demo/bin/pip install -r requirements.txt
+# 安装：.venv/bin/pip install -r requirements.txt（若保留旧路径 env_sxw_demo/ 也兼容）
 # 镜像兜底：-i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
 
 # --- Agent runtime (Google ADK) ---

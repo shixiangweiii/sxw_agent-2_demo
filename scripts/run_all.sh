@@ -4,9 +4,15 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-PY="$ROOT/env_sxw_demo/bin/python"
+if [ -x "$ROOT/env_sxw_demo/bin/python" ]; then
+  PY="$ROOT/env_sxw_demo/bin/python"
+elif [ -x "$ROOT/.venv/bin/python" ]; then
+  PY="$ROOT/.venv/bin/python"
+else
+  echo "缺少虚拟环境：请先创建 .venv（或兼容旧路径 env_sxw_demo）并 pip install -r requirements.txt"
+  exit 1
+fi
 
-[ -x "$PY" ] || { echo "缺少虚拟环境 env_sxw_demo，请先创建并 pip install -r requirements.txt"; exit 1; }
 [ -f .env ] || { echo "缺少 .env，请先 cp .env.example .env 并填入 DASHSCOPE_API_KEY"; exit 1; }
 
 get_env() { grep -E "^$1=" .env | cut -d= -f2 || true; }

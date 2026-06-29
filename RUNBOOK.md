@@ -25,15 +25,15 @@
 
 - macOS / Linux，**Python 3.12**（已用 3.12.10 验证）。
 - 一个 **OpenAI 兼容**的大模型 API Key（默认走阿里云 **DashScope**，模型 `qwen3.7-plus` + 嵌入 `text-embedding-v3`）。
-- 已存在虚拟环境 `env_sxw_demo/`（若没有，见下方"重建虚拟环境"）。
+- 已存在虚拟环境 `.venv/`（兼容旧路径 `env_sxw_demo/`；若没有，见下方"重建虚拟环境"）。
 
-### 重建虚拟环境（仅当 `env_sxw_demo/` 不存在）
+### 重建虚拟环境（仅当 `.venv/` 与 `env_sxw_demo/` 都不存在）
 ```bash
 cd sxw_optimization_demo
-python3.12 -m venv env_sxw_demo
-env_sxw_demo/bin/pip install -r requirements.txt
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 # 网络受限可加清华镜像：
-# env_sxw_demo/bin/pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
+# .venv/bin/pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
 ```
 > `requirements.txt` 已 pin `a2a-sdk>=0.3.4,<0.4`（与 `google-adk 2.3.0` 对齐；**勿装 a2a-sdk 1.x，不兼容**）。
 
@@ -64,11 +64,15 @@ curl -N -X POST http://127.0.0.1:8000/api/v1/chat/demo/stream \
 ## 4. 单独启动各服务（开发调试用）
 
 `run_all.sh` 之外，也可分别起（注意：`agent` 启动时会去拉 skill-center 技能目录、发现 A2A，故**先起下游再起 agent**）。
-所有服务从同目录的 `.env` 读配置；`DASHSCOPE_API_KEY` 也可用环境变量覆盖。
+所有服务从同目录的 `.env` 读配置；`DASHSCOPE_API_KEY` 也可用环境变量覆盖。手动运行时先按规则选择解释器：若 `env_sxw_demo/bin/python` 存在则优先使用，否则使用 `.venv/bin/python`。
 
 ```bash
 cd sxw_optimization_demo
-PY=env_sxw_demo/bin/python
+if [ -x env_sxw_demo/bin/python ]; then
+  PY=env_sxw_demo/bin/python
+else
+  PY=.venv/bin/python
+fi
 
 # 下游
 $PY -m uvicorn a2a_service.main:app   --port 8300   # A2A（需 key）
@@ -143,7 +147,9 @@ curl -X POST http://127.0.0.1:8100/v1/index/sample
 - `ENGINE=agent_loop`（默认）：**ReAct 单循环**，模型迭代调工具直到产出；带计划续推、工具异常喂回、force-summary、硬熔断、子代理/动态工具发现。
 - `ENGINE=plan_execute`：**先规划后执行**，decision planner 出计划 → execution planner 逐步执行；执行相同样带**工具异常喂回（ToolErrorFeedback）+ 框架硬熔断**，但**无**计划续推 / force-summary（那是 agent-loop 专属）。
 ```bash
-ENGINE=plan_execute env_sxw_demo/bin/python -m uvicorn agent.main:app --port 8000
+PY=env_sxw_demo/bin/python
+[ -x "$PY" ] || PY=.venv/bin/python
+ENGINE=plan_execute "$PY" -m uvicorn agent.main:app --port 8000
 ```
 > 两引擎共享同一套工具/检索/技能/citation 下游，以及 ToolErrorFeedback 插件与 LiteLlm 加固；切换只影响"如何编排"。
 
@@ -234,7 +240,9 @@ roadmap/    设计依据与里程碑（01–08）
 ### 常用开发动作
 - **编译校验（必做，替代单测）**：
   ```bash
-  find agent arag common skillcenter a2a_service -name '*.py' | xargs env_sxw_demo/bin/python -m py_compile
+  PY=env_sxw_demo/bin/python
+  [ -x "$PY" ] || PY=.venv/bin/python
+  find agent arag common skillcenter a2a_service -name '*.py' | xargs "$PY" -m py_compile
   ```
 - **加一个通用工具**：在 `agent/tools/builtin_tools.py` 写带类型注解 + docstring 的函数 → 加入 `build_builtin_tools()`（ADK 自动转 FunctionTool）。
 - **加一个 skill-center 技能**：在 `skillcenter/skills.py` 的 `SKILL_DEFS` 加定义 + 在 `execute_sync`/`execute_streaming` 加分支。

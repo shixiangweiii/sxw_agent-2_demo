@@ -6,7 +6,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 : "${DASHSCOPE_API_KEY:?需先 export DASHSCOPE_API_KEY（仅环境变量，勿写文件）}"
-PY=env_sxw_demo/bin/python
+if [ -x env_sxw_demo/bin/python ]; then
+  PY=env_sxw_demo/bin/python
+elif [ -x .venv/bin/python ]; then
+  PY=.venv/bin/python
+else
+  echo "缺少虚拟环境：请先创建 .venv（或兼容旧路径 env_sxw_demo）并 pip install -r requirements.txt"
+  exit 1
+fi
 LOOP_URL="${LOOP_URL:-http://127.0.0.1:8000}"
 PLAN_URL="${PLAN_URL:-http://127.0.0.1:8001}"
 DIR="eval/reports/$(date +%Y%m%d-%H%M%S)"
