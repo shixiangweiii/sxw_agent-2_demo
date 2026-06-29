@@ -53,6 +53,8 @@ bash scripts/run_all.sh
 ```
 看到 `[run_all] seeded` 与 4 行 `... ready` 即全部就绪。**Ctrl-C 一并退出**。
 
+浏览器界面：`http://127.0.0.1:8000/chat-ui/`。
+
 另开终端验证：
 ```bash
 curl -N -X POST http://127.0.0.1:8000/api/v1/chat/demo/stream \
@@ -82,7 +84,7 @@ $PY -m uvicorn arag.main:app          --port 8100   # RAG（需 key）
 # 入口（最后起）
 $PY -m uvicorn agent.main:app         --port 8000   # Agent 运行时（需 key）
 
-# 入库样本知识库（知识问答前需执行一次）
+# 入库样本知识库（首次运行或清空 local_storage/embedding 后执行）
 curl -X POST http://127.0.0.1:8100/v1/index/sample
 ```
 健康检查：`GET /healthz`（agent/arag/skill-center）；a2a_service 用 `GET /.well-known/agent-card.json`。
@@ -121,7 +123,8 @@ curl -X POST http://127.0.0.1:8100/v1/index/sample
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `ARAG_PORT` | `8100` | 端口 |
-| `VECTOR_BACKEND` | `local` | 向量库：`local`(numpy 余弦) \| `pgvector`…（仅 local 已实现） |
+| `VECTOR_BACKEND` | `local` | 向量库：`local`(numpy 余弦 + 本地持久化) \| `pgvector`…（仅 local 已实现） |
+| `EMBEDDING_STORAGE_DIR` | `local_storage/embedding` | local 向量与 chunk 元数据目录（`manifest.json`/`chunks.json`/`vectors.npy`） |
 | `FULLTEXT_BACKEND` | `local` | 全文：`local`(BM25+jieba) \| `es`…（仅 local 已实现） |
 | `GRAPH_BACKEND` | `local` | 图库：`local`(内存) \| `neo4j`…（**仅端口占位，未接检索流**） |
 
@@ -163,8 +166,9 @@ ENGINE=plan_execute "$PY" -m uvicorn agent.main:app --port 8000
 - `SANDBOX_PROVIDER=agentbay`：AgentBay 云沙箱**桩**，调用即返回 `SandboxUnavailableError`（演示 provider 抽象；生产换 wuying-agentbay-sdk）。
 > ⚠️ LocalSandbox 仅演示用，**非生产隔离**。
 
-### 6.4 RAG 存储后端 —— `VECTOR_BACKEND` / `FULLTEXT_BACKEND` / `GRAPH_BACKEND`
-- 端口-适配器设计；当前仅 `local` 实现（numpy 余弦 / BM25+jieba / 内存图）。`pgvector`/`es`/`neo4j` 为预留端口（生产可零改业务接入）。
+### 6.4 RAG 存储后端 —— `VECTOR_BACKEND` / `EMBEDDING_STORAGE_DIR` / `FULLTEXT_BACKEND` / `GRAPH_BACKEND`
+- 端口-适配器设计；当前仅 `local` 实现。向量与 chunk 元数据持久化在 `EMBEDDING_STORAGE_DIR`（默认 `local_storage/embedding`），arag 重启后会自动加载并用 chunks 重建 BM25；`pgvector`/`es`/`neo4j` 为预留端口（生产可零改业务接入）。
+- `local_storage/` 是本地运行态数据目录，已被 `.gitignore` 忽略。重复入库同一 `chunk_id` 会覆盖旧 chunk 和向量，避免重复 seed 导致索引膨胀。
 
 ### 6.5 agent-loop 熔断 —— `MAX_LOOP_ITERS`
 - 软收尾在第 `MAX_LOOP_ITERS` 轮注入 force-summary；框架级硬熔断 = `MAX_LOOP_ITERS + 2`（`RunConfig.max_llm_calls`）。调小可观察熔断行为。
@@ -214,6 +218,8 @@ curl -N -X POST $A -F 'query=用A2A数学专家精确计算 23*47' -F user_id=u1
 | 服务 | 方法 路径 | 说明 |
 |---|---|---|
 | agent | `POST /api/v1/chat/{agent_uuid}/stream` | SSE 对话入口 |
+| agent | `GET /chat-ui/` | 浏览器 Web Chat 界面 |
+| agent | `POST /api/v1/documents/index` | 文档入库代理（Web UI → agent → arag） |
 | agent | `GET /healthz` | 存活 + 当前 engine/model |
 | arag | `POST /v1/index/sample` · `POST /v1/index` | 入库样本 / 自定义文档 |
 | arag | `POST /v1/retrieve` · `POST /v1/rag` | 混合召回 / 端到端问答 |
@@ -258,7 +264,7 @@ roadmap/    设计依据与里程碑（01–08）
 |---|---|
 | 启动报缺 `.env` / key | `cp .env.example .env` 并填 `DASHSCOPE_API_KEY` |
 | 调用返回 `error` / 模型不应答 | 确认 key 有效、`LLM_MODEL`/`LLM_BASE_URL` 正确；看 agent 日志 |
-| 知识问答无引用/答不上 | 先 `curl -X POST :8100/v1/index/sample` 入库；arag 未起则降级（日志 `[QaRetrieve] degraded`） |
+| 知识问答无引用/答不上 | 首次运行或清空 `local_storage/embedding` 后先 `curl -X POST :8100/v1/index/sample` 入库；arag 未起则降级（日志 `[QaRetrieve] degraded`） |
 | 端口被占用 | 改 `.env` 对应 `*_PORT`，或 `lsof -i:8000` 杀进程 |
 | `a2a` 相关导入/调用失败 | 确认 `a2a-sdk` 为 0.3.x（`pip show a2a-sdk`）；**1.x 与 adk 2.3.0 不兼容** |
 | 用 `agentbay` 沙箱报错 | 预期行为（云桩未实现）；用 `SANDBOX_PROVIDER=local` |

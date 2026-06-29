@@ -6,11 +6,15 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from agent.api.chat import router as chat_router
+from agent.api.documents import router as documents_router
 from agent.config import get_settings
 from agent.context import (
     attach_a2a_agents,
@@ -23,6 +27,7 @@ from common.obs import TraceMiddleware, get_logger, log_kv, setup_logging
 settings = get_settings()
 setup_logging(settings.log_level)
 logger = get_logger("agent.main")
+WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
 
 @asynccontextmanager
@@ -42,6 +47,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="sxw-agent-runtime", version="0.1.0", lifespan=lifespan)
 app.add_middleware(TraceMiddleware, service="agent")
 app.include_router(chat_router)
+app.include_router(documents_router)
+app.mount("/chat-ui", StaticFiles(directory=WEB_DIR, html=True), name="chat-ui")
+
+
+@app.get("/")
+async def root() -> RedirectResponse:
+    """Open the browser chat UI by default."""
+    return RedirectResponse(url="/chat-ui/")
 
 
 @app.get("/healthz")

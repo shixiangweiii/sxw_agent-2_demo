@@ -25,7 +25,7 @@
 - `agent/llm/hardened_litellm.py`（先实现基础 LiteLlm 接通，加固原语留 M3 填充骨架）
 - `agent/observability/{trace_middleware.py,logging.py}`（结构化 JSON + `[Tag]` + trace_id）
 - `arag/store/{base.py,vector_store.py,fulltext_index.py,graph_store.py,factory.py}`
-  - `VectorStore` ABC + `LocalVectorStore`（numpy 余弦）
+  - `VectorStore` ABC + `LocalVectorStore`（numpy 余弦 + 本地持久化）
   - `FullTextIndex` ABC + `LocalBM25Index`（rank_bm25 + jieba）
   - `GraphStore` ABC + `LocalGraphStore`（内存邻接表，**仅端口、方法占位**）
   - `factory.py`：按 `*_BACKEND` env 返回实现

@@ -28,7 +28,7 @@ $PY -m uvicorn skillcenter.main:app --port 8200
 $PY -m uvicorn arag.main:app        --port 8100
 $PY -m uvicorn agent.main:app       --port 8000
 
-# 入库样本知识库（知识问答前必须执行一次；本地存储为内存态，每次重启 arag 后都要重跑）
+# 入库样本知识库（首次运行或清空 local_storage/embedding 后执行；重复入库按 chunk_id 覆盖）
 curl -X POST http://127.0.0.1:8100/v1/index/sample
 
 # 重建虚拟环境（仅当 env_sxw_demo/ 与 .venv/ 都不存在；默认新建 .venv/）
@@ -83,7 +83,7 @@ $PY -m eval.harness.report --out eval/reports/<ts>      # 聚合出 summary.md
 - **A2A 远程子代理**（`agent/a2a/loader.py` + `a2a_service/`）：ADK 原生 A2A，经 agent-card 发现 + JSON-RPC 委派；skill-center 作注册表。
 
 ### RAG（arag）
-`query → rewrite → 向量(numpy 余弦)+全文(BM25/jieba) 双路 → RRF 互惠排名融合 → 低价值过滤`。入库链路 `parse → image caption(视觉) → chunk → embed → store`。存储是**端口-适配器**设计（`arag/store/`：VectorStore / FullTextIndex / GraphStore），当前仅 `local` 内存实现——**重启即清空**，所以每次重启 arag 都要重新 `POST /v1/index/sample`。
+`query → rewrite → 向量(numpy 余弦)+全文(BM25/jieba) 双路 → RRF 互惠排名融合 → 低价值过滤`。入库链路 `parse → image caption(视觉) → chunk → embed → store`。存储是**端口-适配器**设计（`arag/store/`：VectorStore / FullTextIndex / GraphStore）。当前 `local` 向量库会把 embedding 与 chunk 元数据持久化到 `local_storage/embedding/`，arag 重启后自动加载并用 chunks 重建 BM25；GraphStore 仍是内存端口占位。
 
 ### 流式与可观测
 统一 SSE 事件：`text · tool_call · tool_result · plan_step · citation · skill_event · done · error`。`common/obs.py` 提供 `trace_id` 全链路透传 + 结构化 JSON 日志；日志按 `[Tag]` 前缀检索（`[QaRetrieve]` `[SkillInvoke]` `[ClaudeSkill]` `[A2ALoad]` `[LoopControl]` …）。`common/skill_contract.py` 是技能线协议契约。

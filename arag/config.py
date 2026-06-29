@@ -21,6 +21,7 @@ class AragSettings(BaseSettings):
     vector_backend: str = "local"         # local | pgvector ...
     fulltext_backend: str = "local"       # local | es ...
     graph_backend: str = "local"          # local | neo4j ...（仅端口，未接检索流）
+    embedding_storage_dir: str = "local_storage/embedding"
 
     log_level: str = "INFO"
 

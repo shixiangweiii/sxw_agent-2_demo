@@ -48,7 +48,7 @@
 | **A2A 远程子代理** | ADK 原生 A2A（`a2a-sdk` + `RemoteA2aAgent` 客户端 + `to_a2a` 服务端）；`a2a_service`(:8300) 暴露 agent-card + JSON-RPC，skill-center 作注册表，agent 经 agent-card 发现 + 远程委派 |
 | **多模态** | 图片输入（ADK artifact + 视觉模型）；文档图片 caption 入库可检索 |
 | **流式 SSE** | `text / tool_call / tool_result / plan_step / citation / skill_event / done` 事件 |
-| **依赖倒置** | 存储中间件抽象成端口（本地实现起步，可换 pgvector/ES/Neo4j） |
+| **依赖倒置** | 存储中间件抽象成端口（local 向量持久化起步，可换 pgvector/ES/Neo4j） |
 | **可观测性** | trace_id 全链路 + 结构化 JSON 日志 + `[Tag]` 埋点 |
 
 ---
@@ -73,8 +73,12 @@ cp .env.example .env
 #    .venv/bin/pip install -r requirements.txt
 
 # 3) 一键启动 a2a_service(:8300)+skill-center(:8200)+arag(:8100)+agent(:8000)，自动等待健康检查并入库样本
+#    样本和 Web UI 上传文档的 embedding 默认持久化到 local_storage/embedding/
 bash scripts/run_all.sh
 ```
+
+打开浏览器访问 `http://127.0.0.1:8000/chat-ui/` 可使用内置 Web Chat 界面，支持文本对话、图片提问，以及 `txt/md/pdf/docx` 文档入库后问答。
+arag 重启后会自动加载 `local_storage/embedding/` 中的向量与 chunks，并重建 BM25；清空该目录后再重新执行样本入库。
 
 另开一个终端：
 
@@ -113,6 +117,8 @@ curl -N -X POST http://127.0.0.1:8000/api/v1/chat/demo/stream \
 | 服务 | 方法 路径 | 说明 |
 |---|---|---|
 | agent | `POST /api/v1/chat/{agent_uuid}/stream` | SSE 对话（multipart：query / user_id / session_id / image） |
+| agent | `GET /chat-ui/` | 浏览器 Web Chat 界面 |
+| agent | `POST /api/v1/documents/index` | Web Chat 文档入库代理（转发到 arag `/v1/index`） |
 | agent | `GET /healthz` | 存活探针 |
 | arag | `POST /v1/retrieve` | 混合召回（agent 调它） |
 | arag | `POST /v1/rag` | arag 独立端到端问答 |

@@ -65,7 +65,7 @@ sxw_optimization_demo/
     │   └── image.py               # 多模态：图片 caption（qwen3.7-plus 视觉）
     ├── store/                     # ★ 存储端口层（依赖倒置）
     │   ├── base.py                # SearchHit / 通用类型
-    │   ├── vector_store.py        # VectorStore ABC + LocalVectorStore(numpy 余弦)
+    │   ├── vector_store.py        # VectorStore ABC + LocalVectorStore(numpy 余弦 + 本地持久化)
     │   ├── fulltext_index.py      # FullTextIndex ABC + LocalBM25Index(BM25 + jieba)
     │   ├── graph_store.py         # GraphStore ABC + LocalGraphStore(内存邻接表，仅端口)
     │   └── factory.py             # *_BACKEND=local|... env 选型

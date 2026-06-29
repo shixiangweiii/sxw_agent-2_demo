@@ -32,7 +32,7 @@ class FullTextIndex(ABC):
 
 
 class LocalBM25Index(FullTextIndex):
-    """内存 BM25：每次 add 后重建索引（demo 量级足够）。"""
+    """内存 BM25：按 chunk_id upsert，每次 add 后重建索引（demo 量级足够）。"""
 
     def __init__(self) -> None:
         self._chunks: list[Chunk] = []
@@ -40,9 +40,16 @@ class LocalBM25Index(FullTextIndex):
         self._bm25: Optional[BM25Okapi] = None
 
     async def add(self, chunks: list[Chunk]) -> None:
-        for c in chunks:
-            self._chunks.append(c)
-            self._tokens.append(_tokenize(c.content))
+        index_by_chunk_id = {chunk.chunk_id: i for i, chunk in enumerate(self._chunks)}
+        for chunk in chunks:
+            existing_idx = index_by_chunk_id.get(chunk.chunk_id)
+            if existing_idx is None:
+                index_by_chunk_id[chunk.chunk_id] = len(self._chunks)
+                self._chunks.append(chunk)
+                self._tokens.append(_tokenize(chunk.content))
+            else:
+                self._chunks[existing_idx] = chunk
+                self._tokens[existing_idx] = _tokenize(chunk.content)
         self._bm25 = BM25Okapi(self._tokens) if self._tokens else None
 
     async def search(self, query: str, top_k: int = 10) -> list[Chunk]:

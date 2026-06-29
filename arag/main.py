@@ -24,7 +24,7 @@ logger = get_logger("arag.main")
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 按 *_BACKEND 选型装配存储端口 + 检索流水线，挂到 app.state.ctx 供路由使用。
-    app.state.ctx = build_context(settings)
+    app.state.ctx = await build_context(settings)
     log_kv(logger, logging.INFO, "Boot", "arag service starting",
            vector=settings.vector_backend, fulltext=settings.fulltext_backend,
            graph=settings.graph_backend, port=settings.arag_port)

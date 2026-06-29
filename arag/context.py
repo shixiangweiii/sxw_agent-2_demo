@@ -1,6 +1,7 @@
 """arag 运行时上下文：装配全部组件（依赖注入容器）。"""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from arag.components.chunker import Chunker
@@ -15,6 +16,9 @@ from arag.store.factory import build_fulltext_index, build_graph_store, build_ve
 from arag.store.fulltext_index import FullTextIndex
 from arag.store.graph_store import GraphStore
 from arag.store.vector_store import VectorStore
+from common.obs import get_logger, log_kv
+
+logger = get_logger("arag.context")
 
 
 @dataclass
@@ -32,10 +36,20 @@ class AragContext:
     image_processor: ImageProcessor
 
 
-def build_context(settings: AragSettings) -> AragContext:
+async def build_context(settings: AragSettings) -> AragContext:
     vector_store = build_vector_store(settings)
     fulltext_index = build_fulltext_index(settings)
     graph_store = build_graph_store(settings)
+    persisted_chunks = await vector_store.all_chunks()
+    if persisted_chunks:
+        await fulltext_index.add(persisted_chunks)
+        log_kv(
+            logger,
+            logging.INFO,
+            "Boot",
+            "rebuilt fulltext index from persisted embeddings",
+            chunks=len(persisted_chunks),
+        )
     embedder = Embedder(settings)
     chat = ChatClient(settings)
     chunker = Chunker()

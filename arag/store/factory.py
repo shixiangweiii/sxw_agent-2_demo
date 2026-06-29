@@ -9,7 +9,7 @@ from arag.store.vector_store import LocalVectorStore, VectorStore
 
 def build_vector_store(settings: AragSettings) -> VectorStore:
     if settings.vector_backend == "local":
-        return LocalVectorStore()
+        return LocalVectorStore(settings.embedding_storage_dir)
     # TODO: pgvector / milvus 适配
     raise ValueError(f"unsupported VECTOR_BACKEND={settings.vector_backend}")
 

@@ -13,6 +13,7 @@ __pycache__/
 .mypy_cache/
 
 # 本地数据 / 索引产物
+local_storage/
 *.log
 .DS_Store
 

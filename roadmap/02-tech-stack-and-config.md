@@ -62,7 +62,8 @@ def build_llm() -> LiteLlm:
 | `ARAG_PORT` | `8100` | arag 服务端口 |
 | `ARAG_BASE_URL` | `http://127.0.0.1:8100` | agent→arag 调用地址 |
 | `ARAG_TIMEOUT_MS` | `8000` | 检索超时（超时降级 chat-mode） |
-| `VECTOR_BACKEND` | `local` | `local`(numpy) \| `pgvector`… |
+| `VECTOR_BACKEND` | `local` | `local`(numpy + 本地持久化) \| `pgvector`… |
+| `EMBEDDING_STORAGE_DIR` | `local_storage/embedding` | local 向量与 chunk 元数据目录 |
 | `FULLTEXT_BACKEND` | `local` | `local`(bm25) \| `es`… |
 | `GRAPH_BACKEND` | `local` | `local`(memory) \| `neo4j`（仅端口，未接流） |
 | `MAX_LOOP_ITERS` | `8` | agent-loop 最大轮次 |
@@ -91,6 +92,7 @@ ARAG_TIMEOUT_MS=8000
 
 # === Storage backends (ports) ===
 VECTOR_BACKEND=local
+EMBEDDING_STORAGE_DIR=local_storage/embedding
 FULLTEXT_BACKEND=local
 GRAPH_BACKEND=local
 
