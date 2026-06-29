@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>sxw Agent Chat</title>
+    <link rel="stylesheet" href="/chat-ui/styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="side-panel" aria-label="会话设置">
+        <div class="brand">
+          <div class="brand-mark">AI</div>
+          <div>
+            <h1>Agent Chat</h1>
+            <p id="healthStatus">连接中...</p>
+          </div>
+        </div>
+
+        <label class="field">
+          <span>Agent</span>
+          <input id="agentUuid" type="text" value="demo" autocomplete="off">
+        </label>
+        <label class="field">
+          <span>User</span>
+          <input id="userId" type="text" value="web-user" autocomplete="off">
+        </label>
+        <label class="field">
+          <span>Session</span>
+          <div class="inline-field">
+            <input id="sessionId" type="text" autocomplete="off">
+            <button id="newSessionBtn" class="icon-button" type="button" title="新会话" aria-label="新会话">↻</button>
+          </div>
+        </label>
+
+        <section class="upload-section" aria-label="附件">
+          <label class="file-button">
+            <input id="documentInput" type="file" multiple accept=".txt,.md,.markdown,.pdf,.docx,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document">
+            <span>选择文档</span>
+          </label>
+          <label class="file-button">
+            <input id="imageInput" type="file" accept="image/*">
+            <span>选择图片</span>
+          </label>
+          <div id="attachmentList" class="attachment-list" aria-live="polite"></div>
+        </section>
+      </aside>
+
+      <section class="chat-panel" aria-label="聊天">
+        <div id="messages" class="messages" aria-live="polite"></div>
+        <form id="chatForm" class="composer">
+          <textarea id="queryInput" rows="3" placeholder="输入问题，或选择文档/图片后发送" autocomplete="off"></textarea>
+          <div class="composer-actions">
+            <span id="composerStatus" class="composer-status"></span>
+            <button id="stopBtn" class="secondary-button" type="button" disabled>停止</button>
+            <button id="sendBtn" class="primary-button" type="submit">发送</button>
+          </div>
+        </form>
+      </section>
+    </main>
+
+    <script type="module" src="/chat-ui/app.js"></script>
+  </body>
+</html>
