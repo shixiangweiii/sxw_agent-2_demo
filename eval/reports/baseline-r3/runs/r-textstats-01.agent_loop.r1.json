@@ -1,0 +1,164 @@
+{
+  "case_id": "r-textstats-01",
+  "engine": "agent_loop",
+  "text": "找到了 `text_stats` 工具，现在用它来统计 'hello world foo' 的词数。\n\n文本 'hello world foo' 的词数是 **3**。",
+  "tool_calls": [
+    [
+      "tool_search",
+      {
+        "query": "文本统计"
+      }
+    ],
+    [
+      "text_stats",
+      {
+        "text": "hello world foo"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "tool_search",
+      {
+        "query": "文本统计",
+        "available_tools": {
+          "translate": "把文本翻译到目标语言（参数 text, target_lang）",
+          "text_stats": "统计文本的字符数与词数（参数 text）"
+        },
+        "note": "可直接按工具名调用上述工具完成任务。"
+      }
+    ],
+    [
+      "text_stats",
+      {
+        "chars": 15,
+        "words": 3
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 2218.287915980909,
+  "total_ms": 4136.392374988645,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "tool_search",
+        "args": {
+          "query": "文本统计"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "tool_search",
+        "response": {
+          "query": "文本统计",
+          "available_tools": {
+            "translate": "把文本翻译到目标语言（参数 text, target_lang）",
+            "text_stats": "统计文本的字符数与词数（参数 text）"
+          },
+          "note": "可直接按工具名调用上述工具完成任务。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "找到了"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " `text_stats`"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 工具，现在"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "用它来"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "统计 'hello world"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " foo' 的词"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "数。\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "text_stats",
+        "args": {
+          "text": "hello world foo"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "text_stats",
+        "response": {
+          "chars": 15,
+          "words": 3
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "文本"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 'hello world foo"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "' 的词数是"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **3**。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

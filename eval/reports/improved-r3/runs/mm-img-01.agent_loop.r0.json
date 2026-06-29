@@ -1,0 +1,48 @@
+{
+  "case_id": "mm-img-01",
+  "engine": "agent_loop",
+  "text": "夕阳下的海滩上，一位穿着格子衬衫的女子正坐着与一只金毛犬握手互动。",
+  "tool_calls": [],
+  "tool_results": [],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 2194.0104580135085,
+  "total_ms": 2514.329124998767,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "夕阳"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "下的海滩上，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "一位穿着格子衬衫的女子正坐着与一只金毛"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "犬握手互动。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

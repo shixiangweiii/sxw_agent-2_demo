@@ -1,0 +1,364 @@
+{
+  "case_id": "rb-arag-down-01",
+  "engine": "plan_execute",
+  "text": "混合召回 RAG 通常用到以下两路检索机制：\n\n1. **关键词检索**（Keyword Search / BM25）：基于文本匹配，通过词频、逆文档频率等统计方法找出与查询关键词相关的文档，擅长精确匹配专有名词或特定术语。\n\n2. **向量检索**（Vector Search / Dense Retrieval）：将文本转化为向量嵌入（embedding），通过计算语义相似度（如余弦相似度）来查找语义上相关的文档，擅长捕捉语义层面的相关性。\n\n这两路结果通常会进行融合（如加权排序、RRF 重排序等），以兼顾精确匹配和语义理解，提升召回效果。",
+  "tool_calls": [
+    [
+      "knowledge_search",
+      {
+        "query": "混合召回 RAG 两路检索机制 关键词检索 向量检索"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "knowledge_search",
+      {
+        "hits": [],
+        "count": 0,
+        "degraded": true,
+        "note": "知识检索暂不可用，请基于常识直接回答，不要编造引用。"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 2,
+      "title": "识别混合召回 RAG 中的两路检索机制",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "title": "输出关键词检索和向量检索",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 3638.744249998126,
+  "total_ms": 6121.080583019648,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 2,
+        "title": "识别混合召回 RAG 中的两路检索机制",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "title": "输出关键词检索和向量检索",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "knowledge_search",
+        "args": {
+          "query": "混合召回 RAG 两路检索机制 关键词检索 向量检索"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "knowledge_search",
+        "response": {
+          "hits": [],
+          "count": 0,
+          "degraded": true,
+          "note": "知识检索暂不可用，请基于常识直接回答，不要编造引用。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "混合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "召回 RAG "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "通常用到"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "以下两路检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "机制：\n\n1"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ". **关键词检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**（Keyword Search"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " /"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " BM25）"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：基于文本匹配"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "通过词频、"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "逆"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "文档频率等统计"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "方法找出与查询"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "关键词"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "相关的文档，擅长"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "精确匹配专有名词"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "或"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "特定术语。\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "2. **向量"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索**（Vector"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Search / Dense Retrie"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "val）："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "将文本转化为向量"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "嵌入（embedding），"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "通过计算"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "语义相似度（如"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "余弦相似度）"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "来查找语义上"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "相关的文档，擅长"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "捕捉语义层面的相关性"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n这两路"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "通常会进行融合（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "如加权排序、"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "RR"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "F 重排序"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "等），以"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "兼顾精确匹配和"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "语义理解，提升"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "召回"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "效果。"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "status": "done"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

@@ -1,0 +1,120 @@
+{
+  "case_id": "r-chitchat-neg-01",
+  "engine": "agent_loop",
+  "text": "你好呀！听到你心情不错，我也跟着开心起来了～ 😊\n\n今天天气怎么样？要不要我帮你查一下所在城市的天气，看看是不是好天气衬托了好心情？或者你有什么想聊的话题、想做的事情，都可以跟我说说哦！",
+  "tool_calls": [],
+  "tool_results": [],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 810.5638340348378,
+  "total_ms": 1756.4266250119545,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "你好"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "呀！听到"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "你心情不错，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我也跟着开心起来了"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "～ 😊\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "今天"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "天气怎么样？要不要"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我帮你查一下"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "所在"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "城市的天气，看看"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "是不是好天气衬托"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "了好心情？或者"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "你有什么想聊的话题"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "、想做的事情，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "都可以"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "跟我说说哦！"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

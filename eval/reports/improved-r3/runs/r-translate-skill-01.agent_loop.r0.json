@@ -1,0 +1,240 @@
+{
+  "case_id": "r-translate-skill-01",
+  "engine": "agent_loop",
+  "text": "我将使用 deep_translate 工具将\"你好世界\"翻译成英文。\n\n根据 deep_translate 工具的返回结果，\"你好世界\"翻译成英文的结果为：\n\n**[en] 你好世界**\n\n这是工具返回的翻译结果（看起来是演示环境的占位格式输出）。",
+  "tool_calls": [
+    [
+      "deep_translate",
+      {
+        "text": "你好世界",
+        "target_lang": "en"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "deep_translate",
+      {
+        "skill": "deep_translate",
+        "skipSummarization": false,
+        "content": "[en] 你好世界"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": true,
+      "isPartial": true,
+      "data": "正在分析源语言与语境…"
+    },
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": false,
+      "isPartial": true,
+      "data": "[en] 你"
+    },
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": false,
+      "isPartial": true,
+      "data": "好世界"
+    }
+  ],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 1263.2698750239797,
+  "total_ms": 4027.4024170357734,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "我将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "使用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " deep_translate 工具"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "将\"你好世界"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\"翻译成英文。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "deep_translate",
+        "args": {
+          "text": "你好世界",
+          "target_lang": "en"
+        }
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": true,
+        "isPartial": true,
+        "data": "正在分析源语言与语境…"
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": false,
+        "isPartial": true,
+        "data": "[en] 你"
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": false,
+        "isPartial": true,
+        "data": "好世界"
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "deep_translate",
+        "response": {
+          "skill": "deep_translate",
+          "skipSummarization": false,
+          "content": "[en] 你好世界"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "根据"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " deep"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "_translate 工具的返回"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果，\""
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "你好世界\"翻译成"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "英文的结果为："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**[en]"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 你好世界**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n这是工具返回"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的翻译"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果（看起来是"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "演示环境的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "占位格式输出"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

@@ -1,0 +1,197 @@
+{
+  "case_id": "rb-quota-01",
+  "engine": "plan_execute",
+  "text": "我需要先了解您想要翻译的具体文本内容。您提供的 \"__quota__\" 看起来像是一个占位符或变量名，而不是实际的待翻译文本。\n\n请提供您需要翻译的具体文本内容，以及目标语言（如英语、日语、法语等），我将使用深度翻译技能为您进行翻译。",
+  "tool_calls": [],
+  "tool_results": [],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 3,
+      "title": "分析原文的语境、文化背景及隐含意义",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 3,
+      "title": "重构译文以传达深层含义而非仅字面意思",
+      "status": "planned"
+    },
+    {
+      "step": 3,
+      "total": 3,
+      "title": "润色译文确保符合目标语言的表达习惯",
+      "status": "planned"
+    },
+    {
+      "step": 3,
+      "total": 3,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 3239.2197919543833,
+  "total_ms": 4348.153957980685,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 3,
+        "title": "分析原文的语境、文化背景及隐含意义",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 3,
+        "title": "重构译文以传达深层含义而非仅字面意思",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 3,
+        "total": 3,
+        "title": "润色译文确保符合目标语言的表达习惯",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我需要"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "先了解"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "您想要翻译的具体"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "文本内容。您"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "提供的 \"__quota__"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\" "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "看起来像是一个占"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "位符或变量"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "名，而不是实际的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "待翻译文本。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n请提供您需要"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译的具体文本内容"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，以及"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "目标语言（如"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "英语、日语、"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "法语等），"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我将使用深度翻译"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "技能为您"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "进行翻译。"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 3,
+        "total": 3,
+        "status": "done"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

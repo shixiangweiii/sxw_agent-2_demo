@@ -1,0 +1,10 @@
+[project]
+name = "sxw-optimization-demo"
+version = "0.1.0"
+description = "精简复刻：生产级 Agent 运行时（规划+推理引擎）+ 混合召回 RAG，基于 Google ADK"
+requires-python = ">=3.12"
+# 运行依赖见 requirements.txt（标准 pip 安装到 env_sxw_demo/）
+
+[tool.pyright]
+typeCheckingMode = "basic"
+pythonVersion = "3.12"

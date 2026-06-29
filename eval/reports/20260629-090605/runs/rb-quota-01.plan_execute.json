@@ -1,0 +1,451 @@
+{
+  "case_id": "rb-quota-01",
+  "engine": "plan_execute",
+  "text": "我需要将文本 \"__quota__\" 翻译成目标语言。但您没有指定目标语言，让我先进行翻译，默认使用英语作为目标语言。\n\n看起来深度翻译技能目前无法使用（余额不足）。\n\n不过，\"__quota__\" 这个文本本身是一个占位符或变量名，通常表示\"配额\"、\"限额\"或\"定额\"的意思。在英语中，\"quota\" 本身就是英文单词，意思是：\n\n- **配额**：分配给某人或某组织的固定数量\n- **限额**：允许的最大数量\n- **定额**：规定的标准数量\n\n如果您需要将其翻译成其他语言，或者这段文本实际上应该是其他内容，请告诉我：\n1. 目标语言是什么？\n2. 或者提供需要翻译的实际文本内容",
+  "tool_calls": [
+    [
+      "deep_translate",
+      {
+        "target_lang": "en",
+        "text": "__quota__"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "deep_translate",
+      {
+        "isError": true,
+        "errorCode": "BENEFIT_NOT_ENOUGH",
+        "content": "技能算粒余额不足，请联系管理员。"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": true,
+      "isPartial": true,
+      "data": "正在分析源语言与语境…"
+    }
+  ],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 3,
+      "title": "分析原文的语境、文化背景及隐含意义",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 3,
+      "title": "重构译文以传达深层含义而非仅字面意思",
+      "status": "planned"
+    },
+    {
+      "step": 3,
+      "total": 3,
+      "title": "润色译文确保目标语言的自然流畅与风格一致",
+      "status": "planned"
+    },
+    {
+      "step": 3,
+      "total": 3,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 2918.58024999965,
+  "total_ms": 7301.901583035942,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 3,
+        "title": "分析原文的语境、文化背景及隐含意义",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 3,
+        "title": "重构译文以传达深层含义而非仅字面意思",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 3,
+        "total": 3,
+        "title": "润色译文确保目标语言的自然流畅与风格一致",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我需要"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "文本 \"__"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "quota__\" "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译成目标语言。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "但您没有指定"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "目标语言，让我"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "先进行翻译，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "默认使用英语作为"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "目标语言。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "deep_translate",
+        "args": {
+          "target_lang": "en",
+          "text": "__quota__"
+        }
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": true,
+        "isPartial": true,
+        "data": "正在分析源语言与语境…"
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "deep_translate",
+        "response": {
+          "isError": true,
+          "errorCode": "BENEFIT_NOT_ENOUGH",
+          "content": "技能算粒余额不足，请联系管理员。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "看起来"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "深度翻译技能目前"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "无法使用（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "余额不足）。\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "不过，\"__"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "quota__\" "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "这个文本本身是一个"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "占"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "位符或变量"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "名，通常表示"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\"配额\"、"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\"限额\"或"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\"定额\"的意思"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。在"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "英语中，\""
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "quota"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\" 本身就是英文"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "单词，意思是："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n- **配额"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**：分配"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "给某人或某"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "组织的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "固定数量\n-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **限额**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：允许的最大数量"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **定额**："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "规定的标准数量\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "如果您"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "需要将其翻译成其他"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "语言，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "或者这段文本实际上"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "应该是其他内容，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "请"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "告诉我：\n1"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ". "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "目标语言是什么？"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n2. "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "或者提供需要翻译"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的实际"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "文本内容"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 3,
+        "total": 3,
+        "status": "done"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

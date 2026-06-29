@@ -1,0 +1,374 @@
+{
+  "case_id": "nf-oot-01",
+  "engine": "agent_loop",
+  "text": "我需要再次查询企业知识库，尝试用不同的关键词来搜索2025年第三季度营收相关信息。\n\n检索到的资料与2025年第三季度营收无关，这些资料是关于RAG流水线、Agent-Loop推理引擎和Google ADK的技术文档。\n\n未能检索到知识库资料，以下基于常识\n\n根据查询结果，企业知识库中没有关于贵公司2025年第三季度营收的具体数据。检索返回的资料都是技术架构相关的文档，不包含财务营收信息。\n\n因此我无法提供贵公司2025年第三季度的具体营收数据（亿元）。建议您：\n1. 查阅公司内部的财务报表或财务报告\n2. 联系财务部门获取准确的营收数据\n3. 如果这是公开上市公司，可以查看公司在证券交易所披露的季度报告",
+  "tool_calls": [
+    [
+      "knowledge_search",
+      {
+        "query": "2025 Q3 营收 亿元"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "knowledge_search",
+      {
+        "hits": [
+          {
+            "n": 1,
+            "title": "混合召回 RAG 流水线",
+            "doc_id": "kb-rag-pipeline",
+            "content": "# 混合召回 RAG 流水线\n生产级 RAG 通常包含：文档解析、切分（chunk）、向量化（embedding）、索引、检索、重排、生成。\n混合召回（hybrid retrieval）同时使用向量检索与全文检索（BM25），再用互惠排名融合（RRF）合并两路结果，兼顾语义相似与关键词精确匹配。\n查询改写（query rewrite）会把用户问题扩展为多个等价表述以提升召回率。"
+          },
+          {
+            "n": 2,
+            "title": "Agent-Loop 推理引擎",
+            "doc_id": "kb-agent-loop",
+            "content": "# Agent-Loop 推理引擎\nAgent-Loop 是 ReAct 式单循环推理引擎：模型在一个循环里反复思考、调用工具、观察结果，直到产出最终答案或计划全部完成。\n生产级加固包括：工具异常喂回（ToolErrorFeedback，把异常封装成 function_response 不中断对话）、上下文超长反应式截断重试（ContextOverflow）、计划续推（TaskPlanTool）。\n下图展示了循环的结构：\n![agent loop diagram](https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg)\n图片描述：一位女子在夕阳下的海滩上与她的金毛犬互动，狗狗正伸出爪子与她“握手”，画面温馨而充满爱意。"
+          },
+          {
+            "n": 3,
+            "title": "Google ADK 简介",
+            "doc_id": "kb-adk-overview",
+            "content": "# Google ADK 简介\nGoogle Agent Development Kit（ADK）是用于构建生产级 LLM 智能体的框架。\n核心概念包括 LlmAgent（大模型智能体）、Runner（运行时）、Tool（工具）、Session（会话）、Artifact（多模态制品）与 Plugin（生命周期插件）。\nADK 通过 LiteLlm 适配层支持任意 OpenAI 兼容模型端点，例如阿里云 DashScope 的 Qwen 系列。"
+          }
+        ],
+        "count": 3,
+        "note": "请基于以上资料回答，并在引用处用 [n] 标注（n 为资料序号）。"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 1386.7428340017796,
+  "total_ms": 8308.856500021648,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "我需要"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "再次"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "查询企业知识库，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "尝试用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "不同的关键词来搜索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "2025"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "年第三季度营收相关信息"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "knowledge_search",
+        "args": {
+          "query": "2025 Q3 营收 亿元"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "knowledge_search",
+        "response": {
+          "hits": [
+            {
+              "n": 1,
+              "title": "混合召回 RAG 流水线",
+              "doc_id": "kb-rag-pipeline",
+              "content": "# 混合召回 RAG 流水线\n生产级 RAG 通常包含：文档解析、切分（chunk）、向量化（embedding）、索引、检索、重排、生成。\n混合召回（hybrid retrieval）同时使用向量检索与全文检索（BM25），再用互惠排名融合（RRF）合并两路结果，兼顾语义相似与关键词精确匹配。\n查询改写（query rewrite）会把用户问题扩展为多个等价表述以提升召回率。"
+            },
+            {
+              "n": 2,
+              "title": "Agent-Loop 推理引擎",
+              "doc_id": "kb-agent-loop",
+              "content": "# Agent-Loop 推理引擎\nAgent-Loop 是 ReAct 式单循环推理引擎：模型在一个循环里反复思考、调用工具、观察结果，直到产出最终答案或计划全部完成。\n生产级加固包括：工具异常喂回（ToolErrorFeedback，把异常封装成 function_response 不中断对话）、上下文超长反应式截断重试（ContextOverflow）、计划续推（TaskPlanTool）。\n下图展示了循环的结构：\n![agent loop diagram](https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg)\n图片描述：一位女子在夕阳下的海滩上与她的金毛犬互动，狗狗正伸出爪子与她“握手”，画面温馨而充满爱意。"
+            },
+            {
+              "n": 3,
+              "title": "Google ADK 简介",
+              "doc_id": "kb-adk-overview",
+              "content": "# Google ADK 简介\nGoogle Agent Development Kit（ADK）是用于构建生产级 LLM 智能体的框架。\n核心概念包括 LlmAgent（大模型智能体）、Runner（运行时）、Tool（工具）、Session（会话）、Artifact（多模态制品）与 Plugin（生命周期插件）。\nADK 通过 LiteLlm 适配层支持任意 OpenAI 兼容模型端点，例如阿里云 DashScope 的 Qwen 系列。"
+            }
+          ],
+          "count": 3,
+          "note": "请基于以上资料回答，并在引用处用 [n] 标注（n 为资料序号）。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "到的资料"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "与202"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "5年第三季度营收"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "无关，这些资料"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "是关于R"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "AG流水线、Agent"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "-Loop推理引擎"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "和Google ADK"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的技术文档。\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "未能"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索到知识库资料"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，以下基于常识"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n根据查询结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，企业知识库中没有"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "关于贵公司20"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "25"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "年第三季度营收的具体"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "数据。检索返回"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的资料都是技术架构"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "相关的文档，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "不包含财务营收信息"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n因此"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我无法提供贵公司2"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "025年"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "第三季度的具体营收"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "数据（亿元）。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "建议您："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n1. "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "查阅公司内部的财务报表"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "或财务报告\n2"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ". 联系财务"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "部门获取准确的营收"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "数据\n3."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 如果这是公开"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "上市公司，可以查看"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "公司在证券交易所披露的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "季度报告"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

@@ -1,0 +1,86 @@
+{
+  "case_id": "r-math-a2a-01",
+  "engine": "agent_loop",
+  "text": "23 × 47 的精确结果是 **1081**。",
+  "tool_calls": [
+    [
+      "math_expert",
+      {
+        "request": "精确计算 23*47"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "math_expert",
+      {
+        "result": "为了精确计算 $23 \\times 47$，我们可以使用竖式乘法或分配律进行逐步推导。\n\n**方法：使用分配律拆解计算**\n\n1. 将 $47$ 拆分为 $40 + 7$：\n   $$ 23 \\times 47 = 23 \\times (40 + 7) $$\n\n2. 分别计算两部分：\n   - 第一部分：$23 \\times 40$\n     $$ 23 \\times 4 = 92 $$\n     $$ 92 \\times 10 = 920 $$\n   \n   - 第二部分：$23 \\times 7$\n     $$ 20 \\times 7 = 140 $$\n     $$ 3 \\times 7 = 21 $$\n     $$ 140 + 21 = 161 $$\n\n3. 将两部分结果相加：\n   $$ 920 + 161 $$\n\n   计算加法：\n   - 个位：$0 + 1 = 1$\n   - 十位：$2 + 6 = 8$\n   - 百位：$9 + 1 = 10$\n\n   $$ 920 + 161 = 1081 $$\n\n**最终结果：**\n$$ 1081 $$"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 8803.15187497763,
+  "total_ms": 9115.031458961312,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "math_expert",
+        "args": {
+          "request": "精确计算 23*47"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "math_expert",
+        "response": {
+          "result": "为了精确计算 $23 \\times 47$，我们可以使用竖式乘法或分配律进行逐步推导。\n\n**方法：使用分配律拆解计算**\n\n1. 将 $47$ 拆分为 $40 + 7$：\n   $$ 23 \\times 47 = 23 \\times (40 + 7) $$\n\n2. 分别计算两部分：\n   - 第一部分：$23 \\times 40$\n     $$ 23 \\times 4 = 92 $$\n     $$ 92 \\times 10 = 920 $$\n   \n   - 第二部分：$23 \\times 7$\n     $$ 20 \\times 7 = 140 $$\n     $$ 3 \\times 7 = 21 $$\n     $$ 140 + 21 = 161 $$\n\n3. 将两部分结果相加：\n   $$ 920 + 161 $$\n\n   计算加法：\n   - 个位：$0 + 1 = 1$\n   - 十位：$2 + 6 = 8$\n   - 百位：$9 + 1 = 10$\n\n   $$ 920 + 161 = 1081 $$\n\n**最终结果：**\n$$ 1081 $$"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "2"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "3 × 4"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "7 的精确"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果是 **10"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "81**。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

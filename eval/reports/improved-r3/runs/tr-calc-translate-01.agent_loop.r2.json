@@ -1,0 +1,616 @@
+{
+  "case_id": "tr-calc-translate-01",
+  "engine": "agent_loop",
+  "text": "我需要先计算数学表达式，然后将结果翻译成英文单词。\n\n首先，让我用计算器计算 (3+4)*5：\n\n计算结果是 35。现在我需要把数字 35 翻译成英文单词形式（即 \"thirty-five\"）。\n\n让我先搜索一下是否有合适的翻译工具：\n\n我找到了 translate 工具。但 translate 是用于语言之间的翻译，而把数字转换成英文单词形式可能需要不同的处理。让我尝试用 deep_translate 看看：\n\n翻译工具返回的是占位符形式，没有将数字转换为英文单词。让我尝试用 text 形式 \"thirty-five\" 来验证，或者我可以直接基于常识给出答案。\n\n实际上，把数字转换成英文单词是一个常见的任务。35 的英文单词形式是 \"thirty-five\"。\n\n由于翻译工具似乎只是返回占位符，我将基于计算结果和常识给出最终答案：\n\n**最终答案：**\n- 计算结果：(3+4)*5 = **35**\n- 35 的英文单词是：**thirty-five**",
+  "tool_calls": [
+    [
+      "calculator",
+      {
+        "expression": "(3+4)*5"
+      }
+    ],
+    [
+      "tool_search",
+      {
+        "query": "翻译"
+      }
+    ],
+    [
+      "deep_translate",
+      {
+        "text": "35",
+        "target_lang": "en"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "calculator",
+      {
+        "expression": "(3+4)*5",
+        "result": 35.0
+      }
+    ],
+    [
+      "tool_search",
+      {
+        "query": "翻译",
+        "available_tools": {
+          "translate": "把文本翻译到目标语言（参数 text, target_lang）"
+        },
+        "note": "可直接按工具名调用上述工具完成任务。"
+      }
+    ],
+    [
+      "deep_translate",
+      {
+        "skill": "deep_translate",
+        "skipSummarization": false,
+        "content": "[en] 35"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": true,
+      "isPartial": true,
+      "data": "正在分析源语言与语境…"
+    },
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": false,
+      "isPartial": true,
+      "data": "[en] 3"
+    },
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": false,
+      "isPartial": true,
+      "data": "5"
+    }
+  ],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 987.7579169697128,
+  "total_ms": 9594.387167016976,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "我需要"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "先计算数学"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "表达式，然后将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译成英文单词。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n首先，让我"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "用计算器计算 ("
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "3+4)*"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "5：\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "calculator",
+        "args": {
+          "expression": "(3+4)*5"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "calculator",
+        "response": {
+          "expression": "(3+4)*5",
+          "result": 35.0
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "计算"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果是 35"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。现在我需要把"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "数字"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 35 "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译成英文单词形式"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（即 \"th"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "irty"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "-five\"）。\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "让我先搜索一下"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "是否有合适的翻译工具"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "tool_search",
+        "args": {
+          "query": "翻译"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "tool_search",
+        "response": {
+          "query": "翻译",
+          "available_tools": {
+            "translate": "把文本翻译到目标语言（参数 text, target_lang）"
+          },
+          "note": "可直接按工具名调用上述工具完成任务。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "找到了 translate 工具"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。但"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " translate"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 是用于语言"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "之间的翻译，而"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "把数字转换成英文"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "单词"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "形式可能需要不同的处理"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。让我尝试用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " deep_translate 看看"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "deep_translate",
+        "args": {
+          "text": "35",
+          "target_lang": "en"
+        }
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": true,
+        "isPartial": true,
+        "data": "正在分析源语言与语境…"
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": false,
+        "isPartial": true,
+        "data": "[en] 3"
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": false,
+        "isPartial": true,
+        "data": "5"
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "deep_translate",
+        "response": {
+          "skill": "deep_translate",
+          "skipSummarization": false,
+          "content": "[en] 35"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "工具返回的是占"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "位符"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "形式"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，没有将数字"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "转换为"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "英文单词。让我"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "尝试用 text "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "形式"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " \"thirty-five"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\" "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "来验证，或者"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "可以直接基于常识给出"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "答案。\n\n实际上"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，把数字转换成"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "英文单词是一个常见的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "任务。35"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 的英文"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "单词形式是 \""
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "thirty-five\""
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n由于翻译"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "工具似乎只是返回"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "占位"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "符，我将基于"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "计算"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果和常识给出"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "最终"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "答案：\n\n**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "最终答案：**\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 计算结果："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "(3+4"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ")*5 = **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "35**\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- 35"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 的英文单词"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "是：**thirty"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "-five**"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

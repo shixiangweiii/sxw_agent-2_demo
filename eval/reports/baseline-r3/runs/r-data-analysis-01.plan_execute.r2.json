@@ -1,0 +1,327 @@
+{
+  "case_id": "r-data-analysis-01",
+  "engine": "plan_execute",
+  "text": "这组数据 12, 7, 9, 20 的统计结果为：\n\n- **均值**：12.0\n- **方差**：24.5",
+  "tool_calls": [
+    [
+      "claude_skill_data_analysis",
+      {
+        "query": "计算数据 12, 7, 9, 20 的均值和方差"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "claude_skill_data_analysis",
+      {
+        "output": "计算结果如下：\n\n- **均值**：12.0\n- **方差**：24.5",
+        "skill": "data_analysis"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [
+    {
+      "skill": "data_analysis",
+      "subEvent": "tool_call",
+      "name": "run_python",
+      "args": {
+        "code": "import numpy as np\n\ndata = [12, 7, 9, 20]\nmean = np.mean(data)\nvariance = np.var(data)\n\nprint(f\"均值: {mean}\")\nprint(f\"方差: {variance}\")"
+      }
+    },
+    {
+      "skill": "data_analysis",
+      "subEvent": "tool_result",
+      "name": "run_python",
+      "response": {
+        "ok": true,
+        "stdout": "均值: 12.0\n方差: 24.5\n",
+        "stderr": ""
+      }
+    },
+    {
+      "skill": "data_analysis",
+      "subEvent": "text",
+      "delta": "计算"
+    },
+    {
+      "skill": "data_analysis",
+      "subEvent": "text",
+      "delta": "结果如下"
+    },
+    {
+      "skill": "data_analysis",
+      "subEvent": "text",
+      "delta": "：\n\n- **"
+    },
+    {
+      "skill": "data_analysis",
+      "subEvent": "text",
+      "delta": "均值**：1"
+    },
+    {
+      "skill": "data_analysis",
+      "subEvent": "text",
+      "delta": "2.0\n"
+    },
+    {
+      "skill": "data_analysis",
+      "subEvent": "text",
+      "delta": "- **方差**"
+    },
+    {
+      "skill": "data_analysis",
+      "subEvent": "text",
+      "delta": "：24."
+    },
+    {
+      "skill": "data_analysis",
+      "subEvent": "text",
+      "delta": "5"
+    }
+  ],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 2,
+      "title": "计算数值 12, 7, 9, 20 的均值",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "title": "基于均值计算这组数据的方差",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 8268.519167031627,
+  "total_ms": 9029.512917040847,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 2,
+        "title": "计算数值 12, 7, 9, 20 的均值",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "title": "基于均值计算这组数据的方差",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "claude_skill_data_analysis",
+        "args": {
+          "query": "计算数据 12, 7, 9, 20 的均值和方差"
+        }
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "data_analysis",
+        "subEvent": "tool_call",
+        "name": "run_python",
+        "args": {
+          "code": "import numpy as np\n\ndata = [12, 7, 9, 20]\nmean = np.mean(data)\nvariance = np.var(data)\n\nprint(f\"均值: {mean}\")\nprint(f\"方差: {variance}\")"
+        }
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "data_analysis",
+        "subEvent": "tool_result",
+        "name": "run_python",
+        "response": {
+          "ok": true,
+          "stdout": "均值: 12.0\n方差: 24.5\n",
+          "stderr": ""
+        }
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "data_analysis",
+        "subEvent": "text",
+        "delta": "计算"
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "data_analysis",
+        "subEvent": "text",
+        "delta": "结果如下"
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "data_analysis",
+        "subEvent": "text",
+        "delta": "：\n\n- **"
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "data_analysis",
+        "subEvent": "text",
+        "delta": "均值**：1"
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "data_analysis",
+        "subEvent": "text",
+        "delta": "2.0\n"
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "data_analysis",
+        "subEvent": "text",
+        "delta": "- **方差**"
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "data_analysis",
+        "subEvent": "text",
+        "delta": "：24."
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "data_analysis",
+        "subEvent": "text",
+        "delta": "5"
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "claude_skill_data_analysis",
+        "response": {
+          "output": "计算结果如下：\n\n- **均值**：12.0\n- **方差**：24.5",
+          "skill": "data_analysis"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "这"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "组数据"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 12,"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "7, 9"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ", 20"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 的统计结果为"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：\n\n- **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "均值**：1"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "2.0\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- **方差**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：24."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "5"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "status": "done"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

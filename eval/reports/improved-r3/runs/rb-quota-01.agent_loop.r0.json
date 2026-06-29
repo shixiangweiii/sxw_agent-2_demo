@@ -1,0 +1,762 @@
+{
+  "case_id": "rb-quota-01",
+  "engine": "agent_loop",
+  "text": "我需要先搜索深度翻译工具，然后使用它来翻译文本。\n\n我看到有一个 `translate` 工具，但用户要求的是\"深度翻译技能\"。让我检查一下是否有 `deep_translate` 工具可用（从工具列表中我看到确实有）。\n\n让我直接使用 `deep_translate` 工具来翻译文本。不过我需要知道目标语言是什么。用户没有指定目标语言，我需要询问或者使用默认值。\n\n查看 `deep_translate` 的参数：\n- text: 待翻译文本（必需）\n- target_lang: 目标语言，如 en/ja/fr（可选）\n\n用户提供的文本是 `__quota__`，但没有指定目标语言。我应该询问用户目标语言，或者尝试一个常见的目标语言如英语。\n\n由于用户没有指定目标语言，我将假设翻译成英语（en）作为默认选择。\n\n深度翻译工具返回了错误，提示\"技能算粒余额不足\"。这意味着该技能目前不可用。\n\n让我尝试使用普通的 `translate` 工具作为替代方案。\n\n普通翻译工具返回了结果：`[en] __quota__`。\n\n由于用户要求使用\"深度翻译技能\"，但该技能目前因余额不足而不可用，我使用了普通的翻译工具作为替代。\n\n最终答案：\n- 原文：`__quota__`\n- 翻译结果（英语）：`[en] __quota__`\n\n注意：深度翻译技能（deep_translate）当前因算粒余额不足而无法使用，已改用普通翻译工具完成翻译任务。",
+  "tool_calls": [
+    [
+      "tool_search",
+      {
+        "query": "深度翻译"
+      }
+    ],
+    [
+      "deep_translate",
+      {
+        "text": "__quota__",
+        "target_lang": "en"
+      }
+    ],
+    [
+      "translate",
+      {
+        "text": "__quota__",
+        "target_lang": "en"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "tool_search",
+      {
+        "query": "深度翻译",
+        "available_tools": {
+          "translate": "把文本翻译到目标语言（参数 text, target_lang）",
+          "text_stats": "统计文本的字符数与词数（参数 text）"
+        },
+        "note": "可直接按工具名调用上述工具完成任务。"
+      }
+    ],
+    [
+      "deep_translate",
+      {
+        "isError": true,
+        "errorCode": "BENEFIT_NOT_ENOUGH",
+        "content": "技能算粒余额不足，请联系管理员。"
+      }
+    ],
+    [
+      "translate",
+      {
+        "source": "__quota__",
+        "target_lang": "en",
+        "translation": "[en] __quota__"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": true,
+      "isPartial": true,
+      "data": "正在分析源语言与语境…"
+    }
+  ],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 947.3499999730848,
+  "total_ms": 11541.537957964465,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "我需要"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "先搜索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "深度"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译工具，然后"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "使用它来翻译"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "文本。\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "tool_search",
+        "args": {
+          "query": "深度翻译"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "tool_search",
+        "response": {
+          "query": "深度翻译",
+          "available_tools": {
+            "translate": "把文本翻译到目标语言（参数 text, target_lang）",
+            "text_stats": "统计文本的字符数与词数（参数 text）"
+          },
+          "note": "可直接按工具名调用上述工具完成任务。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我看到"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "有一个"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " `translate"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "` 工具，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "但用户要求的是"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\""
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "深度翻译技能\""
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。让我检查一下"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "是否有 `deep_translate"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "` "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "工具可用（从"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "工具列表中我看到"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "确实有）。\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "让我"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "直接使用 `deep_translate"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "` 工具来"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译文本。不过"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我需要知道目标语言"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "是什么"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。用户没有指定"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "目标语言，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我需要询问或者使用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "默认值。\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "查看"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " `deep_translate`"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的参数：\n-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " text"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ": 待翻译"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "文本（必需）"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n- target"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "_lang: 目标"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "语言，如 en"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "/ja/fr（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "可选）\n\n用户"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "提供的文本是 `"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "__"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "quota__`，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "但没有指定目标语言"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。我应该询问用户"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "目标语言"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，或者尝试一个"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "常见的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "目标语言如英语"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n由于"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "用户没有指定目标"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "语言，我将假设"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译成英语（en"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "作为默认选择。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "deep_translate",
+        "args": {
+          "text": "__quota__",
+          "target_lang": "en"
+        }
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": true,
+        "isPartial": true,
+        "data": "正在分析源语言与语境…"
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "deep_translate",
+        "response": {
+          "isError": true,
+          "errorCode": "BENEFIT_NOT_ENOUGH",
+          "content": "技能算粒余额不足，请联系管理员。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "深度"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译工具"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "返回"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "了错误"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，提示\"技能"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "算粒余额不足"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\"。这意味着该"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "技能目前不可用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n让我"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "尝试使用普通的 `"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "translate` 工具"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "作为替代方案。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "translate",
+        "args": {
+          "text": "__quota__",
+          "target_lang": "en"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "translate",
+        "response": {
+          "source": "__quota__",
+          "target_lang": "en",
+          "translation": "[en] __quota__"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "普通"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "工具返回了结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "`[en]"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " __quota__`"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n由于用户"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "要求使用\"深度"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译技能\"，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "但该技能目前因"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "余额不足而"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "不可用，我"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "使用了普通的翻译工具"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "作为替代。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n最终答案："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n- 原文"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：`__quota"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "__"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "`\n- "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译结果（英语"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）：`["
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "en] __quota"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "__`\n\n注意"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：深度翻译技能"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（deep_translate）"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "当前"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "因算粒余额"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "不足而无法"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "使用，已改用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "普通翻译工具"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "完成翻译任务。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

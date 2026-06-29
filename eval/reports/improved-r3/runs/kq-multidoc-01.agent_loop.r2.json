@@ -1,0 +1,504 @@
+{
+  "case_id": "kq-multidoc-01",
+  "engine": "agent_loop",
+  "text": "未能检索到知识库资料，以下基于常识。\n\n**RAG（Retrieval-Augmented Generation）流水线通常包含以下阶段：**\n\n1. **索引阶段（Indexing）**：将原始文档进行切分、清洗、向量化，并存入向量数据库或检索系统中。\n2. **检索阶段（Retrieval）**：接收用户查询，将其转化为向量或关键词，在知识库中检索最相关的文档片段。\n3. **生成阶段（Generation）**：将检索到的相关上下文与用户原始问题组合成提示（Prompt），输入大语言模型（LLM）生成最终答案。\n\n部分高级 RAG 系统还可能包含**查询重写/扩展**、**重排序（Re-ranking）**、**后处理**等额外阶段。\n\n---\n\n**Agent-Loop 属于循环迭代推理范式（Iterative/Loop-based Reasoning）**：\n\nAgent-Loop 的核心特征是\"思考→行动→观察\"的闭环迭代。与单次前向推理（如标准 Chain-of-Thought）不同，Agent-Loop 允许智能体：\n- 在多轮循环中动态调用外部工具\n- 根据工具返回结果调整后续策略\n- 支持任务规划、错误恢复和中间状态更新\n\n这种范式适合处理需要多步协作、动态决策和外部交互的复杂任务。",
+  "tool_calls": [],
+  "tool_results": [],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 1123.194457963109,
+  "total_ms": 7791.392207960598,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "未能"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索到知识库资料"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，以下基于常识"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n**R"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "AG（Retrie"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "val-Aug"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "mented Generation）流水线"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "通常包含以下阶段"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：**\n\n1."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **索引阶段（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Indexing）**："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "将原始文档进行"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "切分、清洗"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "、向量化，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "并存入向量数据库"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "或"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索系统中。\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "2. **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索阶段（Ret"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "rieval）**："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "接收用户查询，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "将其转化为向量或"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "关键词，在知识库"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "中检索最相关的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "文档片段。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n3. **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "生成阶段（Generation"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）**：将检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "到的相关上下文与"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "用户原始"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "问题组合成提示"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Prompt），输入大"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "语言模型（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "LLM）生成"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "最终答案。\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "部分高级 RAG"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 系统"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "还可能包含**查询"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "重写/"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "扩展**、**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "重"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "排序（Re-ranking"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）**、"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**后处理**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "等额外"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "阶段。\n\n---"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n**Agent-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Loop 属于循环"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "迭代推理范式（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Iter"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "ative/Loop-based"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Reasoning）**："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\nAgent-Loop"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 的核心特征是\""
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "思考→行动→"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "观察\"的闭环"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "迭代。与单次"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "前向推理"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（如标准 Chain"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "-of-Thought"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）不同，Agent"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "-Loop 允许"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "智能体：\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- 在多"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "轮循环中动态"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "调用外部工具\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- 根据工具"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "返回结果调整后续"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "策略\n- "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "支持任务规划、"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "错误"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "恢复和中间状态"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "更新\n\n这种"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "范式适合处理需要"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "多步"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "协作、动态决策"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "和外部交互的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "复杂任务"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

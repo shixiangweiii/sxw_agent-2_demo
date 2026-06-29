@@ -1,0 +1,319 @@
+{
+  "case_id": "rb-arag-down-01",
+  "engine": "plan_execute",
+  "text": "未能访问知识库，以下基于常识\n\n混合召回 RAG（Retrieval-Augmented Generation）通常结合以下两路检索：\n\n1. **向量检索（Vector Search）**：基于语义相似度，将查询和文档嵌入到向量空间中进行匹配，擅长捕捉语义相关性。\n2. **关键词检索（Keyword Search / BM25）**：基于词频和倒排索引，精确匹配查询中的关键词，擅长处理专有名词、术语等精确匹配场景。\n\n这两路结果通常会通过重排序（Re-ranking）或加权融合的方式进行整合，以提升最终召回的相关性和覆盖率。",
+  "tool_calls": [
+    [
+      "knowledge_search",
+      {
+        "query": "混合召回 RAG 用到哪两路检索"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "knowledge_search",
+      {
+        "hits": [],
+        "count": 0,
+        "degraded": true,
+        "note": "知识检索暂不可用。请在回答开头显式声明『未能访问知识库，以下基于常识』，再谨慎作答；不要编造引用，也不要把常识冒充为检索结果。"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 1,
+      "title": "检索知识库",
+      "status": "planned"
+    },
+    {
+      "step": 1,
+      "total": 1,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 3616.1421660217457,
+  "total_ms": 5852.134499989916,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 1,
+        "title": "检索知识库",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "knowledge_search",
+        "args": {
+          "query": "混合召回 RAG 用到哪两路检索"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "knowledge_search",
+        "response": {
+          "hits": [],
+          "count": 0,
+          "degraded": true,
+          "note": "知识检索暂不可用。请在回答开头显式声明『未能访问知识库，以下基于常识』，再谨慎作答；不要编造引用，也不要把常识冒充为检索结果。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "未能"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "访问"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "知识库，以下基于"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "常识\n\n混合召回"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " RAG（Ret"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "rieval-Augmented"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Generation）通常结合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "以下两路检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：\n\n1."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **向量检索（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Vector Search）**："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "基于语义"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "相似度，将查询"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "和文档嵌入到"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "向量空间中进行匹配"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "擅长捕捉语义相关性"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n2."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **关键词检索（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Keyword Search / BM"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "25）**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：基于词频"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "和倒排索引"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，精确匹配查询"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "中的关键词，擅长"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "处理专有名词、"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "术语"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "等精确匹配场景"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n这两路"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "通常会通过重排序"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Re-ranking）或"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "加权"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "融合的方式进行整合，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "以提升"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "最终召回的相关性和"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "覆盖率。"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 1,
+        "status": "done"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

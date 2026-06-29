@@ -1,0 +1,114 @@
+{
+  "case_id": "r-calc-01",
+  "engine": "plan_execute",
+  "text": "35",
+  "tool_calls": [
+    [
+      "calculator",
+      {
+        "expression": "(3+4)*5"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "calculator",
+      {
+        "expression": "(3+4)*5",
+        "result": 35.0
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 2,
+      "title": "计算 (3+4)*5 的值",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "title": "输出结果 35",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 3942.337625019718,
+  "total_ms": 3942.9926250013523,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 2,
+        "title": "计算 (3+4)*5 的值",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "title": "输出结果 35",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "calculator",
+        "args": {
+          "expression": "(3+4)*5"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "calculator",
+        "response": {
+          "expression": "(3+4)*5",
+          "result": 35.0
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "3"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "5"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "status": "done"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

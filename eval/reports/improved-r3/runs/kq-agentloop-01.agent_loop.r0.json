@@ -1,0 +1,438 @@
+{
+  "case_id": "kq-agentloop-01",
+  "engine": "agent_loop",
+  "text": "我需要再次检索知识库，尝试不同的查询方式来获取关于 ToolErrorFeedback 的信息。\n\n根据知识库资料，Agent-Loop 的 ToolErrorFeedback 的作用是：\n\n**把工具执行时抛出的异常封装成 function_response 喂回给模型，从而不中断对话** [1]。\n\n这是 Agent-Loop 推理引擎的生产级加固机制之一。具体来说：\n\n- 当工具调用过程中发生异常（框架级错误）时，ToolErrorFeedback 机制会捕获该异常\n- 将异常信息封装成标准的 function_response 格式\n- 将这个包含错误信息的响应反馈给 agent-loop 中的模型\n- 使整个对话循环能够继续运行，而不是因为工具失败而中断\n\n这样设计的好处是让智能体系统更加健壮，能够在遇到工具层面的问题时优雅地处理，保持任务的连续性。",
+  "tool_calls": [
+    [
+      "knowledge_search",
+      {
+        "query": "ToolErrorFeedback"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "knowledge_search",
+      {
+        "hits": [
+          {
+            "n": 1,
+            "title": "Agent-Loop 推理引擎",
+            "doc_id": "kb-agent-loop",
+            "content": "# Agent-Loop 推理引擎\nAgent-Loop 是 ReAct 式单循环推理引擎：模型在一个循环里反复思考、调用工具、观察结果，直到产出最终答案或计划全部完成。\n生产级加固包括：工具异常喂回（ToolErrorFeedback，把异常封装成 function_response 不中断对话）、上下文超长反应式截断重试（ContextOverflow）、计划续推（TaskPlanTool）。\n下图展示了循环的结构：\n![agent loop diagram](https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg)\n图片描述：一位女子在夕阳下的海滩上与她的金毛犬互动，狗狗正伸出爪子与她“握手”，画面温馨而充满爱意。"
+          },
+          {
+            "n": 2,
+            "title": "Google ADK 简介",
+            "doc_id": "kb-adk-overview",
+            "content": "# Google ADK 简介\nGoogle Agent Development Kit（ADK）是用于构建生产级 LLM 智能体的框架。\n核心概念包括 LlmAgent（大模型智能体）、Runner（运行时）、Tool（工具）、Session（会话）、Artifact（多模态制品）与 Plugin（生命周期插件）。\nADK 通过 LiteLlm 适配层支持任意 OpenAI 兼容模型端点，例如阿里云 DashScope 的 Qwen 系列。"
+          },
+          {
+            "n": 3,
+            "title": "混合召回 RAG 流水线",
+            "doc_id": "kb-rag-pipeline",
+            "content": "# 混合召回 RAG 流水线\n生产级 RAG 通常包含：文档解析、切分（chunk）、向量化（embedding）、索引、检索、重排、生成。\n混合召回（hybrid retrieval）同时使用向量检索与全文检索（BM25），再用互惠排名融合（RRF）合并两路结果，兼顾语义相似与关键词精确匹配。\n查询改写（query rewrite）会把用户问题扩展为多个等价表述以提升召回率。"
+          }
+        ],
+        "count": 3,
+        "note": "请基于以上资料回答，并在引用处用 [n] 标注（n 为资料序号）。"
+      }
+    ]
+  ],
+  "citations": [
+    {
+      "refs": [
+        {
+          "n": 1,
+          "title": "Agent-Loop 推理引擎",
+          "doc_id": "kb-agent-loop"
+        }
+      ]
+    }
+  ],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 1168.286333035212,
+  "total_ms": 7197.515583015047,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "我需要"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "再次检索知识库，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "尝试"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "不同的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "查询方式来获取关于"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Tool"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "ErrorFeedback 的信息"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "knowledge_search",
+        "args": {
+          "query": "ToolErrorFeedback"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "knowledge_search",
+        "response": {
+          "hits": [
+            {
+              "n": 1,
+              "title": "Agent-Loop 推理引擎",
+              "doc_id": "kb-agent-loop",
+              "content": "# Agent-Loop 推理引擎\nAgent-Loop 是 ReAct 式单循环推理引擎：模型在一个循环里反复思考、调用工具、观察结果，直到产出最终答案或计划全部完成。\n生产级加固包括：工具异常喂回（ToolErrorFeedback，把异常封装成 function_response 不中断对话）、上下文超长反应式截断重试（ContextOverflow）、计划续推（TaskPlanTool）。\n下图展示了循环的结构：\n![agent loop diagram](https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg)\n图片描述：一位女子在夕阳下的海滩上与她的金毛犬互动，狗狗正伸出爪子与她“握手”，画面温馨而充满爱意。"
+            },
+            {
+              "n": 2,
+              "title": "Google ADK 简介",
+              "doc_id": "kb-adk-overview",
+              "content": "# Google ADK 简介\nGoogle Agent Development Kit（ADK）是用于构建生产级 LLM 智能体的框架。\n核心概念包括 LlmAgent（大模型智能体）、Runner（运行时）、Tool（工具）、Session（会话）、Artifact（多模态制品）与 Plugin（生命周期插件）。\nADK 通过 LiteLlm 适配层支持任意 OpenAI 兼容模型端点，例如阿里云 DashScope 的 Qwen 系列。"
+            },
+            {
+              "n": 3,
+              "title": "混合召回 RAG 流水线",
+              "doc_id": "kb-rag-pipeline",
+              "content": "# 混合召回 RAG 流水线\n生产级 RAG 通常包含：文档解析、切分（chunk）、向量化（embedding）、索引、检索、重排、生成。\n混合召回（hybrid retrieval）同时使用向量检索与全文检索（BM25），再用互惠排名融合（RRF）合并两路结果，兼顾语义相似与关键词精确匹配。\n查询改写（query rewrite）会把用户问题扩展为多个等价表述以提升召回率。"
+            }
+          ],
+          "count": 3,
+          "note": "请基于以上资料回答，并在引用处用 [n] 标注（n 为资料序号）。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "根据"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "知识库资料"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，Agent-Loop"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 的 ToolError"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Feedback 的作用是："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n**把"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "工具执行时抛"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "出的异常"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "封装成 function_response"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 喂回给"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "模型，从而不"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "中断对话**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " [1]。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n这是 Agent-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Loop 推理"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "引擎的生产级加固"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "机制"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "之一。具体来说："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n- 当"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "工具调用过程中发生"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "异常（框架"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "级错误）时"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，Tool"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "ErrorFeedback 机制"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "会捕获该异常"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n- 将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "异常信息封装成"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "标准的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " function_response 格式"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n- 将这个"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "包含错误信息的响应"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "反馈给 agent-loop"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 中的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "模型\n- "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "使整个对话循环"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "能够继续"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "运行，而不是因为"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "工具失败而中断"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n这样设计的好处"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "是让"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "智能体系统更加"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "健壮，能够在遇到"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "工具层面的问题时优雅"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "地处理，保持"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "任务的连续性。"
+      }
+    },
+    {
+      "event": "citation",
+      "data": {
+        "refs": [
+          {
+            "n": 1,
+            "title": "Agent-Loop 推理引擎",
+            "doc_id": "kb-agent-loop"
+          }
+        ]
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

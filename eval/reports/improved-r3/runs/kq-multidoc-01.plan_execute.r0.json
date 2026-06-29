@@ -1,0 +1,582 @@
+{
+  "case_id": "kq-multidoc-01",
+  "engine": "plan_execute",
+  "text": "我需要先检索知识库来获取关于RAG流水线阶段和Agent-Loop推理范式的信息。\n\n根据检索到的知识库资料，我来回答您的问题：\n\n**RAG 流水线包含的阶段：**\n\n生产级 RAG 通常包含以下阶段 [1]：\n- 文档解析\n- 切分（chunk）\n- 向量化（embedding）\n- 索引\n- 检索\n- 重排\n- 生成\n\n此外，混合召回（hybrid retrieval）会同时使用向量检索与全文检索（BM25），再用互惠排名融合（RRF）合并两路结果 [1]。查询改写（query rewrite）会把用户问题扩展为多个等价表述以提升召回率 [1]。\n\n**Agent-Loop 的推理范式：**\n\nAgent-Loop 属于 **ReAct 式单循环推理引擎** [2]。模型在一个循环里反复思考、调用工具、观察结果，直到产出最终答案或计划全部完成 [2]。",
+  "tool_calls": [
+    [
+      "knowledge_search",
+      {
+        "query": "RAG 流水线包含哪些阶段"
+      }
+    ],
+    [
+      "knowledge_search",
+      {
+        "query": "Agent-Loop 属于哪种推理范式"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "knowledge_search",
+      {
+        "hits": [
+          {
+            "n": 1,
+            "title": "混合召回 RAG 流水线",
+            "doc_id": "kb-rag-pipeline",
+            "content": "# 混合召回 RAG 流水线\n生产级 RAG 通常包含：文档解析、切分（chunk）、向量化（embedding）、索引、检索、重排、生成。\n混合召回（hybrid retrieval）同时使用向量检索与全文检索（BM25），再用互惠排名融合（RRF）合并两路结果，兼顾语义相似与关键词精确匹配。\n查询改写（query rewrite）会把用户问题扩展为多个等价表述以提升召回率。"
+          },
+          {
+            "n": 2,
+            "title": "Agent-Loop 推理引擎",
+            "doc_id": "kb-agent-loop",
+            "content": "# Agent-Loop 推理引擎\nAgent-Loop 是 ReAct 式单循环推理引擎：模型在一个循环里反复思考、调用工具、观察结果，直到产出最终答案或计划全部完成。\n生产级加固包括：工具异常喂回（ToolErrorFeedback，把异常封装成 function_response 不中断对话）、上下文超长反应式截断重试（ContextOverflow）、计划续推（TaskPlanTool）。\n下图展示了循环的结构：\n![agent loop diagram](https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg)\n图片描述：一位女子在夕阳下的海滩上与她的金毛犬互动，狗狗正伸出爪子与她“握手”，画面温馨而充满爱意。"
+          },
+          {
+            "n": 3,
+            "title": "Google ADK 简介",
+            "doc_id": "kb-adk-overview",
+            "content": "# Google ADK 简介\nGoogle Agent Development Kit（ADK）是用于构建生产级 LLM 智能体的框架。\n核心概念包括 LlmAgent（大模型智能体）、Runner（运行时）、Tool（工具）、Session（会话）、Artifact（多模态制品）与 Plugin（生命周期插件）。\nADK 通过 LiteLlm 适配层支持任意 OpenAI 兼容模型端点，例如阿里云 DashScope 的 Qwen 系列。"
+          }
+        ],
+        "count": 3,
+        "note": "请基于以上资料回答，并在引用处用 [n] 标注（n 为资料序号）。"
+      }
+    ],
+    [
+      "knowledge_search",
+      {
+        "hits": [
+          {
+            "n": 1,
+            "title": "Agent-Loop 推理引擎",
+            "doc_id": "kb-agent-loop",
+            "content": "# Agent-Loop 推理引擎\nAgent-Loop 是 ReAct 式单循环推理引擎：模型在一个循环里反复思考、调用工具、观察结果，直到产出最终答案或计划全部完成。\n生产级加固包括：工具异常喂回（ToolErrorFeedback，把异常封装成 function_response 不中断对话）、上下文超长反应式截断重试（ContextOverflow）、计划续推（TaskPlanTool）。\n下图展示了循环的结构：\n![agent loop diagram](https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg)\n图片描述：一位女子在夕阳下的海滩上与她的金毛犬互动，狗狗正伸出爪子与她“握手”，画面温馨而充满爱意。"
+          },
+          {
+            "n": 2,
+            "title": "Google ADK 简介",
+            "doc_id": "kb-adk-overview",
+            "content": "# Google ADK 简介\nGoogle Agent Development Kit（ADK）是用于构建生产级 LLM 智能体的框架。\n核心概念包括 LlmAgent（大模型智能体）、Runner（运行时）、Tool（工具）、Session（会话）、Artifact（多模态制品）与 Plugin（生命周期插件）。\nADK 通过 LiteLlm 适配层支持任意 OpenAI 兼容模型端点，例如阿里云 DashScope 的 Qwen 系列。"
+          },
+          {
+            "n": 3,
+            "title": "混合召回 RAG 流水线",
+            "doc_id": "kb-rag-pipeline",
+            "content": "# 混合召回 RAG 流水线\n生产级 RAG 通常包含：文档解析、切分（chunk）、向量化（embedding）、索引、检索、重排、生成。\n混合召回（hybrid retrieval）同时使用向量检索与全文检索（BM25），再用互惠排名融合（RRF）合并两路结果，兼顾语义相似与关键词精确匹配。\n查询改写（query rewrite）会把用户问题扩展为多个等价表述以提升召回率。"
+          }
+        ],
+        "count": 3,
+        "note": "请基于以上资料回答，并在引用处用 [n] 标注（n 为资料序号）。"
+      }
+    ]
+  ],
+  "citations": [
+    {
+      "refs": [
+        {
+          "n": 1,
+          "title": "Agent-Loop 推理引擎",
+          "doc_id": "kb-agent-loop"
+        },
+        {
+          "n": 2,
+          "title": "Google ADK 简介",
+          "doc_id": "kb-adk-overview"
+        }
+      ]
+    }
+  ],
+  "skill_events": [],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 2,
+      "title": "检索知识库",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "title": "整合 RAG 流水线阶段与 Agent-Loop 推理范式信息",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 2047.0826670061797,
+  "total_ms": 13426.577208971139,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 2,
+        "title": "检索知识库",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "title": "整合 RAG 流水线阶段与 Agent-Loop 推理范式信息",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我需要"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "先检索知识库来获取"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "关于RAG流水线"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "阶段和Agent-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Loop推理范式的信息"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "knowledge_search",
+        "args": {
+          "query": "RAG 流水线包含哪些阶段"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "knowledge_search",
+        "response": {
+          "hits": [
+            {
+              "n": 1,
+              "title": "混合召回 RAG 流水线",
+              "doc_id": "kb-rag-pipeline",
+              "content": "# 混合召回 RAG 流水线\n生产级 RAG 通常包含：文档解析、切分（chunk）、向量化（embedding）、索引、检索、重排、生成。\n混合召回（hybrid retrieval）同时使用向量检索与全文检索（BM25），再用互惠排名融合（RRF）合并两路结果，兼顾语义相似与关键词精确匹配。\n查询改写（query rewrite）会把用户问题扩展为多个等价表述以提升召回率。"
+            },
+            {
+              "n": 2,
+              "title": "Agent-Loop 推理引擎",
+              "doc_id": "kb-agent-loop",
+              "content": "# Agent-Loop 推理引擎\nAgent-Loop 是 ReAct 式单循环推理引擎：模型在一个循环里反复思考、调用工具、观察结果，直到产出最终答案或计划全部完成。\n生产级加固包括：工具异常喂回（ToolErrorFeedback，把异常封装成 function_response 不中断对话）、上下文超长反应式截断重试（ContextOverflow）、计划续推（TaskPlanTool）。\n下图展示了循环的结构：\n![agent loop diagram](https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg)\n图片描述：一位女子在夕阳下的海滩上与她的金毛犬互动，狗狗正伸出爪子与她“握手”，画面温馨而充满爱意。"
+            },
+            {
+              "n": 3,
+              "title": "Google ADK 简介",
+              "doc_id": "kb-adk-overview",
+              "content": "# Google ADK 简介\nGoogle Agent Development Kit（ADK）是用于构建生产级 LLM 智能体的框架。\n核心概念包括 LlmAgent（大模型智能体）、Runner（运行时）、Tool（工具）、Session（会话）、Artifact（多模态制品）与 Plugin（生命周期插件）。\nADK 通过 LiteLlm 适配层支持任意 OpenAI 兼容模型端点，例如阿里云 DashScope 的 Qwen 系列。"
+            }
+          ],
+          "count": 3,
+          "note": "请基于以上资料回答，并在引用处用 [n] 标注（n 为资料序号）。"
+        }
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "knowledge_search",
+        "args": {
+          "query": "Agent-Loop 属于哪种推理范式"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "knowledge_search",
+        "response": {
+          "hits": [
+            {
+              "n": 1,
+              "title": "Agent-Loop 推理引擎",
+              "doc_id": "kb-agent-loop",
+              "content": "# Agent-Loop 推理引擎\nAgent-Loop 是 ReAct 式单循环推理引擎：模型在一个循环里反复思考、调用工具、观察结果，直到产出最终答案或计划全部完成。\n生产级加固包括：工具异常喂回（ToolErrorFeedback，把异常封装成 function_response 不中断对话）、上下文超长反应式截断重试（ContextOverflow）、计划续推（TaskPlanTool）。\n下图展示了循环的结构：\n![agent loop diagram](https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg)\n图片描述：一位女子在夕阳下的海滩上与她的金毛犬互动，狗狗正伸出爪子与她“握手”，画面温馨而充满爱意。"
+            },
+            {
+              "n": 2,
+              "title": "Google ADK 简介",
+              "doc_id": "kb-adk-overview",
+              "content": "# Google ADK 简介\nGoogle Agent Development Kit（ADK）是用于构建生产级 LLM 智能体的框架。\n核心概念包括 LlmAgent（大模型智能体）、Runner（运行时）、Tool（工具）、Session（会话）、Artifact（多模态制品）与 Plugin（生命周期插件）。\nADK 通过 LiteLlm 适配层支持任意 OpenAI 兼容模型端点，例如阿里云 DashScope 的 Qwen 系列。"
+            },
+            {
+              "n": 3,
+              "title": "混合召回 RAG 流水线",
+              "doc_id": "kb-rag-pipeline",
+              "content": "# 混合召回 RAG 流水线\n生产级 RAG 通常包含：文档解析、切分（chunk）、向量化（embedding）、索引、检索、重排、生成。\n混合召回（hybrid retrieval）同时使用向量检索与全文检索（BM25），再用互惠排名融合（RRF）合并两路结果，兼顾语义相似与关键词精确匹配。\n查询改写（query rewrite）会把用户问题扩展为多个等价表述以提升召回率。"
+            }
+          ],
+          "count": 3,
+          "note": "请基于以上资料回答，并在引用处用 [n] 标注（n 为资料序号）。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "根据"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索到的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "知识库资料，我来"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "回答您的问题：\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**RAG "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "流水线包含的阶段：**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n生产级 R"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "AG 通常包含"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "以下阶段 [1"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "]：\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- 文档解析"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- 切分"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（chunk）\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- 向量化"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（embedding）\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- 索引\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- 检索\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- 重排"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n- 生成"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n此外，混合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "召回（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "hybrid retrieval）"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "会同时使用向量"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索与全文检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（BM25"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "），再用互惠排名"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "融合（RRF"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）合并两路"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果 [1]"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。查询改写（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "query rewrite）会把"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "用户问题扩展为"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "多个等价表述以提升"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "召回率 [1"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "]。\n\n**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Agent-Loop "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的推理范式：**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\nAgent-Loop"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 属于 **Re"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Act "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "式单循环推理"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "引擎** [2"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "]。模型在一个"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "循环里反复"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "思考、调用工具"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "、观察结果，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "直到产出最终答案"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "或计划全部完成"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " [2]。"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "status": "done"
+      }
+    },
+    {
+      "event": "citation",
+      "data": {
+        "refs": [
+          {
+            "n": 1,
+            "title": "Agent-Loop 推理引擎",
+            "doc_id": "kb-agent-loop"
+          },
+          {
+            "n": 2,
+            "title": "Google ADK 简介",
+            "doc_id": "kb-adk-overview"
+          }
+        ]
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

@@ -1,0 +1,136 @@
+{
+  "case_id": "r-weather-plain-01",
+  "engine": "plan_execute",
+  "text": "杭州当前天气为晴，温度为 26°C。",
+  "tool_calls": [
+    [
+      "get_weather",
+      {
+        "city": "杭州"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "get_weather",
+      {
+        "city": "杭州",
+        "weather": "晴",
+        "temperature_c": 26,
+        "humidity": "40%"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 2,
+      "title": "调用 get_weather 工具查询杭州天气",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "title": "提取并复述温度信息",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 3781.435250013601,
+  "total_ms": 4092.5524170161225,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 2,
+        "title": "调用 get_weather 工具查询杭州天气",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "title": "提取并复述温度信息",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "get_weather",
+        "args": {
+          "city": "杭州"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "get_weather",
+        "response": {
+          "city": "杭州",
+          "weather": "晴",
+          "temperature_c": 26,
+          "humidity": "40%"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "杭州"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "当前"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "天气为晴，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "温度为 26"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "°C。"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "status": "done"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

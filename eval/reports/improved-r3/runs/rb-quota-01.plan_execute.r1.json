@@ -1,0 +1,215 @@
+{
+  "case_id": "rb-quota-01",
+  "engine": "plan_execute",
+  "text": "我需要先了解 `__quota__` 的具体文本内容才能进行翻译。请您提供需要翻译的完整文本。\n\n或者，如果 `__quota__` 是一个占位符，请告诉我您希望翻译的实际文本内容以及目标语言（如英语 en、日语 ja、法语 fr 等）。",
+  "tool_calls": [],
+  "tool_results": [],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 3,
+      "title": "分析原文语境与文化内涵",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 3,
+      "title": "转换目标语言表达习惯",
+      "status": "planned"
+    },
+    {
+      "step": 3,
+      "total": 3,
+      "title": "润色译文以确保自然流畅",
+      "status": "planned"
+    },
+    {
+      "step": 3,
+      "total": 3,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 2163.339916965924,
+  "total_ms": 3279.0657079895027,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 3,
+        "title": "分析原文语境与文化内涵",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 3,
+        "title": "转换目标语言表达习惯",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 3,
+        "total": 3,
+        "title": "润色译文以确保自然流畅",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我需要"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "先"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "了解"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " `"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "__quota__`"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 的具体文本内容"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "才能进行翻译"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。请您提供需要"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译的完整文本"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n或者，如果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " `__quota__"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "` 是一个占"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "位符，请"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "告诉我您希望翻译"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的实际"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "文本内容以及目标"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "语言（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "如英语 en、"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "日语 ja"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "、法语 fr "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "等）。"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 3,
+        "total": 3,
+        "status": "done"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

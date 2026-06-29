@@ -1,0 +1,86 @@
+{
+  "case_id": "r-math-a2a-01",
+  "engine": "agent_loop",
+  "text": "23*47 的结果是 **1081**。",
+  "tool_calls": [
+    [
+      "math_expert",
+      {
+        "request": "精确计算 23*47"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "math_expert",
+      {
+        "result": "计算 $23 \\times 47$ 的步骤如下：\n\n**方法一：竖式乘法**\n\n1. 先计算 $23 \\times 7$：\n   $$23 \\times 7 = 161$$\n\n2. 再计算 $23 \\times 40$（即 $23 \\times 4$ 后补一个 0）：\n   $$23 \\times 4 = 92$$\n   $$23 \\times 40 = 920$$\n\n3. 将两部分结果相加：\n   $$161 + 920 = 1081$$\n\n**方法二：分配律拆分**\n\n$$23 \\times 47 = 23 \\times (50 - 3)$$\n$$= 23 \\times 50 - 23 \\times 3$$\n$$= 1150 - 69$$\n$$= 1081$$\n\n**最终结果：**\n$$1081$$"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 10436.006082978565,
+  "total_ms": 10568.72304098215,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "math_expert",
+        "args": {
+          "request": "精确计算 23*47"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "math_expert",
+        "response": {
+          "result": "计算 $23 \\times 47$ 的步骤如下：\n\n**方法一：竖式乘法**\n\n1. 先计算 $23 \\times 7$：\n   $$23 \\times 7 = 161$$\n\n2. 再计算 $23 \\times 40$（即 $23 \\times 4$ 后补一个 0）：\n   $$23 \\times 4 = 92$$\n   $$23 \\times 40 = 920$$\n\n3. 将两部分结果相加：\n   $$161 + 920 = 1081$$\n\n**方法二：分配律拆分**\n\n$$23 \\times 47 = 23 \\times (50 - 3)$$\n$$= 23 \\times 50 - 23 \\times 3$$\n$$= 1150 - 69$$\n$$= 1081$$\n\n**最终结果：**\n$$1081$$"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "2"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "3*47"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 的结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "是 **10"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "81**。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

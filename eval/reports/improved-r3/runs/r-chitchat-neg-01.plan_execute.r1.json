@@ -1,0 +1,176 @@
+{
+  "case_id": "r-chitchat-neg-01",
+  "engine": "plan_execute",
+  "text": "你好呀！听到你心情不错，我也跟着开心起来了～ 😊\n\n既然今天状态这么好，要不要聊聊最近有什么让你觉得特别放松或有趣的小事？或者，如果你愿意，我也可以帮你查查所在城市的天气，看看是不是好天气给心情加了分？🌤️",
+  "tool_calls": [],
+  "tool_results": [],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 2,
+      "title": "回应问候并分享愉悦情绪",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "title": "发起轻松话题延续对话",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 2037.7947089727968,
+  "total_ms": 3114.1886249533854,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 2,
+        "title": "回应问候并分享愉悦情绪",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "title": "发起轻松话题延续对话",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "你好"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "呀！听到"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "你心情"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "不错，我也跟着"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "开心起来了～"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 😊\n\n既然"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "今天状态这么好，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "要不要聊聊"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "最近有什么让你觉得"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "特别放松或有趣"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的小事？或者"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，如果你愿意，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我也可以帮你查查"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "所在城市的天气，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "看看"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "是不是好天气给"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "心情加了分？"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "🌤️"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "status": "done"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

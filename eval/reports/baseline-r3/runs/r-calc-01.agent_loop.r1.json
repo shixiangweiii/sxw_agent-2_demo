@@ -1,0 +1,70 @@
+{
+  "case_id": "r-calc-01",
+  "engine": "agent_loop",
+  "text": "35",
+  "tool_calls": [
+    [
+      "calculator",
+      {
+        "expression": "(3+4)*5"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "calculator",
+      {
+        "expression": "(3+4)*5",
+        "result": 35.0
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 1970.3052080003545,
+  "total_ms": 2040.3950410545804,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "calculator",
+        "args": {
+          "expression": "(3+4)*5"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "calculator",
+        "response": {
+          "expression": "(3+4)*5",
+          "result": 35.0
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "3"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "5"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

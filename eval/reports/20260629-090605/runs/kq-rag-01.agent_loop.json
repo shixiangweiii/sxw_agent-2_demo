@@ -1,0 +1,330 @@
+{
+  "case_id": "kq-rag-01",
+  "engine": "agent_loop",
+  "text": "根据知识库检索结果，混合召回 RAG 合并两路结果的核心方法是：\n\n**使用互惠排名融合（RRF, Reciprocal Rank Fusion）算法** [1]。\n\n具体来说：\n1. **向量检索**：捕捉语义相似性\n2. **全文检索（BM25）**：保证关键词精确匹配\n3. **RRF 融合**：对两路返回结果的排名进行倒数加权求和，生成综合排序\n\nRRF 的基本思想是：对于每个文档，将其在向量检索结果中的排名倒数与在全文检索结果中的排名倒数相加（通常会加上一个平滑常数），得分越高则最终排名越靠前。这种方式无需对两路结果的原始分数进行归一化，就能有效兼顾语义匹配和关键词匹配的優勢 [1]。",
+  "tool_calls": [],
+  "tool_results": [],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 1370.6355830072425,
+  "total_ms": 4353.638458007481,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "根据"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "知识库检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果，混合召回"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " RAG 合并"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "两路结果的核心"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "方法是：\n\n**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "使用互惠排名融合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（RRF,"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Reciprocal Rank"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Fusion）算法**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " [1]"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n具体来说："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "1. **向量"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索**：捕捉"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "语义相似性\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "2. **全文"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索（BM2"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "5）**：保证"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "关键词精确匹配\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "3. **RR"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "F 融合**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：对"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "两路返回结果的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "排名进行倒数加权"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "求"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "和，生成综合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "排序\n\nRRF"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 的基本"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "思想是：对于"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "每个文档，将其"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "在向量检索结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "中的排名倒数与"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "在全文检索结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "中的排名倒数相加"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（通常会加上一个"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "平滑"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "常数），得分越高"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "则"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "最终排名越靠前"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "这种方式无需对两"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "路结果的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "原始分数进行归"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "一"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "化，就能有效"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "兼顾"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "语义匹配和关键词"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "匹配的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "優勢 [1]"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

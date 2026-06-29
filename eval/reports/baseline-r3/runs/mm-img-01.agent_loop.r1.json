@@ -1,0 +1,48 @@
+{
+  "case_id": "mm-img-01",
+  "engine": "agent_loop",
+  "text": "图中一位女子坐在夕阳下的沙滩上，微笑着与一只金毛犬握手互动。",
+  "tool_calls": [],
+  "tool_results": [],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 1228.0813330435194,
+  "total_ms": 1654.1156660532579,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "图中"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "一位女子"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "坐在夕阳下的沙滩上，微笑着与一只金"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "毛犬握手互动。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

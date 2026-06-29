@@ -1,0 +1,26 @@
+# sxw_optimization_demo — Python 3.12 依赖清单
+# 安装：env_sxw_demo/bin/pip install -r requirements.txt
+# 镜像兜底：-i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
+
+# --- Agent runtime (Google ADK) ---
+google-adk[extensions]==2.3.0    # 含 litellm；用最新版（2.3.0）复刻业务逻辑，已验证关键类全可用
+a2a-sdk>=0.3.4,<0.4              # A2A 协议（与 google-adk 2.3.0 对齐：ADK RemoteA2aAgent/to_a2a 依赖；不可用 1.x）
+
+# --- Web / SSE ---
+fastapi
+uvicorn[standard]
+sse-starlette
+python-multipart                 # multipart 上传（多模态图片/文件）
+
+# --- HTTP / config ---
+httpx
+pydantic-settings
+
+# --- LLM / embeddings ---
+openai                           # 嵌入直连 DashScope compatible-mode
+tiktoken                         # token 计数（message budget）
+
+# --- RAG storage (local backends) ---
+numpy                            # 本地向量余弦
+rank_bm25                        # 本地全文 BM25
+jieba                            # 中文分词

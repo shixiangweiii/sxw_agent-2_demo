@@ -1,0 +1,636 @@
+{
+  "case_id": "kq-rag-01",
+  "engine": "agent_loop",
+  "text": "我来帮你查询混合召回 RAG 的相关知识。\n\n根据知识库资料，混合召回 RAG 的结果合并方式如下：\n\n**核心方法：互惠排名融合（RRF, Reciprocal Rank Fusion）**\n\n混合召回同时使用两路检索：\n1. **向量检索** - 基于语义相似度匹配\n2. **全文检索（BM25）** - 基于关键词精确匹配\n\n然后用 **RRF（互惠排名融合）** 算法将两路结果合并 [1]。\n\n**RRF 的工作原理：**\n- 对每个文档，分别从两路检索结果中获取其排名位置\n- 计算融合得分：`score = 1/(k + rank_vector) + 1/(k + rank_bm25)`\n  - 其中 k 是平滑常数（通常取 60）\n  - rank 是该文档在对应检索结果中的排名\n- 按融合得分重新排序，取 top-K 作为最终召回结果\n\n**优势：**\n- 兼顾语义相似性（向量检索擅长）和关键词精确匹配（BM25 擅长）\n- 无需复杂的归一化处理，因为 RRF 只依赖排名而非原始分数\n- 能有效提升召回率和鲁棒性\n\n这种混合策略是生产级 RAG 系统的常见做法，能够弥补单一检索方式的不足 [1]。",
+  "tool_calls": [
+    [
+      "knowledge_search",
+      {
+        "query": "混合召回 RAG 向量检索 全文检索 结果合并"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "knowledge_search",
+      {
+        "hits": [
+          {
+            "n": 1,
+            "title": "混合召回 RAG 流水线",
+            "doc_id": "kb-rag-pipeline",
+            "content": "# 混合召回 RAG 流水线\n生产级 RAG 通常包含：文档解析、切分（chunk）、向量化（embedding）、索引、检索、重排、生成。\n混合召回（hybrid retrieval）同时使用向量检索与全文检索（BM25），再用互惠排名融合（RRF）合并两路结果，兼顾语义相似与关键词精确匹配。\n查询改写（query rewrite）会把用户问题扩展为多个等价表述以提升召回率。"
+          },
+          {
+            "n": 2,
+            "title": "Agent-Loop 推理引擎",
+            "doc_id": "kb-agent-loop",
+            "content": "# Agent-Loop 推理引擎\nAgent-Loop 是 ReAct 式单循环推理引擎：模型在一个循环里反复思考、调用工具、观察结果，直到产出最终答案或计划全部完成。\n生产级加固包括：工具异常喂回（ToolErrorFeedback，把异常封装成 function_response 不中断对话）、上下文超长反应式截断重试（ContextOverflow）、计划续推（TaskPlanTool）。\n下图展示了循环的结构：\n![agent loop diagram](https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg)\n图片描述：一位女子在夕阳下的海滩上与她的金毛犬互动，狗狗正伸出爪子与她“握手”，画面温馨而充满爱意。"
+          },
+          {
+            "n": 3,
+            "title": "Google ADK 简介",
+            "doc_id": "kb-adk-overview",
+            "content": "# Google ADK 简介\nGoogle Agent Development Kit（ADK）是用于构建生产级 LLM 智能体的框架。\n核心概念包括 LlmAgent（大模型智能体）、Runner（运行时）、Tool（工具）、Session（会话）、Artifact（多模态制品）与 Plugin（生命周期插件）。\nADK 通过 LiteLlm 适配层支持任意 OpenAI 兼容模型端点，例如阿里云 DashScope 的 Qwen 系列。"
+          }
+        ],
+        "count": 3,
+        "note": "请基于以上资料回答，并在引用处用 [n] 标注（n 为资料序号）。"
+      }
+    ]
+  ],
+  "citations": [
+    {
+      "refs": [
+        {
+          "n": 1,
+          "title": "混合召回 RAG 流水线",
+          "doc_id": "kb-rag-pipeline"
+        }
+      ]
+    }
+  ],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 786.3642500014976,
+  "total_ms": 9916.888875013683,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "我来"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "帮你"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "查询"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "混合召回 RAG"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 的相关知识。\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "knowledge_search",
+        "args": {
+          "query": "混合召回 RAG 向量检索 全文检索 结果合并"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "knowledge_search",
+        "response": {
+          "hits": [
+            {
+              "n": 1,
+              "title": "混合召回 RAG 流水线",
+              "doc_id": "kb-rag-pipeline",
+              "content": "# 混合召回 RAG 流水线\n生产级 RAG 通常包含：文档解析、切分（chunk）、向量化（embedding）、索引、检索、重排、生成。\n混合召回（hybrid retrieval）同时使用向量检索与全文检索（BM25），再用互惠排名融合（RRF）合并两路结果，兼顾语义相似与关键词精确匹配。\n查询改写（query rewrite）会把用户问题扩展为多个等价表述以提升召回率。"
+            },
+            {
+              "n": 2,
+              "title": "Agent-Loop 推理引擎",
+              "doc_id": "kb-agent-loop",
+              "content": "# Agent-Loop 推理引擎\nAgent-Loop 是 ReAct 式单循环推理引擎：模型在一个循环里反复思考、调用工具、观察结果，直到产出最终答案或计划全部完成。\n生产级加固包括：工具异常喂回（ToolErrorFeedback，把异常封装成 function_response 不中断对话）、上下文超长反应式截断重试（ContextOverflow）、计划续推（TaskPlanTool）。\n下图展示了循环的结构：\n![agent loop diagram](https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg)\n图片描述：一位女子在夕阳下的海滩上与她的金毛犬互动，狗狗正伸出爪子与她“握手”，画面温馨而充满爱意。"
+            },
+            {
+              "n": 3,
+              "title": "Google ADK 简介",
+              "doc_id": "kb-adk-overview",
+              "content": "# Google ADK 简介\nGoogle Agent Development Kit（ADK）是用于构建生产级 LLM 智能体的框架。\n核心概念包括 LlmAgent（大模型智能体）、Runner（运行时）、Tool（工具）、Session（会话）、Artifact（多模态制品）与 Plugin（生命周期插件）。\nADK 通过 LiteLlm 适配层支持任意 OpenAI 兼容模型端点，例如阿里云 DashScope 的 Qwen 系列。"
+            }
+          ],
+          "count": 3,
+          "note": "请基于以上资料回答，并在引用处用 [n] 标注（n 为资料序号）。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "根据"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "知识库资料"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，混合召回 R"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "AG 的结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "合并方式如下："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n**核心方法"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：互惠排名融合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（RRF,"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Reciprocal Rank"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Fusion）**\n\n混合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "召回同时使用两"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "路检索：\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "1. **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "向量检索** -"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 基于语义相似度"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "匹配\n2."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "全文检索（BM"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "25）**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " - 基于关键词"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "精确匹配\n\n然后用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **RRF（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "互惠"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "排名融合）** "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "算法将两路"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果合并 [1"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "]。\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**RRF "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的工作原理：**\n-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 对每个文档"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，分别从两路"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索结果中"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "获取其排名位置"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n- 计算"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "融合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "得分：`score"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " = 1/("
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "k + rank_vector"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ") + 1"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "/(k + rank"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "_bm25)`"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n  - "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "其中 k"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 是平滑常数"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（通常取"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 60）"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n  - rank"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 是该文档在"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "对应"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索结果中的排名"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n- 按"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "融合得分重新排序"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，取"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " top-K 作为"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "最终召回结果\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "优势：**\n-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 兼顾语义相似"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "性（向量检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "擅长"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）和关键词精确"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "匹配（BM2"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "5 擅长"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）\n- "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "无需复杂的归一"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "化处理"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，因为 RRF"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 只依赖排名"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "而非"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "原始分数\n-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "能有效提升召回率和"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "鲁棒性\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "这种"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "混合策略是生产"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "级 R"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "AG 系统的常见"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "做法，能够弥补"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "单一检索方式的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "不足 [1]"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。"
+      }
+    },
+    {
+      "event": "citation",
+      "data": {
+        "refs": [
+          {
+            "n": 1,
+            "title": "混合召回 RAG 流水线",
+            "doc_id": "kb-rag-pipeline"
+          }
+        ]
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

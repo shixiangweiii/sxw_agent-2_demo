@@ -1,0 +1,632 @@
+{
+  "case_id": "r-researcher-01",
+  "engine": "agent_loop",
+  "text": "我将把这个开放子问题委派给 researcher 子代理来获取结构化要点。\n\nresearcher 子代理已返回关于\"如何评估一个 RAG 系统的检索质量\"的结构化要点，包含以下6个核心维度：\n\n1. **相关性评估（Relevance）**：衡量检索到的文档片段与用户查询的语义匹配程度，常用指标包括命中率（Hit Rate）、平均倒数排名（MRR）和归一化折扣累计增益（NDCG）。\n\n2. **上下文充分性（Context Sufficiency）**：评估检索内容是否包含回答查询所需的完整关键信息，通常通过\"上下文召回率\"（Context Recall）来量化，即黄金答案中的事实有多少能在检索上下文中找到依据。\n\n3. **噪声与干扰控制（Noise & Interference）**：分析检索结果中无关或错误信息的比例，高噪声会误导生成模型，可通过计算检索文档中与问题无关的内容占比或使用 LLM 判断文档的\"有用性\"来评估。\n\n4. **排序质量（Ranking Quality）**：考察相关文档在返回列表中的位置分布，确保高相关性内容排在前面，重点关注前 k 个结果（如 Top-3 或 Top-5）的准确率，因为生成模型通常只利用头部结果。\n\n5. **鲁棒性与泛化能力**：测试系统在不同类型查询（如模糊查询、多跳推理、对抗性输入）下的表现稳定性，以及面对领域外数据或新数据时的适应能力。\n\n6. **端到端影响分析**：虽然侧重检索，但需结合生成结果间接评估，若检索质量高但生成答案错误，可能是生成模块问题；若检索缺失关键信息导致幻觉，则直接反映检索缺陷，可通过\"忠实度\"（Faithfulness）指标辅助判断。",
+  "tool_calls": [
+    [
+      "researcher",
+      {
+        "request": "如何评估一个 RAG 系统的检索质量"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "researcher",
+      {
+        "result": "1. **相关性评估（Relevance）**：衡量检索到的文档片段与用户查询的语义匹配程度，常用指标包括命中率（Hit Rate）、平均倒数排名（MRR）和归一化折扣累计增益（NDCG）。\n2. **上下文充分性（Context Sufficiency）**：评估检索内容是否包含回答查询所需的完整关键信息，通常通过“上下文召回率”（Context Recall）来量化，即黄金答案中的事实有多少能在检索上下文中找到依据。\n3. **噪声与干扰控制（Noise & Interference）**：分析检索结果中无关或错误信息的比例，高噪声会误导生成模型，可通过计算检索文档中与问题无关的内容占比或使用 LLM 判断文档的“有用性”来评估。\n4. **排序质量（Ranking Quality）**：考察相关文档在返回列表中的位置分布，确保高相关性内容排在前面，重点关注前 k 个结果（如 Top-3 或 Top-5）的准确率，因为生成模型通常只利用头部结果。\n5. **鲁棒性与泛化能力**：测试系统在不同类型查询（如模糊查询、多跳推理、对抗性输入）下的表现稳定性，以及面对领域外数据或新数据时的适应能力。\n6. **端到端影响分析**：虽然侧重检索，但需结合生成结果间接评估，若检索质量高但生成答案错误，可能是生成模块问题；若检索缺失关键信息导致幻觉，则直接反映检索缺陷，可通过“忠实度”（Faithfulness）指标辅助判断。"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 1067.2569170128554,
+  "total_ms": 15671.03575001238,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "我将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "把这个开放子问题"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "委派给 researcher "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "子代理来获取结构化"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "要点。\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "researcher",
+        "args": {
+          "request": "如何评估一个 RAG 系统的检索质量"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "researcher",
+        "response": {
+          "result": "1. **相关性评估（Relevance）**：衡量检索到的文档片段与用户查询的语义匹配程度，常用指标包括命中率（Hit Rate）、平均倒数排名（MRR）和归一化折扣累计增益（NDCG）。\n2. **上下文充分性（Context Sufficiency）**：评估检索内容是否包含回答查询所需的完整关键信息，通常通过“上下文召回率”（Context Recall）来量化，即黄金答案中的事实有多少能在检索上下文中找到依据。\n3. **噪声与干扰控制（Noise & Interference）**：分析检索结果中无关或错误信息的比例，高噪声会误导生成模型，可通过计算检索文档中与问题无关的内容占比或使用 LLM 判断文档的“有用性”来评估。\n4. **排序质量（Ranking Quality）**：考察相关文档在返回列表中的位置分布，确保高相关性内容排在前面，重点关注前 k 个结果（如 Top-3 或 Top-5）的准确率，因为生成模型通常只利用头部结果。\n5. **鲁棒性与泛化能力**：测试系统在不同类型查询（如模糊查询、多跳推理、对抗性输入）下的表现稳定性，以及面对领域外数据或新数据时的适应能力。\n6. **端到端影响分析**：虽然侧重检索，但需结合生成结果间接评估，若检索质量高但生成答案错误，可能是生成模块问题；若检索缺失关键信息导致幻觉，则直接反映检索缺陷，可通过“忠实度”（Faithfulness）指标辅助判断。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "research"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "er 子代理"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "已返回关于\""
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "如何评估一个 R"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "AG 系统的检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "质量\"的结构化"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "要点，包含以下"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "6个核心维度"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：\n\n1."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **相关性评估（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Relevance）**："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "衡量检索到的文档"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "片段与用户查询"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的语义匹配程度"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，常用指标包括"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "命中率（Hit Rate"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）、平均倒数排名"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（MRR）"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "和归一化"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "折扣累计增益（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "NDCG）。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n2. **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "上下文充分性（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Context Sufficiency）**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：评估检索内容"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "是否包含回答查询"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "所需的完整关键信息"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "通常通过\"上下文"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "召回率\"（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Context Recall）来"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "量化，即黄金"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "答案中的事实有多少"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "能在检索上下文中"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "找到依据。\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "3. **噪声"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "与干扰控制（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Noise & Interference"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）**：分析检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果中无关或"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "错误信息的比例，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "高噪声会误导"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "生成模型，可通过"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "计算检索文档中与"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "问题无关的内容占比"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "或使用 LLM "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "判断文档的\""
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "有用性\"来"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "评估。\n\n4"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ". **排序质量"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（Ranking Quality"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）**：考察相关"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "文档在返回列表中的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "位置分布，确保"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "高相关性内容排在"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "前面，重点关注前"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " k 个结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（如 Top-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "3 或 Top"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "-5）的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "准确率，因为生成"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "模型通常只利用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "头部结果。\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "5. **鲁"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "棒性与泛化"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "能力**：测试"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "系统在不同类型查询"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（如模糊查询"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "、多跳推理"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "、对抗性输入"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）下的表现稳定性"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，以及面对领域"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "外数据或新"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "数据时的适应能力"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n6."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **端到端影响"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "分析**：虽然"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "侧重检索，但"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "需结合生成结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "间接评估，若"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索质量高但"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "生成答案错误，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "可能是生成模块问题"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "；若检索缺失"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "关键信息导致幻觉"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，则直接反映"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索缺陷，可通过"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\"忠实度\""
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（Faithfulness"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）指标辅助判断"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

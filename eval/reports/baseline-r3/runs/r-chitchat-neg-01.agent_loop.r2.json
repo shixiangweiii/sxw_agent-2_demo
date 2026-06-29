@@ -1,0 +1,108 @@
+{
+  "case_id": "r-chitchat-neg-01",
+  "engine": "agent_loop",
+  "text": "你好呀！听到你心情不错，我也很开心呢。😊\n\n今天有什么特别让你开心的事情吗？或者只是想轻松地聊聊天、分享一些日常的小确幸？我随时都在，很乐意陪你聊聊～",
+  "tool_calls": [],
+  "tool_results": [],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 935.9670000267215,
+  "total_ms": 1832.3294160072692,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "你好"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "呀！听到"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "你心情不错，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我也很开心"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "呢。😊\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "今天"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "有什么特别让你开心的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "事情吗？"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "或者只是想轻松地聊"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "聊天、"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "分享一些日常的小"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "确幸？我"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "随时都在，很"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "乐意陪你聊聊～"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

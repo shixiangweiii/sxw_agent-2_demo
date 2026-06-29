@@ -1,0 +1,144 @@
+{
+  "case_id": "r-translate-skill-01",
+  "engine": "agent_loop",
+  "text": "翻译结果为：[en] 你好世界",
+  "tool_calls": [
+    [
+      "deep_translate",
+      {
+        "text": "你好世界",
+        "target_lang": "en"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "deep_translate",
+      {
+        "skill": "deep_translate",
+        "skipSummarization": false,
+        "content": "[en] 你好世界"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": true,
+      "isPartial": true,
+      "data": "正在分析源语言与语境…"
+    },
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": false,
+      "isPartial": true,
+      "data": "[en] 你"
+    },
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": false,
+      "isPartial": true,
+      "data": "好世界"
+    }
+  ],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 2713.564875011798,
+  "total_ms": 2913.815042003989,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "deep_translate",
+        "args": {
+          "text": "你好世界",
+          "target_lang": "en"
+        }
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": true,
+        "isPartial": true,
+        "data": "正在分析源语言与语境…"
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": false,
+        "isPartial": true,
+        "data": "[en] 你"
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": false,
+        "isPartial": true,
+        "data": "好世界"
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "deep_translate",
+        "response": {
+          "skill": "deep_translate",
+          "skipSummarization": false,
+          "content": "[en] 你好世界"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果为"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：["
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "en] 你好"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "世界"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

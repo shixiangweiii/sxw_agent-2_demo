@@ -1,0 +1,271 @@
+{
+  "case_id": "rb-arag-down-01",
+  "engine": "plan_execute",
+  "text": "未能检索到知识库资料，以下基于常识\n\n混合召回 RAG 通常使用以下两路检索：\n\n1. **向量检索**（Vector Search）：将查询文本转换为向量，通过语义相似度匹配相关文档\n2. **关键词检索**（Keyword Search / BM25）：基于词频和倒排索引进行精确匹配\n\n这两路结果通常会进行融合（如加权合并、RRF 等），以提升召回的全面性和准确性。",
+  "tool_calls": [
+    [
+      "knowledge_search",
+      {
+        "query": "混合召回 RAG 用到哪两路检索"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "knowledge_search",
+      {
+        "hits": [],
+        "count": 0,
+        "degraded": true,
+        "note": "知识检索暂不可用。请在回答开头显式声明『未能访问知识库，以下基于常识』，再谨慎作答；不要编造引用，也不要把常识冒充为检索结果。"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 1,
+      "title": "检索知识库",
+      "status": "planned"
+    },
+    {
+      "step": 1,
+      "total": 1,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 3293.7976250541396,
+  "total_ms": 5026.400625007227,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 1,
+        "title": "检索知识库",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "knowledge_search",
+        "args": {
+          "query": "混合召回 RAG 用到哪两路检索"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "knowledge_search",
+        "response": {
+          "hits": [],
+          "count": 0,
+          "degraded": true,
+          "note": "知识检索暂不可用。请在回答开头显式声明『未能访问知识库，以下基于常识』，再谨慎作答；不要编造引用，也不要把常识冒充为检索结果。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "未能"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索到知识库资料"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，以下基于常识"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n混合召回 R"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "AG 通常使用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "以下两路检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：\n\n1."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "向量检索**（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Vector"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Search）：将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "查询文本转换为向量"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "通过语义相似度匹配"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "相关文档\n2"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ". **关键词"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索**（Keyword"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Search / BM2"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "5）"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：基于词频"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "和倒排索引"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "进行精确匹配\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "这两"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "路结果通常会进行"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "融合（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "如加权合并、"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "RR"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "F 等），"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "以提升召回的全面性和"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "准确性。"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 1,
+        "status": "done"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

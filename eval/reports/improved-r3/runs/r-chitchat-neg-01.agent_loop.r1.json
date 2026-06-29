@@ -1,0 +1,162 @@
+{
+  "case_id": "r-chitchat-neg-01",
+  "engine": "agent_loop",
+  "text": "你好呀！很高兴听到你今天心情不错 😊\n\n既然心情好，要不要聊聊你最近有什么开心的事情？或者如果你有什么想了解的、想计算的、想查询天气的，我都可以帮你哦！\n\n比如我可以：\n- 帮你查某个城市的天气\n- 做一些数学计算\n- 翻译文本\n- 统计文字信息\n- 或者回答一些知识型问题\n\n你想聊点什么呢？",
+  "tool_calls": [],
+  "tool_results": [],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 1131.653208984062,
+  "total_ms": 2677.731291973032,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "你好"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "呀！很高兴听到"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "你今天心情不错"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 😊\n\n既然"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "心情好，要不要"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "聊聊你最近有什么"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "开心的事情？或者"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "如果你有什么想了解的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "、想计算的、"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "想查询天气的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，我都可以帮你"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "哦！\n\n比如"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我可以：\n-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 帮你查某个"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "城市的天气\n-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 做一些数学计算"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n- 翻译"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "文本\n- "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "统计文字信息\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- 或者回答"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "一些知识型问题"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n你想聊点"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "什么呢？"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

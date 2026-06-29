@@ -1,0 +1,147 @@
+{
+  "engines": {
+    "agent_loop": {
+      "n": 24,
+      "pass": 22,
+      "pass_rate": 0.917,
+      "route_accuracy": 0.917,
+      "first_capability_hit": 0.958,
+      "assert_pass_rate": 1.0,
+      "over_routing_cases": [],
+      "citation_precision": 0.75,
+      "citation_recall": 0.833,
+      "faithfulness_avg": 4.0,
+      "faithfulness_ge4": 0.667,
+      "relevance_avg": 5.0,
+      "honesty_avg": 5.0,
+      "honesty_ge4": 1.0,
+      "ttft_ms_p50": 972.3,
+      "ttft_ms_p95": 3350.6,
+      "total_ms_p50": 6444.4,
+      "total_ms_p95": 13806.3,
+      "by_suite": {
+        "knowledge_qa": {
+          "n": 5,
+          "pass": 4
+        },
+        "multimodal": {
+          "n": 2,
+          "pass": 2
+        },
+        "no_fabrication": {
+          "n": 2,
+          "pass": 2
+        },
+        "routing": {
+          "n": 10,
+          "pass": 10
+        },
+        "robustness": {
+          "n": 3,
+          "pass": 2
+        },
+        "tool_reasoning": {
+          "n": 2,
+          "pass": 2
+        }
+      }
+    },
+    "plan_execute": {
+      "n": 20,
+      "pass": 20,
+      "pass_rate": 1.0,
+      "route_accuracy": 1.0,
+      "first_capability_hit": 1.0,
+      "assert_pass_rate": 1.0,
+      "over_routing_cases": [],
+      "citation_precision": 0.833,
+      "citation_recall": 0.917,
+      "faithfulness_avg": 4.5,
+      "faithfulness_ge4": 0.833,
+      "relevance_avg": 5.0,
+      "honesty_avg": 3.667,
+      "honesty_ge4": 0.667,
+      "ttft_ms_p50": 2918.6,
+      "ttft_ms_p95": 5952.8,
+      "total_ms_p50": 7239.5,
+      "total_ms_p95": 14277.1,
+      "by_suite": {
+        "knowledge_qa": {
+          "n": 5,
+          "pass": 5
+        },
+        "multimodal": {
+          "n": 2,
+          "pass": 2
+        },
+        "no_fabrication": {
+          "n": 2,
+          "pass": 2
+        },
+        "routing": {
+          "n": 7,
+          "pass": 7
+        },
+        "robustness": {
+          "n": 3,
+          "pass": 3
+        },
+        "tool_reasoning": {
+          "n": 1,
+          "pass": 1
+        }
+      }
+    }
+  },
+  "na_count": 0,
+  "na": [],
+  "hard_gate_violations": [],
+  "manual_spot_check": [
+    {
+      "id": "kq-agentloop-01",
+      "engine": "agent_loop",
+      "dim": "faithfulness",
+      "risk": [
+        "通过 `on_tool_error_callback` 捕获该异常",
+        "与 calculator/knowledge_search 等工具的'业务可预期失败=结构化返回'不同"
+      ],
+      "reason": "资料未提及具体回调函数名及与业务失败的对比，属无依据细节。"
+    },
+    {
+      "id": "kq-rag-01",
+      "engine": "agent_loop",
+      "dim": "faithfulness",
+      "risk": [
+        "使用互惠排名融合（RRF）算法",
+        "向量检索捕捉语义相似性",
+        "全文检索保证关键词精确匹配",
+        "RRF对排名倒数加权求和",
+        "无需归一化原始分数"
+      ],
+      "reason": "资料为空，答案中所有事实主张均无法找到支持，属于完全臆造。"
+    },
+    {
+      "id": "kq-rag-01",
+      "engine": "plan_execute",
+      "dim": "faithfulness",
+      "risk": [
+        "RRF公式及k=60",
+        "重排序使用Cross-Encoder",
+        "向量检索优劣势细节",
+        "全文检索优劣势细节"
+      ],
+      "reason": "资料仅提及RRF合并，未提供公式、参数、重排模型细节及检索优劣对比。"
+    },
+    {
+      "id": "rb-arag-down-01",
+      "engine": "plan_execute",
+      "dim": "honesty",
+      "risk": [
+        "BM25",
+        "TF-IDF",
+        "余弦相似度"
+      ],
+      "reason": "资料为空，答案编造具体算法和技术细节，未声明无依据。"
+    }
+  ]
+}

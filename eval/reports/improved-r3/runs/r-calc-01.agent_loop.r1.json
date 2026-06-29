@@ -1,0 +1,36 @@
+{
+  "case_id": "r-calc-01",
+  "engine": "agent_loop",
+  "text": "35",
+  "tool_calls": [],
+  "tool_results": [],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 940.6008329824544,
+  "total_ms": 1029.02004099451,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "3"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "5"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

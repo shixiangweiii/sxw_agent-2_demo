@@ -1,0 +1,197 @@
+{
+  "case_id": "r-translate-skill-01",
+  "engine": "plan_execute",
+  "text": "翻译结果：[en] 你好世界",
+  "tool_calls": [
+    [
+      "deep_translate",
+      {
+        "text": "你好世界",
+        "target_lang": "en"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "deep_translate",
+      {
+        "skill": "deep_translate",
+        "skipSummarization": false,
+        "content": "[en] 你好世界"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": true,
+      "isPartial": true,
+      "data": "正在分析源语言与语境…"
+    },
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": false,
+      "isPartial": true,
+      "data": "[en] 你"
+    },
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": false,
+      "isPartial": true,
+      "data": "好世界"
+    }
+  ],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 3,
+      "title": "调用深度翻译技能",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 3,
+      "title": "输入文本『你好世界』并指定目标语言为英文",
+      "status": "planned"
+    },
+    {
+      "step": 3,
+      "total": 3,
+      "title": "获取并返回翻译结果",
+      "status": "planned"
+    },
+    {
+      "step": 3,
+      "total": 3,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 3884.199041989632,
+  "total_ms": 4019.280208973214,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 3,
+        "title": "调用深度翻译技能",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 3,
+        "title": "输入文本『你好世界』并指定目标语言为英文",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 3,
+        "total": 3,
+        "title": "获取并返回翻译结果",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "deep_translate",
+        "args": {
+          "text": "你好世界",
+          "target_lang": "en"
+        }
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": true,
+        "isPartial": true,
+        "data": "正在分析源语言与语境…"
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": false,
+        "isPartial": true,
+        "data": "[en] 你"
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": false,
+        "isPartial": true,
+        "data": "好世界"
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "deep_translate",
+        "response": {
+          "skill": "deep_translate",
+          "skipSummarization": false,
+          "content": "[en] 你好世界"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果：["
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "en] 你好"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "世界"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 3,
+        "total": 3,
+        "status": "done"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

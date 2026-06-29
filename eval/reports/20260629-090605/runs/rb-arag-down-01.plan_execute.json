@@ -1,0 +1,376 @@
+{
+  "case_id": "rb-arag-down-01",
+  "engine": "plan_execute",
+  "text": "混合召回 RAG 通常使用以下两路检索机制：\n\n1. **稀疏检索（关键词检索）**：基于 BM25、TF-IDF 等传统信息检索算法，通过关键词匹配来查找相关文档。优点是能精确匹配特定术语，对专有名词和精确查询效果好。\n\n2. **稠密检索（向量检索）**：基于深度学习模型将文本编码为向量，通过计算向量相似度（如余弦相似度）来查找语义相关的文档。优点是能捕捉语义相似性，即使没有完全相同的关键词也能找到相关内容。\n\n这两路检索结果通常会进行融合（如加权合并、重排序等），以结合各自的优势，提高召回的全面性和准确性。",
+  "tool_calls": [
+    [
+      "knowledge_search",
+      {
+        "query": "混合召回 RAG 两路检索 稀疏检索 稠密检索"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "knowledge_search",
+      {
+        "hits": [],
+        "count": 0,
+        "degraded": true,
+        "note": "知识检索暂不可用，请基于常识直接回答，不要编造引用。"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 2,
+      "title": "识别混合召回 RAG 中的两路检索机制",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "title": "输出稀疏检索（关键词）和稠密检索（向量）",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 3733.8795410469174,
+  "total_ms": 6239.04895799933,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 2,
+        "title": "识别混合召回 RAG 中的两路检索机制",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "title": "输出稀疏检索（关键词）和稠密检索（向量）",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "knowledge_search",
+        "args": {
+          "query": "混合召回 RAG 两路检索 稀疏检索 稠密检索"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "knowledge_search",
+        "response": {
+          "hits": [],
+          "count": 0,
+          "degraded": true,
+          "note": "知识检索暂不可用，请基于常识直接回答，不要编造引用。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "混合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "召回 RAG "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "通常使用以下两"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "路检索机制："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n1. **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "稀疏检索（关键词"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索）**：基于"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " BM25、"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "TF-IDF "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "等传统"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "信息检索算法，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "通过关键词匹配"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "来查找相关文档"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。优点是"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "能精确匹配特定"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "术语"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，对专有名词"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "和"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "精确查询效果好。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n2"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ". **稠密"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索（向量检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）**：基于深度学习"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "模型将文本编码"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "为向量，通过"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "计算向量相似度（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "如"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "余弦相似度）"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "来查找语义相关的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "文档。优点是能"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "捕捉语义相似性"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "即使没有完全相同的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "关键词也能"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "找到相关内容。\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "这两"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "路检索结果通常会"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "进行融合（如"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "加权"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "合并、重排序"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "等"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "），以结合各自"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的优势，提高召回"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的全面"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "性和准确性。"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "status": "done"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

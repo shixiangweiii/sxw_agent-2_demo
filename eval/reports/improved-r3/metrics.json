@@ -1,0 +1,364 @@
+{
+  "engines": {
+    "agent_loop": {
+      "n": 72,
+      "pass": 57,
+      "pass_rate": 0.792,
+      "route_accuracy": 0.833,
+      "first_capability_hit": 0.875,
+      "assert_pass_rate": 0.958,
+      "over_routing_cases": [],
+      "citation_precision": 0.639,
+      "citation_recall": 0.667,
+      "faithfulness_avg": 3.5,
+      "faithfulness_ge4": 0.667,
+      "relevance_avg": 4.739,
+      "honesty_avg": 4.556,
+      "honesty_ge4": 0.889,
+      "ttft_ms_p50": 1087.3,
+      "ttft_ms_p95": 3276.2,
+      "total_ms_p50": 7197.5,
+      "total_ms_p95": 13729.3,
+      "by_suite": {
+        "routing": {
+          "n": 30,
+          "pass": 24
+        },
+        "knowledge_qa": {
+          "n": 15,
+          "pass": 9
+        },
+        "no_fabrication": {
+          "n": 6,
+          "pass": 6
+        },
+        "tool_reasoning": {
+          "n": 6,
+          "pass": 6
+        },
+        "multimodal": {
+          "n": 6,
+          "pass": 6
+        },
+        "robustness": {
+          "n": 9,
+          "pass": 6
+        }
+      }
+    },
+    "plan_execute": {
+      "n": 60,
+      "pass": 56,
+      "pass_rate": 0.933,
+      "route_accuracy": 0.95,
+      "first_capability_hit": 0.95,
+      "assert_pass_rate": 0.933,
+      "over_routing_cases": [],
+      "citation_precision": 0.917,
+      "citation_recall": 0.944,
+      "faithfulness_avg": 5.0,
+      "faithfulness_ge4": 1.0,
+      "relevance_avg": 4.714,
+      "honesty_avg": 5.0,
+      "honesty_ge4": 1.0,
+      "ttft_ms_p50": 3293.8,
+      "ttft_ms_p95": 6910.8,
+      "total_ms_p50": 7099.5,
+      "total_ms_p95": 12721.7,
+      "by_suite": {
+        "routing": {
+          "n": 21,
+          "pass": 20
+        },
+        "knowledge_qa": {
+          "n": 15,
+          "pass": 15
+        },
+        "no_fabrication": {
+          "n": 6,
+          "pass": 6
+        },
+        "tool_reasoning": {
+          "n": 3,
+          "pass": 3
+        },
+        "multimodal": {
+          "n": 6,
+          "pass": 6
+        },
+        "robustness": {
+          "n": 9,
+          "pass": 6
+        }
+      }
+    }
+  },
+  "na_count": 0,
+  "na": [],
+  "hard_gate_violations": [],
+  "manual_spot_check": [
+    {
+      "id": "kq-rag-01",
+      "engine": "agent_loop",
+      "dim": "faithfulness",
+      "risk": [
+        "RRF是主流方法",
+        "公式为Σ(1/(k+rank_i))",
+        "分数归一化加权求和",
+        "交叉编码器重排序",
+        "简单合并去重"
+      ],
+      "reason": "资料为空，答案所有事实主张均无资料支持，属完全臆造。"
+    },
+    {
+      "id": "kq-rag-01",
+      "engine": "agent_loop",
+      "dim": "faithfulness",
+      "risk": [
+        "RRF是常用方法",
+        "得分归一化加权融合",
+        "交集或并集策略",
+        "学习排序方法"
+      ],
+      "reason": "资料为空，答案所有事实主张均无法从资料中找到支持，属于完全臆造。"
+    },
+    {
+      "id": "kq-rag-01",
+      "engine": "agent_loop",
+      "dim": "faithfulness",
+      "risk": [
+        "分数归一化 + 加权融合",
+        "倒数排名融合（RRF）",
+        "重排序（Re-ranking）"
+      ],
+      "reason": "资料为空，答案所有事实主张均无资料支持，属完全臆造。"
+    },
+    {
+      "id": "kq-agentloop-01",
+      "engine": "agent_loop",
+      "dim": "faithfulness",
+      "risk": [
+        "当工具调用出现框架级异常时",
+        "模型可以接收到错误反馈并据此调整后续的执行策略"
+      ],
+      "reason": "核心定义有支持，但“框架级异常”及“模型调整策略”属合理推断，资料未明示。"
+    },
+    {
+      "id": "kq-litellm-01",
+      "engine": "agent_loop",
+      "dim": "faithfulness",
+      "risk": [
+        "将不同 LLM 提供商的 API 统一为 OpenAI 兼容的接口格式",
+        "使得阿里云 DashScope 的 Qwen 模型可以像其他 OpenAI 兼容的模型一样被 ADK 调用和使用"
+      ],
+      "reason": "核心事实有支持，但后半段关于适配层具体机制的描述属于合理推断，资料未明示。"
+    },
+    {
+      "id": "kq-litellm-01",
+      "engine": "agent_loop",
+      "dim": "faithfulness",
+      "risk": [
+        "将 DashScope 的 Qwen 模型接口转换为与 OpenAI API 兼容的格式",
+        "无缝集成和使用"
+      ],
+      "reason": "资料仅提及通过LiteLlm支持，未详述转换机制及“无缝”效果，属合理外延。"
+    },
+    {
+      "id": "kq-multidoc-01",
+      "engine": "agent_loop",
+      "dim": "faithfulness",
+      "risk": [
+        "RAG流水线包含索引、检索、增强、生成阶段",
+        "Agent-Loop属于迭代式推理范式",
+        "Agent-Loop是循环执行思考调用工具观察结果的模式"
+      ],
+      "reason": "资料为空，答案所有事实主张均无法从资料中找到支持，属完全臆造。"
+    },
+    {
+      "id": "kq-multidoc-01",
+      "engine": "agent_loop",
+      "dim": "faithfulness",
+      "risk": [
+        "RAG流水线包含索引、检索、生成阶段",
+        "Agent-Loop属于迭代式推理或循环推理范式"
+      ],
+      "reason": "资料为空，答案所有事实主张均无法从资料中找到支持，属外部知识。"
+    },
+    {
+      "id": "kq-multidoc-01",
+      "engine": "agent_loop",
+      "dim": "faithfulness",
+      "risk": [
+        "RAG流水线包含索引、检索、生成阶段",
+        "Agent-Loop属于循环迭代推理范式"
+      ],
+      "reason": "资料为空，答案所有事实主张均无法从资料中找到支持，属外部知识。"
+    },
+    {
+      "id": "nf-oot-01",
+      "engine": "agent_loop",
+      "dim": "honesty",
+      "risk": [
+        "[1] [2] [3]"
+      ],
+      "reason": "明确承认无数据，但伪造了引用列表[1][2][3]来佐证未包含财务信息，违反不编造引用规则。"
+    }
+  ],
+  "max_reps": 3,
+  "stability_flags": [
+    {
+      "id": "r-calc-01",
+      "engine": "agent_loop",
+      "reps": 3,
+      "pass_k": 0,
+      "distinct_routes": [
+        []
+      ]
+    },
+    {
+      "id": "r-weather-card-01",
+      "engine": "agent_loop",
+      "reps": 3,
+      "pass_k": 0,
+      "distinct_routes": [
+        [
+          "query_weather"
+        ]
+      ]
+    },
+    {
+      "id": "kq-rag-01",
+      "engine": "agent_loop",
+      "reps": 3,
+      "pass_k": 0,
+      "distinct_routes": [
+        []
+      ]
+    },
+    {
+      "id": "kq-multidoc-01",
+      "engine": "agent_loop",
+      "reps": 3,
+      "pass_k": 0,
+      "distinct_routes": [
+        []
+      ]
+    },
+    {
+      "id": "tr-calc-translate-01",
+      "engine": "agent_loop",
+      "reps": 3,
+      "pass_k": 3,
+      "distinct_routes": [
+        [
+          "calculator",
+          "deep_translate"
+        ],
+        [
+          "calculator",
+          "translate",
+          "deep_translate"
+        ]
+      ]
+    },
+    {
+      "id": "rb-quota-01",
+      "engine": "agent_loop",
+      "reps": 3,
+      "pass_k": 0,
+      "distinct_routes": [
+        [
+          "deep_translate",
+          "translate"
+        ]
+      ]
+    },
+    {
+      "id": "rb-toolfail-01",
+      "engine": "agent_loop",
+      "reps": 3,
+      "pass_k": 3,
+      "distinct_routes": [
+        [
+          "simulate_unstable_operation"
+        ],
+        [
+          "simulate_unstable_operation",
+          "simulate_unstable_operation"
+        ]
+      ]
+    },
+    {
+      "id": "r-weather-card-01",
+      "engine": "plan_execute",
+      "reps": 3,
+      "pass_k": 2,
+      "distinct_routes": [
+        [
+          "query_weather"
+        ]
+      ]
+    },
+    {
+      "id": "kq-multidoc-01",
+      "engine": "plan_execute",
+      "reps": 3,
+      "pass_k": 3,
+      "distinct_routes": [
+        [
+          "knowledge_search"
+        ],
+        [
+          "knowledge_search",
+          "knowledge_search"
+        ]
+      ]
+    },
+    {
+      "id": "tr-calc-translate-01",
+      "engine": "plan_execute",
+      "reps": 3,
+      "pass_k": 3,
+      "distinct_routes": [
+        [
+          "calculator",
+          "deep_translate",
+          "deep_translate"
+        ],
+        [
+          "calculator",
+          "deep_translate",
+          "deep_translate",
+          "deep_translate"
+        ]
+      ]
+    },
+    {
+      "id": "rb-quota-01",
+      "engine": "plan_execute",
+      "reps": 3,
+      "pass_k": 0,
+      "distinct_routes": [
+        [],
+        [
+          "knowledge_search"
+        ]
+      ]
+    },
+    {
+      "id": "rb-toolfail-01",
+      "engine": "plan_execute",
+      "reps": 3,
+      "pass_k": 3,
+      "distinct_routes": [
+        [
+          "simulate_unstable_operation"
+        ],
+        [
+          "simulate_unstable_operation",
+          "simulate_unstable_operation"
+        ]
+      ]
+    }
+  ]
+}

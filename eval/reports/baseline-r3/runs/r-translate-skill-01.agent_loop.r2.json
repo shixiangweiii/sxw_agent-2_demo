@@ -1,0 +1,204 @@
+{
+  "case_id": "r-translate-skill-01",
+  "engine": "agent_loop",
+  "text": "翻译结果：`[en] 你好世界`\n\n（注：该工具返回的是占位格式，未做实际翻译。若需要真实翻译，可尝试使用 `translate` 工具。）",
+  "tool_calls": [
+    [
+      "deep_translate",
+      {
+        "text": "你好世界",
+        "target_lang": "en"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "deep_translate",
+      {
+        "skill": "deep_translate",
+        "skipSummarization": false,
+        "content": "[en] 你好世界"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": true,
+      "isPartial": true,
+      "data": "正在分析源语言与语境…"
+    },
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": false,
+      "isPartial": true,
+      "data": "[en] 你"
+    },
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": false,
+      "isPartial": true,
+      "data": "好世界"
+    }
+  ],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 2482.734958000947,
+  "total_ms": 3258.8618329609744,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "deep_translate",
+        "args": {
+          "text": "你好世界",
+          "target_lang": "en"
+        }
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": true,
+        "isPartial": true,
+        "data": "正在分析源语言与语境…"
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": false,
+        "isPartial": true,
+        "data": "[en] 你"
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": false,
+        "isPartial": true,
+        "data": "好世界"
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "deep_translate",
+        "response": {
+          "skill": "deep_translate",
+          "skipSummarization": false,
+          "content": "[en] 你好世界"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：`"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "[en] "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "你好世界`\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（注：该"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "工具返回的是占"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "位格式，未"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "做"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "实际翻译。若"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "需要真实翻译，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "可"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "尝试使用 `translate"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "` 工具"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。）"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

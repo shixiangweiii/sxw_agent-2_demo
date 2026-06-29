@@ -1,0 +1,54 @@
+{
+  "case_id": "mm-img-01",
+  "engine": "agent_loop",
+  "text": "图中一位女子坐在沙滩上与一只金毛犬互动，狗狗正抬起前爪与她握手，背景是夕阳下的海面。",
+  "tool_calls": [],
+  "tool_results": [],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 1692.0993750100024,
+  "total_ms": 2265.415625006426,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "图中"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "一位女子"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "坐在沙滩上与一只金毛犬互动，狗狗"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "正抬起前爪与她握手，背景是夕阳"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "下的海面。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

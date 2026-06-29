@@ -1,0 +1,122 @@
+{
+  "case_id": "r-math-a2a-01",
+  "engine": "agent_loop",
+  "text": "我将使用 math_expert 工具来精确计算 23*47。\n\n23 × 47 = **1081**",
+  "tool_calls": [
+    [
+      "math_expert",
+      {
+        "request": "计算 23*47"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "math_expert",
+      {
+        "result": "计算 $23 \\times 47$ 的步骤如下：\n\n**方法一：竖式乘法**\n\n1. 先计算 $23 \\times 7$：\n   $$23 \\times 7 = 161$$\n\n2. 再计算 $23 \\times 40$（即 $23 \\times 4$ 后补一个零）：\n   $$23 \\times 4 = 92 \\implies 920$$\n\n3. 将两部分结果相加：\n   $$161 + 920 = 1081$$\n\n**方法二：分配律分解**\n\n$$\n\\begin{aligned}\n23 \\times 47 &= 23 \\times (50 - 3) \\\\\n&= 23 \\times 50 - 23 \\times 3 \\\\\n&= 1150 - 69 \\\\\n&= 1081\n\\end{aligned}\n$$\n\n**最终结果：**\n$$1081$$"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 688.5759580181912,
+  "total_ms": 8275.222166033927,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "我将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "使用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " math_expert "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "工具来精确计算"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 23*"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "47。\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "math_expert",
+        "args": {
+          "request": "计算 23*47"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "math_expert",
+        "response": {
+          "result": "计算 $23 \\times 47$ 的步骤如下：\n\n**方法一：竖式乘法**\n\n1. 先计算 $23 \\times 7$：\n   $$23 \\times 7 = 161$$\n\n2. 再计算 $23 \\times 40$（即 $23 \\times 4$ 后补一个零）：\n   $$23 \\times 4 = 92 \\implies 920$$\n\n3. 将两部分结果相加：\n   $$161 + 920 = 1081$$\n\n**方法二：分配律分解**\n\n$$\n\\begin{aligned}\n23 \\times 47 &= 23 \\times (50 - 3) \\\\\n&= 23 \\times 50 - 23 \\times 3 \\\\\n&= 1150 - 69 \\\\\n&= 1081\n\\end{aligned}\n$$\n\n**最终结果：**\n$$1081$$"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "2"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "3 ×"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 47 ="
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **108"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "1**"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

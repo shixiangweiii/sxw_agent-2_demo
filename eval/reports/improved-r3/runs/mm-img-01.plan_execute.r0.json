@@ -1,0 +1,98 @@
+{
+  "case_id": "mm-img-01",
+  "engine": "plan_execute",
+  "text": "图中一位年轻女子坐在沙滩上，与一只金毛犬开心地握手互动，背景是夕阳下波光粼的海面。",
+  "tool_calls": [],
+  "tool_results": [],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 2,
+      "title": "分析图像内容",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "title": "生成一句话描述",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 2494.393334025517,
+  "total_ms": 3128.711958997883,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 2,
+        "title": "分析图像内容",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "title": "生成一句话描述",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "图中"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "一位年轻"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "女子坐在沙滩上，与一只金毛犬开心地"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "握手互动，背景是夕阳下波光粼"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的海面。"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "status": "done"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

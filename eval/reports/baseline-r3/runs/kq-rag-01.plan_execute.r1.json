@@ -1,0 +1,1565 @@
+{
+  "case_id": "kq-rag-01",
+  "engine": "plan_execute",
+  "text": "我将先检索企业知识库中关于混合召回和RRF的相关信息，然后为您详细解释。\n\n根据检索到的资料和相关知识，我来详细解释混合召回 RAG 的工作流程：\n\n## 1. 向量检索与全文检索的基本原理及优劣\n\n**向量检索（Vector Search）**\n- **原理**：将文本通过 embedding 模型转化为高维向量，计算查询向量与文档向量之间的相似度（如余弦相似度）\n- **优势**：能捕捉语义相似性，即使关键词不完全匹配也能找到相关内容；适合处理同义词、 paraphrase 等场景\n- **劣势**：对精确关键词匹配不够敏感；可能召回语义相关但事实不准确的文档；计算成本较高\n\n**全文检索（Full-text Search / BM25）**\n- **原理**：基于词频统计和逆文档频率（TF-IDF 的改进版 BM25），计算查询词与文档的匹配得分\n- **优势**：对精确关键词匹配非常敏感；可解释性强；计算效率高\n- **劣势**：无法理解语义，无法处理同义词或语义相近但用词不同的情况；对查询表述依赖性强\n\n生产级 RAG 通常同时使用这两种检索方式，以兼顾语义相似与关键词精确匹配 [1]。\n\n## 2. 混合召回中两路结果合并的核心策略：RRF（Reciprocal Rank Fusion）\n\n**RRF（倒数排名融合）**是混合召回中最常用的结果合并策略：\n\n**核心公式**：\n```\nRRF_score(doc) = Σ (1 / (k + rank_i))\n```\n其中：\n- `rank_i` 是文档在第 i 路检索结果中的排名\n- `k` 是平滑常数（通常取 60）\n\n**工作原理**：\n1. 分别执行向量检索和全文检索，各自返回 Top-K 结果\n2. 对每个文档，根据其在两路结果中的排名计算 RRF 分数\n3. 如果某文档只出现在一路结果中，另一路的排名视为无穷大（贡献为 0）\n4. 按 RRF 分数降序排列，得到最终的合并结果\n\n**优势**：\n- 无需对两路检索的原始分数进行归一化（因为使用的是排名而非分数）\n- 简单有效，能平衡两路检索的贡献\n- 对异常值鲁棒性强\n\n## 3. 合并后重排序及最终生成答案的流程\n\n完整的混合召回 RAG 流水线包括以下步骤 [1]：\n\n**步骤 1：查询预处理**\n- 查询改写（query rewrite）：把用户问题扩展为多个等价表述以提升召回率 [1]\n\n**步骤 2：双路检索**\n- 并行执行向量检索和全文检索\n- 各自返回 Top-K 候选文档\n\n**步骤 3：结果合并**\n- 使用 RRF 算法合并两路结果\n- 得到统一的排序列表\n\n**步骤 4：重排序（Re-ranking）**\n- 使用更精细的重排序模型（如 cross-encoder）对合并后的候选文档重新打分\n- 重排序模型能更深入地理解查询与文档的相关性\n- 选取 Top-N 最相关的文档作为最终上下文\n\n**步骤 5：答案生成**\n- 将重排序后的文档作为上下文输入给 LLM\n- LLM 基于这些上下文生成最终答案\n- 通常会要求模型引用来源，确保答案的可追溯性\n\n这种混合召回策略能够充分发挥向量检索的语义理解能力和全文检索的精确匹配能力，通过 RRF 融合和重排序进一步优化结果质量，最终提升 RAG 系统的整体性能。",
+  "tool_calls": [
+    [
+      "knowledge_search",
+      {
+        "query": "混合召回 RAG 向量检索 全文检索 RRF 倒数排名融合 结果合并"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "knowledge_search",
+      {
+        "hits": [
+          {
+            "n": 1,
+            "title": "混合召回 RAG 流水线",
+            "doc_id": "kb-rag-pipeline",
+            "content": "# 混合召回 RAG 流水线\n生产级 RAG 通常包含：文档解析、切分（chunk）、向量化（embedding）、索引、检索、重排、生成。\n混合召回（hybrid retrieval）同时使用向量检索与全文检索（BM25），再用互惠排名融合（RRF）合并两路结果，兼顾语义相似与关键词精确匹配。\n查询改写（query rewrite）会把用户问题扩展为多个等价表述以提升召回率。"
+          },
+          {
+            "n": 2,
+            "title": "Agent-Loop 推理引擎",
+            "doc_id": "kb-agent-loop",
+            "content": "# Agent-Loop 推理引擎\nAgent-Loop 是 ReAct 式单循环推理引擎：模型在一个循环里反复思考、调用工具、观察结果，直到产出最终答案或计划全部完成。\n生产级加固包括：工具异常喂回（ToolErrorFeedback，把异常封装成 function_response 不中断对话）、上下文超长反应式截断重试（ContextOverflow）、计划续推（TaskPlanTool）。\n下图展示了循环的结构：\n![agent loop diagram](https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg)\n图片描述：一位女子在夕阳下的海滩上与她的金毛犬互动，狗狗正伸出爪子与她“握手”，画面温馨而充满爱意。"
+          },
+          {
+            "n": 3,
+            "title": "Google ADK 简介",
+            "doc_id": "kb-adk-overview",
+            "content": "# Google ADK 简介\nGoogle Agent Development Kit（ADK）是用于构建生产级 LLM 智能体的框架。\n核心概念包括 LlmAgent（大模型智能体）、Runner（运行时）、Tool（工具）、Session（会话）、Artifact（多模态制品）与 Plugin（生命周期插件）。\nADK 通过 LiteLlm 适配层支持任意 OpenAI 兼容模型端点，例如阿里云 DashScope 的 Qwen 系列。"
+          }
+        ],
+        "count": 3,
+        "note": "请基于以上资料回答，并在引用处用 [n] 标注（n 为资料序号）。"
+      }
+    ]
+  ],
+  "citations": [
+    {
+      "refs": [
+        {
+          "n": 1,
+          "title": "混合召回 RAG 流水线",
+          "doc_id": "kb-rag-pipeline"
+        }
+      ]
+    }
+  ],
+  "skill_events": [],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 3,
+      "title": "解释向量检索与全文检索的基本原理及各自优劣",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 3,
+      "title": "阐述混合召回中两路结果合并的核心策略（如倒数排名融合 RRF）",
+      "status": "planned"
+    },
+    {
+      "step": 3,
+      "total": 3,
+      "title": "说明合并后重排序及最终生成答案的流程",
+      "status": "planned"
+    },
+    {
+      "step": 3,
+      "total": 3,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 3637.542249984108,
+  "total_ms": 23262.592250015587,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 3,
+        "title": "解释向量检索与全文检索的基本原理及各自优劣",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 3,
+        "title": "阐述混合召回中两路结果合并的核心策略（如倒数排名融合 RRF）",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 3,
+        "total": 3,
+        "title": "说明合并后重排序及最终生成答案的流程",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "先检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "企业知识库中"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "关于混合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "召回和RRF"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的相关信息"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，然后为您详细"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "解释。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "knowledge_search",
+        "args": {
+          "query": "混合召回 RAG 向量检索 全文检索 RRF 倒数排名融合 结果合并"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "knowledge_search",
+        "response": {
+          "hits": [
+            {
+              "n": 1,
+              "title": "混合召回 RAG 流水线",
+              "doc_id": "kb-rag-pipeline",
+              "content": "# 混合召回 RAG 流水线\n生产级 RAG 通常包含：文档解析、切分（chunk）、向量化（embedding）、索引、检索、重排、生成。\n混合召回（hybrid retrieval）同时使用向量检索与全文检索（BM25），再用互惠排名融合（RRF）合并两路结果，兼顾语义相似与关键词精确匹配。\n查询改写（query rewrite）会把用户问题扩展为多个等价表述以提升召回率。"
+            },
+            {
+              "n": 2,
+              "title": "Agent-Loop 推理引擎",
+              "doc_id": "kb-agent-loop",
+              "content": "# Agent-Loop 推理引擎\nAgent-Loop 是 ReAct 式单循环推理引擎：模型在一个循环里反复思考、调用工具、观察结果，直到产出最终答案或计划全部完成。\n生产级加固包括：工具异常喂回（ToolErrorFeedback，把异常封装成 function_response 不中断对话）、上下文超长反应式截断重试（ContextOverflow）、计划续推（TaskPlanTool）。\n下图展示了循环的结构：\n![agent loop diagram](https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg)\n图片描述：一位女子在夕阳下的海滩上与她的金毛犬互动，狗狗正伸出爪子与她“握手”，画面温馨而充满爱意。"
+            },
+            {
+              "n": 3,
+              "title": "Google ADK 简介",
+              "doc_id": "kb-adk-overview",
+              "content": "# Google ADK 简介\nGoogle Agent Development Kit（ADK）是用于构建生产级 LLM 智能体的框架。\n核心概念包括 LlmAgent（大模型智能体）、Runner（运行时）、Tool（工具）、Session（会话）、Artifact（多模态制品）与 Plugin（生命周期插件）。\nADK 通过 LiteLlm 适配层支持任意 OpenAI 兼容模型端点，例如阿里云 DashScope 的 Qwen 系列。"
+            }
+          ],
+          "count": 3,
+          "note": "请基于以上资料回答，并在引用处用 [n] 标注（n 为资料序号）。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "根据"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "到的资料和相关"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "知识，我来"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "详细解释混合召回"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " RAG 的工作"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "流程：\n\n##"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 1. "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "向量检索与全文"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索的基本原理及"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "优劣\n\n**向量"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Vector Search）**\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- **原理**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "文本通过 embedding "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "模型转化为高"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "维向量，计算"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "查询向量与文档"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "向量之间的相似度（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "如余弦相似度"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）\n- **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "优势**：能"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "捕捉语义相似性"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "即使关键词不完全匹配"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "也能找到"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "相关内容；适合处理"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "同"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "义词、 paraphrase"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 等场景"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n- **劣势"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**：对精确"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "关键词"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "匹配不够敏感；"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "可能召回"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "语义相关但事实"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "不准确的文档；"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "计算成本较高\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**全文"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索（Full-text"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Search / BM"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "25）**\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- **原理**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：基于词频"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "统计和逆文档"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "频率"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（TF-IDF"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的改进版 BM"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "25"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "），计算查询词"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "与文档的匹配"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "得分\n- **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "优势"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**：对精确"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "关键词匹配非常"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "敏感；可解释"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "性强；计算"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "效率高\n- **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "劣势**：无法"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "理解语义，无法"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "处理同义词或"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "语义相近但用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "词不同的情况；"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "对"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "查询表述依赖性强"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n生产"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "级 RAG "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "通常同时使用这两种"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索方式，以"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "兼顾语义相似与"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "关键词精确匹配 ["
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "1]。\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "## 2."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 混合召回中"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "两路结果合并"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的核心策略：RR"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "F（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Reciprocal Rank"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Fusion"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）\n\n**RR"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "F（倒数排名"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "融合）**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "是混合召回中最"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "常用的结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "合并策略：\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**核心公式"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**：\n```"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\nRRF_score"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "(doc) = Σ"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " ("
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "1 / (k"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " + rank_i))"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n```\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "其中：\n-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " `rank_i`"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 是"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "文档在第 i "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "路检索结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "中的排名\n-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " `k` "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "是平滑常数（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "通常取 6"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "0）\n\n**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "工作原理**：\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "1. 分别"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "执行向量检索和"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "全文"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索，各自返回"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Top-K 结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n2. "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "对每个文档，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "根据其在两路"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果中的排名计算"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " RRF 分数"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n3. "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "如果某文档只"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "出现在一路结果中"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，另一"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "路的排名视为无穷"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "大（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "贡献为 0"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）\n4"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ". 按 R"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "RF 分数降"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "序排列，得到"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "最终的合并结果\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "优势**：\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- 无需对"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "两路检索的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "原始"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "分数进行归一"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "化（因为使用的是"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "排名而非分数）"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n- 简单"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "有效，能平衡"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "两路检索的贡献"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n- 对"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "异常值鲁棒"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "性强"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n## 3"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ". 合并后"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "重排序及"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "最终生成答案的流程"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n完整的混合召回"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " R"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "AG 流水线包括"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "以下步骤"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " [1]："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n**步骤 "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "1："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "查询预处理**\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 查询改写（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "query rewrite）："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "把用户问题扩展"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "为多个等价表述"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "以提升召回率 ["
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "1]\n\n**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "步骤 2："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "双路检索**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n- 并行"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "执行向量检索和"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "全文检索\n-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 各自返回 Top"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "-K 候选文档"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n**步骤"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 3：结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "合并**\n-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 使用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " RRF 算法"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "合并两路结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- 得到统一的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "排序列表\n\n**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "步骤 "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "4：重排序"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（Re-ranking）**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n- 使用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "更精细的重排序"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "模型（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "如 cross-encoder"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）对"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "合并后的候选文档"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "重新打分\n-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "重排序模型能"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "更深入"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "地理解查询与"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "文档的相关性\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- 选取 Top"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "-N"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 最相关的文档"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "作为最终上下文\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**步骤 "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "5：答案生成"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**\n-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 将重排序"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "后的文档作为上下文"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "输入给 LLM"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- LLM "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "基于"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "这些上下文生成最终"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "答案\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- 通常会要求"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "模型引用来源，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "确保答案的可追溯"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "性\n\n这种混合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "召回策略能够"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "充分发挥向量检索的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "语义理解能力和全文"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索的精确匹配"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "能力，通过 R"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "RF 融合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "和重排序进一步优化"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果质量，最终"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "提升 RAG "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "系统的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "整体性能。"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 3,
+        "total": 3,
+        "status": "done"
+      }
+    },
+    {
+      "event": "citation",
+      "data": {
+        "refs": [
+          {
+            "n": 1,
+            "title": "混合召回 RAG 流水线",
+            "doc_id": "kb-rag-pipeline"
+          }
+        ]
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

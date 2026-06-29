@@ -1,0 +1,164 @@
+{
+  "case_id": "r-weather-card-01",
+  "engine": "plan_execute",
+  "text": "已为您查询杭州的天气，结果已通过天气卡片展示。",
+  "tool_calls": [
+    [
+      "query_weather",
+      {
+        "city": "杭州"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "query_weather",
+      {
+        "skill": "query_weather",
+        "skipSummarization": true,
+        "content": "[系统] 技能结果已通过卡片直接展示给用户，请勿复述或总结其内容；如无额外补充可直接简短收尾。"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [
+    {
+      "skill": "query_weather",
+      "dataType": "CARD",
+      "isThinking": false,
+      "isPartial": false,
+      "data": {
+        "type": "weather_card",
+        "city": "杭州",
+        "weather": "晴",
+        "temperatureC": 26,
+        "humidity": "40%"
+      }
+    }
+  ],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 2,
+      "title": "调用 query_weather 技能",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "title": "传入参数 location 为杭州",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 4163.534790975973,
+  "total_ms": 4333.359540964011,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 2,
+        "title": "调用 query_weather 技能",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "title": "传入参数 location 为杭州",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "query_weather",
+        "args": {
+          "city": "杭州"
+        }
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "query_weather",
+        "dataType": "CARD",
+        "isThinking": false,
+        "isPartial": false,
+        "data": {
+          "type": "weather_card",
+          "city": "杭州",
+          "weather": "晴",
+          "temperatureC": 26,
+          "humidity": "40%"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "query_weather",
+        "response": {
+          "skill": "query_weather",
+          "skipSummarization": true,
+          "content": "[系统] 技能结果已通过卡片直接展示给用户，请勿复述或总结其内容；如无额外补充可直接简短收尾。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "已"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "为您查询杭州的天气"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "已通过天气"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "卡片展示。"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "status": "done"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

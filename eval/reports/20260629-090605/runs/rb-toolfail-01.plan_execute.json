@@ -1,0 +1,996 @@
+{
+  "case_id": "rb-toolfail-01",
+  "engine": "plan_execute",
+  "text": "我将按照执行计划，首先调用 `simulate_unstable_operation` 工具并设置 `should_fail=true` 来模拟失败场景。\n\n### 1. 错误信息分析\n工具返回了明确的错误状态：\n- **错误类型**：`RuntimeError: simulated tool failure`\n- **提示信息**：指出这是模拟的工具失败，建议调整参数重试或改用其它方式，并强调不要中断对话。\n\n这验证了框架级的异常处理机制（ToolErrorFeedback）正常工作：工具抛出的未捕获异常被框架捕获并封装成结构化的错误响应返回给了模型，而不是导致整个代理进程崩溃。\n\n### 2. 容错与重试策略\n针对此类“框架级/运行时”失败，制定以下策略：\n- **非致命性判断**：由于错误提示明确说明“不要中断对话”，判定此为可恢复的非致命错误。\n- **重试逻辑**：\n    - 如果是网络波动或临时资源锁导致的失败，通常采用**指数退避重试**（Exponential Backoff）。\n    - 但在此特定场景下，失败是由 `should_fail=true` 参数显式触发的。因此，**简单的重复调用相同参数只会再次失败**。\n- **修正策略**：\n    - **参数修正**：将 `should_fail` 改为 `false` 以获取正常结果。\n    - **替代方案**：如果该工具是关键路径且持续失败，应寻找具有相同业务功能的其他工具（如本例中若有其他演示工具）或跳过该非核心步骤。\n\n### 3. 后续执行步骤\n既然本次调用的目的是“模拟失败并说明如何应对”，我已经完成了观察和分析。若实际任务需要该工具提供有效数据，我将执行以下步骤：\n\n1. **修正参数**：再次调用 `simulate_unstable_operation`，但设置 `should_fail=false`。\n2. **验证结果**：检查返回的成功数据是否符合预期。\n3. **继续主任务**：利用获取到的数据或确认工具可用性后，继续执行用户原本的核心请求。\n\n**示例修正调用（如需获取正常结果）：**\n> 下一步我将调用 `simulate_unstable_operation(should_fail=false)` 来演示成功路径，确保流程闭环。",
+  "tool_calls": [
+    [
+      "simulate_unstable_operation",
+      {
+        "should_fail": true
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "simulate_unstable_operation",
+      {
+        "error": "RuntimeError: simulated tool failure",
+        "hint": "工具执行失败，请根据错误调整参数后重试，或改用其它方式；不要中断对话。"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 4,
+      "title": "调用 simulate_unstable_operation 工具并设置 should_fail 为 true",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 4,
+      "title": "分析工具返回的错误信息或失败状态",
+      "status": "planned"
+    },
+    {
+      "step": 3,
+      "total": 4,
+      "title": "制定针对该失败场景的容错或重试策略",
+      "status": "planned"
+    },
+    {
+      "step": 4,
+      "total": 4,
+      "title": "说明后续完成任务的具体执行步骤",
+      "status": "planned"
+    },
+    {
+      "step": 4,
+      "total": 4,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 2306.7694999626838,
+  "total_ms": 12098.90808298951,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 4,
+        "title": "调用 simulate_unstable_operation 工具并设置 should_fail 为 true",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 4,
+        "title": "分析工具返回的错误信息或失败状态",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 3,
+        "total": 4,
+        "title": "制定针对该失败场景的容错或重试策略",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 4,
+        "total": 4,
+        "title": "说明后续完成任务的具体执行步骤",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "按照执行"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "计划，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "首先调用 `"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "simulate_unstable_operation"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "` 工具并"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "设置 `should_fail"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "=true` 来"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "模拟失败场景。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "simulate_unstable_operation",
+        "args": {
+          "should_fail": true
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "simulate_unstable_operation",
+        "response": {
+          "error": "RuntimeError: simulated tool failure",
+          "hint": "工具执行失败，请根据错误调整参数后重试，或改用其它方式；不要中断对话。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "###"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 1. "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "错误信息分析\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "工具返回了明确的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "错误状态：\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "错误类型**："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "`RuntimeError:"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " simulated tool failure`"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n- **提示信息"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**：指出这是"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "模拟的工具失败，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "建议"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "调整参数重试或"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "改用其它"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "方式，并强调"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "不要中断对话。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n这验证了"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "框架"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "级的异常处理机制"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（ToolError"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Feedback）正常工作："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "工具"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "抛出的未捕获"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "异常被"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "框架捕获并封装"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "成"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结构化的错误响应"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "返回给了模型，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "而不是导致"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "整个代理进程崩溃"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n###"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 2. "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "容错与重试"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "策略\n针对"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "此类“框架级"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "/"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "运行时”失败，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "制定"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "以下策略：\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- **非致命"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "性判断**："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "由于"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "错误提示明确说明"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "“不要中断对话"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "”，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "判定此为可恢复"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的非"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "致命错误。\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- **重试逻辑"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**：\n   "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " - 如果是网络"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "波动或临时资源"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "锁导致的失败，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "通常"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "采用**指数退"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "避重试"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**（Exponential"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Backoff）。\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "    - 但"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "在此特定场景下"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，失败"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "是由 `should_fail"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "=true"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "` 参数显"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "式触发的。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "因此，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**简单的重复调用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "相同参数只会再次"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "失败**。\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- **修正策略"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**：\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "    - **参数"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "修正**：将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " `"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "should_fail` "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "改为 `false`"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 以获取正常"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n    -"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **替代方案**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：如果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "该工具是关键路径"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "且持续失败，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "应"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "寻找具有相同业务"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "功能的其他工具（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "如"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "本例中若有"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "其他演示工具）"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "或跳过该非"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "核心步骤。\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "### 3."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 后续执行步骤"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n既然"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "本次调用的目的是"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "“模拟"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "失败并说明如何应对"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "”，我已经完成了观察"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "和分析。若实际"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "任务需要该工具"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "提供"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "有效数据，我将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "执行"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "以下步骤：\n\n1"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ". **修正参数"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**：再次"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "调用 `simulate_un"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "stable_operation`，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "但设置 `should"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "_fail=false"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "`。\n2"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ". **验证结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**：检查"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "返回的成功数据是否符合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "预期。\n3"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ". **继续主"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "任务**：利用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "获取到的数据或"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "确认工具可用性后"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，继续执行"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "用户原本的核心请求"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n**示例"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "修正调用（如需"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "获取正常结果）"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n> 下一步"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我将调用 `simulate"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "_un"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "stable_operation(should"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "_fail=false)` "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "来演示成功路径"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，确保流程闭环"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 4,
+        "total": 4,
+        "status": "done"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

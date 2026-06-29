@@ -1,0 +1,92 @@
+{
+  "case_id": "mm-img-01",
+  "engine": "plan_execute",
+  "text": "图中一位女子坐在夕阳下的沙滩上，微笑着与一只金毛犬握手互动。",
+  "tool_calls": [],
+  "tool_results": [],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 2,
+      "title": "识别图像内容",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "title": "生成一句话描述",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 2014.6527079632506,
+  "total_ms": 2469.886416976806,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 2,
+        "title": "识别图像内容",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "title": "生成一句话描述",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "图中"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "一位女子"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "坐在夕阳下的沙滩上，微笑着与一只金"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "毛犬握手互动。"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "status": "done"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

@@ -1,0 +1,508 @@
+{
+  "case_id": "rb-toolfail-01",
+  "engine": "agent_loop",
+  "text": "我将按照要求调用 simulate_unstable_operation 工具并设置 should_fail=true 来模拟失败。\n\n工具调用失败了，返回了 `RuntimeError: simulated tool failure` 错误。\n\n根据规则第7条：\"工具失败时根据返回的 error 调整后重试或换路，不要中断。\"\n\n**我将如何继续完成任务：**\n\n1. **识别失败原因**：这是一个模拟的工具失败，错误信息明确说明是 \"simulated tool failure\"。\n\n2. **调整策略**：由于这是用户明确要求模拟失败的测试场景，我已经成功触发了失败。现在我可以：\n   - 如果需要重新尝试该工具，可以将 `should_fail` 改为 `false` 来正常执行\n   - 或者根据实际任务需求，改用其他工具或方式来完成目标\n\n3. **不中断对话**：即使工具失败，我也不会中断整个对话流程，而是根据错误提示进行调整。\n\n如果您希望我继续执行某个具体任务（比如再次调用该工具但让它成功，或者执行其他操作），请告诉我下一步需要做什么。目前这个模拟失败的任务已经完成——我成功调用了会失败的工具，并展示了在工具失败时如何继续处理而不中断对话。",
+  "tool_calls": [
+    [
+      "simulate_unstable_operation",
+      {
+        "should_fail": true
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "simulate_unstable_operation",
+      {
+        "error": "RuntimeError: simulated tool failure",
+        "hint": "工具执行失败，请根据错误调整参数后重试，或改用其它方式；不要中断对话。"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 783.021415991243,
+  "total_ms": 7045.082541008014,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "我将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "按照"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "要求调用 simulate_un"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "stable_operation 工具"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "并设置 should_fail"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "=true 来模拟"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "失败。\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "simulate_unstable_operation",
+        "args": {
+          "should_fail": true
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "simulate_unstable_operation",
+        "response": {
+          "error": "RuntimeError: simulated tool failure",
+          "hint": "工具执行失败，请根据错误调整参数后重试，或改用其它方式；不要中断对话。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "工具"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "调用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "失败了"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，返回了 `"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "RuntimeError: simulated"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " tool failure` "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "错误。\n\n根据"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "规则第7条"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：\""
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "工具失败时根据"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "返回的 error "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "调整后重试或换"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "路，不要中断"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\"\n\n**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我将如何继续完成任务"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n1. **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "识别失败原因**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：这是一个模拟的工具"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "失败，错误信息"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "明确说明"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "是 \"simulated"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " tool failure\"。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n2. **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "调整策略**："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "由于这是用户明确要求"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "模拟失败的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "测试场景，我已经"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "成功触发了失败"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。现在我可以："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "   - 如果需要"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "重新尝试该工具"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，可以将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " `should_fail`"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 改为 `false"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "` 来正常"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "执行"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n   - "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "或者根据实际任务"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "需求，改用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "其他工具或方式"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "来完成目标\n\n3"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ". **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "不中断对话**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：即使工具失败"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，我"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "也不会中断整个对话"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "流程，而是根据"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "错误提示进行调整。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n如果您"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "希望我继续执行"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "某个具体任务（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "比如再次调用该"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "工具但让它成功"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "或者执行其他操作"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "），请告诉我下一步"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "需要做什么。目前"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "这个模拟失败的任务"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "已经完成——我成功"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "调"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "用了会失败的工具"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "并展示了在工具"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "失败时如何继续"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "处理而不"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "中断对话。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

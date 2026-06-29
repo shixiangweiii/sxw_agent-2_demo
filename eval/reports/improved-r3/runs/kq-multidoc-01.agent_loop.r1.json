@@ -1,0 +1,324 @@
+{
+  "case_id": "kq-multidoc-01",
+  "engine": "agent_loop",
+  "text": "未能检索到知识库资料，以下基于常识\n\n1. **RAG 流水线包含的阶段**：\n   RAG（Retrieval-Augmented Generation，检索增强生成）流水线通常包含以下主要阶段：\n   - **索引阶段**：将文档进行分块、向量化并存储到向量数据库中\n   - **检索阶段**：根据用户查询从向量数据库中检索相关文档片段\n   - **生成阶段**：将检索到的相关内容与用户查询一起输入到大语言模型中，生成最终回答\n\n2. **Agent-Loop 属于的推理范式**：\n   Agent-Loop 属于**迭代式推理**或**循环推理**范式。它通过在一个循环中反复执行\"思考→调用工具→观察结果\"的过程，逐步推进任务直到产出最终答案。这种范式区别于单次前向推理，允许智能体根据中间结果动态调整策略，具有更强的问题解决能力和适应性。",
+  "tool_calls": [],
+  "tool_results": [],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 1381.395457952749,
+  "total_ms": 4821.1489169625565,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "未能"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索到知识库资料"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，以下基于常识"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n1"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ". **RAG"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 流水线包含的阶段"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**：\n  "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " RAG（Ret"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "rieval-Augmented"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Generation，检索增强"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "生成）流水线通常"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "包含以下主要阶段"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：\n   -"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **索引阶段**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：将文档进行"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "分块、向"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "量化并存储到"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "向量数据库中\n  "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " - **检索阶段"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**：根据用户"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "查询从向量数据库中"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索相关文档片段"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n   - **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "生成阶段**："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "将检索到的相关内容"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "与用户查询一起"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "输入到大语言模型"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "中，生成最终"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "回答\n\n2."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **Agent-Loop"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 属于的推理"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "范式**："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n   Agent-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Loop 属于**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "迭代式推理**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "或**循环推理"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**范式。它"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "通过在一个循环中"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "反复执行\"思考"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "→调用工具→"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "观察结果\"的过程"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，逐步推进任务"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "直到产出最终答案"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。这种范式区别于"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "单次前向推理"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，允许智能体"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "根据中间结果动态"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "调整策略，具有"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "更强的问题解决能力和适应性"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

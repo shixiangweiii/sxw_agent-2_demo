@@ -1,0 +1,404 @@
+{
+  "case_id": "rb-arag-down-01",
+  "engine": "agent_loop",
+  "text": "我需要先检索企业知识库来了解混合召回 RAG 的相关信息。\n\n知识库暂时不可用，我将基于常识回答这个问题。\n\n混合召回 RAG（Retrieval-Augmented Generation）通常使用以下两路检索：\n\n1. **向量检索（Vector Search / Dense Retrieval）**：将查询和文档转换为向量表示，通过计算向量相似度（如余弦相似度）来检索相关文档。这种方式能够捕捉语义层面的相似性，即使关键词不完全匹配也能找到相关内容。\n\n2. **关键词检索（Keyword Search / Sparse Retrieval）**：基于传统的倒排索引，使用 BM25 等算法进行文本匹配。这种方式对精确的词汇匹配效果好，适合处理专有名词、术语等需要精确匹配的场景。\n\n这两路检索的结果通常会进行融合（如加权合并、RRF 重排序等），以结合各自的优势，提高召回的全面性和准确性。",
+  "tool_calls": [
+    [
+      "knowledge_search",
+      {
+        "query": "混合召回 RAG 两路检索"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "knowledge_search",
+      {
+        "hits": [],
+        "count": 0,
+        "degraded": true,
+        "note": "知识检索暂不可用，请基于常识直接回答，不要编造引用。"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 1081.5599170164205,
+  "total_ms": 5662.422374996822,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "我需要"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "先检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "企业知识库来了解"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "混合召回 R"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "AG 的相关信息。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "knowledge_search",
+        "args": {
+          "query": "混合召回 RAG 两路检索"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "knowledge_search",
+        "response": {
+          "hits": [],
+          "count": 0,
+          "degraded": true,
+          "note": "知识检索暂不可用，请基于常识直接回答，不要编造引用。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "知识库"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "暂时"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "不可用，我将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "基于常识回答"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "这个问题。\n\n混合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "召回 RAG（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Retrieval-Aug"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "mented Generation）通常"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "使用以下两路"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：\n\n1."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **向量检索（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Vector Search"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " / Dense Retrieval"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）**：将查询"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "和文档转换为向量"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "表示"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，通过计算向量"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "相似度（如余"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "弦相似度）来"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索相关文档。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "这种方式"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "能够捕捉语义层面的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "相似性，即使"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "关键词不完全匹配也能"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "找到相关内容。\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "2."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **关键词检索（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Keyword Search / Sparse"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Retrieval）**："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "基于传统的倒排"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "索引，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "使用 BM25"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 等"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "算法进行文本匹配"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。这种方式对精确"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的词汇"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "匹配效果好，适合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "处理专有"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "名词、术语等"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "需要精确匹配的场景"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n这两路"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索的结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "通常会进行融合（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "如"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "加权合并、RR"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "F 重排序"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "等），以"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结合各自的优势，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "提高召回的全面性和"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "准确性。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

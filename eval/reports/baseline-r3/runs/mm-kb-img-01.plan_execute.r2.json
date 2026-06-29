@@ -1,0 +1,371 @@
+{
+  "case_id": "mm-kb-img-01",
+  "engine": "plan_execute",
+  "text": "根据检索结果，知识库中\"Agent-Loop 推理引擎\"[1]这篇文章确实包含配图。\n\n文章中有一张展示 Agent-Loop 循环结构的图片：\n- 图片链接：https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg\n- 图片描述：一位女子在夕阳下的海滩上与她的金毛犬互动，狗狗正伸出爪子与她\"握手\"，画面温馨而充满爱意。\n\n已确认该文章包含配图，按您的要求保留图片。",
+  "tool_calls": [
+    [
+      "knowledge_search",
+      {
+        "query": "Agent-Loop"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "knowledge_search",
+      {
+        "hits": [
+          {
+            "n": 1,
+            "title": "Agent-Loop 推理引擎",
+            "doc_id": "kb-agent-loop",
+            "content": "# Agent-Loop 推理引擎\nAgent-Loop 是 ReAct 式单循环推理引擎：模型在一个循环里反复思考、调用工具、观察结果，直到产出最终答案或计划全部完成。\n生产级加固包括：工具异常喂回（ToolErrorFeedback，把异常封装成 function_response 不中断对话）、上下文超长反应式截断重试（ContextOverflow）、计划续推（TaskPlanTool）。\n下图展示了循环的结构：\n![agent loop diagram](https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg)\n图片描述：一位女子在夕阳下的海滩上与她的金毛犬互动，狗狗正伸出爪子与她“握手”，画面温馨而充满爱意。"
+          },
+          {
+            "n": 2,
+            "title": "Google ADK 简介",
+            "doc_id": "kb-adk-overview",
+            "content": "# Google ADK 简介\nGoogle Agent Development Kit（ADK）是用于构建生产级 LLM 智能体的框架。\n核心概念包括 LlmAgent（大模型智能体）、Runner（运行时）、Tool（工具）、Session（会话）、Artifact（多模态制品）与 Plugin（生命周期插件）。\nADK 通过 LiteLlm 适配层支持任意 OpenAI 兼容模型端点，例如阿里云 DashScope 的 Qwen 系列。"
+          },
+          {
+            "n": 3,
+            "title": "混合召回 RAG 流水线",
+            "doc_id": "kb-rag-pipeline",
+            "content": "# 混合召回 RAG 流水线\n生产级 RAG 通常包含：文档解析、切分（chunk）、向量化（embedding）、索引、检索、重排、生成。\n混合召回（hybrid retrieval）同时使用向量检索与全文检索（BM25），再用互惠排名融合（RRF）合并两路结果，兼顾语义相似与关键词精确匹配。\n查询改写（query rewrite）会把用户问题扩展为多个等价表述以提升召回率。"
+          }
+        ],
+        "count": 3,
+        "note": "请基于以上资料回答，并在引用处用 [n] 标注（n 为资料序号）。"
+      }
+    ]
+  ],
+  "citations": [
+    {
+      "refs": [
+        {
+          "n": 1,
+          "title": "Agent-Loop 推理引擎",
+          "doc_id": "kb-agent-loop"
+        }
+      ]
+    }
+  ],
+  "skill_events": [],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 3,
+      "title": "检索知识库中“Agent-Loop”相关文章",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 3,
+      "title": "检查文章是否包含配图",
+      "status": "planned"
+    },
+    {
+      "step": 3,
+      "total": 3,
+      "title": "若有配图则执行保留操作",
+      "status": "planned"
+    },
+    {
+      "step": 3,
+      "total": 3,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 5643.690750002861,
+  "total_ms": 7616.898708976805,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 3,
+        "title": "检索知识库中“Agent-Loop”相关文章",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 3,
+        "title": "检查文章是否包含配图",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 3,
+        "total": 3,
+        "title": "若有配图则执行保留操作",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "knowledge_search",
+        "args": {
+          "query": "Agent-Loop"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "knowledge_search",
+        "response": {
+          "hits": [
+            {
+              "n": 1,
+              "title": "Agent-Loop 推理引擎",
+              "doc_id": "kb-agent-loop",
+              "content": "# Agent-Loop 推理引擎\nAgent-Loop 是 ReAct 式单循环推理引擎：模型在一个循环里反复思考、调用工具、观察结果，直到产出最终答案或计划全部完成。\n生产级加固包括：工具异常喂回（ToolErrorFeedback，把异常封装成 function_response 不中断对话）、上下文超长反应式截断重试（ContextOverflow）、计划续推（TaskPlanTool）。\n下图展示了循环的结构：\n![agent loop diagram](https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg)\n图片描述：一位女子在夕阳下的海滩上与她的金毛犬互动，狗狗正伸出爪子与她“握手”，画面温馨而充满爱意。"
+            },
+            {
+              "n": 2,
+              "title": "Google ADK 简介",
+              "doc_id": "kb-adk-overview",
+              "content": "# Google ADK 简介\nGoogle Agent Development Kit（ADK）是用于构建生产级 LLM 智能体的框架。\n核心概念包括 LlmAgent（大模型智能体）、Runner（运行时）、Tool（工具）、Session（会话）、Artifact（多模态制品）与 Plugin（生命周期插件）。\nADK 通过 LiteLlm 适配层支持任意 OpenAI 兼容模型端点，例如阿里云 DashScope 的 Qwen 系列。"
+            },
+            {
+              "n": 3,
+              "title": "混合召回 RAG 流水线",
+              "doc_id": "kb-rag-pipeline",
+              "content": "# 混合召回 RAG 流水线\n生产级 RAG 通常包含：文档解析、切分（chunk）、向量化（embedding）、索引、检索、重排、生成。\n混合召回（hybrid retrieval）同时使用向量检索与全文检索（BM25），再用互惠排名融合（RRF）合并两路结果，兼顾语义相似与关键词精确匹配。\n查询改写（query rewrite）会把用户问题扩展为多个等价表述以提升召回率。"
+            }
+          ],
+          "count": 3,
+          "note": "请基于以上资料回答，并在引用处用 [n] 标注（n 为资料序号）。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "根据"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索结果，知识库"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "中\""
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Agent-Loop "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "推理引擎\"[1"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "]这篇文章"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "确实包含配图。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "文章中有一张展示"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Agent"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "-Loop 循环"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结构的图片：\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- 图片"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "链接：https://"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "dashscope."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "oss-cn-beijing"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ".aliyuncs"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ".com/images/dog"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "_and_girl.jpeg"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n- 图片"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "描述：一位女子"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "在夕阳下的海滩"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "上与她的金毛"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "犬互动，狗狗"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "正伸出爪子与她"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\"握手\"，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "画面温馨而充满"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "爱意。\n\n已"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "确认该文章包含"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "配图，按"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "您的要求保留图片"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 3,
+        "total": 3,
+        "status": "done"
+      }
+    },
+    {
+      "event": "citation",
+      "data": {
+        "refs": [
+          {
+            "n": 1,
+            "title": "Agent-Loop 推理引擎",
+            "doc_id": "kb-agent-loop"
+          }
+        ]
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

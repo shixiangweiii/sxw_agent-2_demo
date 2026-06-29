@@ -1,0 +1,92 @@
+{
+  "case_id": "r-weather-plain-01",
+  "engine": "agent_loop",
+  "text": "杭州天气为晴，温度是 26°C。",
+  "tool_calls": [
+    [
+      "get_weather",
+      {
+        "city": "杭州"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "get_weather",
+      {
+        "city": "杭州",
+        "weather": "晴",
+        "temperature_c": 26,
+        "humidity": "40%"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 1736.2840420100838,
+  "total_ms": 1938.5459170443937,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "get_weather",
+        "args": {
+          "city": "杭州"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "get_weather",
+        "response": {
+          "city": "杭州",
+          "weather": "晴",
+          "temperature_c": 26,
+          "humidity": "40%"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "杭州"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "天气"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "为晴，温度"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "是 26"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "°C。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

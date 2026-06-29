@@ -1,0 +1,762 @@
+{
+  "case_id": "kq-rag-01",
+  "engine": "agent_loop",
+  "text": "未能检索到知识库资料，以下基于常识\n\n混合召回 RAG 中，将向量检索（语义相似）和全文检索（关键词匹配）两路结果合并的常见策略包括：\n\n1. **倒数排名融合（RRF, Reciprocal Rank Fusion）**  \n   这是目前最主流的方法。它不依赖原始相似度分数（因为向量得分和 BM25 等全文检索得分量纲不同、难以直接比较），而是基于文档在两路结果中的**排名位置**进行融合。  \n   公式为：每个文档的综合得分 = Σ(1 / (k + rank_i))，其中 `rank_i` 是该文档在第 i 路检索中的排名，`k` 是平滑常数（通常取 60）。排名越靠前的文档贡献越大，最终按综合得分排序取 Top-K。\n\n2. **分数归一化后加权求和**  \n   将两路检索的原始分数分别归一化到同一区间（如 0~1），然后按预设权重线性加权：`score_final = w1 * score_vector + w2 * score_keyword`。但这种方法对分数分布敏感，需要仔细校准。\n\n3. **交叉编码器重排序（Cross-Encoder Rerank）**  \n   先由两路检索各自召回较大数量的候选集（如各 100 条），合并去重后，使用一个更精确但计算代价更高的交叉编码器模型对所有候选重新打分，再取 Top-K。这种方式精度最高，但延迟也最大。\n\n4. **简单合并去重**  \n   直接将两路结果拼接，去除重复文档，然后按某一路的分数或固定规则截断。实现最简单，但效果通常较差。\n\n在实际生产系统中，**RRF 因无需调参、对分数尺度不敏感、实现简单**而被广泛采用；若对精度要求极高，则常在 RRF 初排后再加一层交叉编码器重排序。",
+  "tool_calls": [],
+  "tool_results": [],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 1072.6645000395365,
+  "total_ms": 8527.036582992878,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "未能"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索到知识库资料"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，以下基于常识"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n混合召回 R"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "AG 中，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "将向量"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索（语义相似"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）和全文检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（关键词匹配）"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "两路结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "合并的常见策略"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "包括：\n\n1"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ". **倒数排名"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "融合（RR"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "F, Recipro"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "cal Rank Fusion）**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "  \n   这是"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "目前最主流的方法"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。它不依赖"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "原始相似度"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "分数（因为向量"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "得分和 BM2"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "5"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 等全文检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "得分量纲不同"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "、"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "难以直接比较），"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "而是基于文档在两"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "路结果中的**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "排名位置**进行"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "融合。  \n  "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 公式为"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：每个文档的综合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "得分 = Σ("
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "1 / (k"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " + rank_i))"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，其中 `rank"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "_i` "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "是该文档在第 i"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 路检索中的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "排名，`k"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "` 是"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "平滑常数（通常"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "取 60"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）。排名越靠"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "前的文档贡献"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "越大，最终按"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "综合得分排序取"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Top-K。\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "2. **分数"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "归一化后"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "加权求和**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "  \n  "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 将两路"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索的原始分数"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "分别归一化"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "到同一区间（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "如 0"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "~1），然后"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "按"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "预设权重线性加权"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "`score_final ="
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " w1"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " * score_vector +"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " w2 *"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " score_keyword`。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "但"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "这种方法对分数分布"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "敏感，需要仔细"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "校准。\n\n3"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **交叉编码器重"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "排序（Cross-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Encoder"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Rerank）**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "  \n   "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "先由两路"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "各自召回较大数量的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "候选集（如"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "各"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 100"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 条"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "），合并去重"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "后，使用一个"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "更精确"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "但计算代价更高的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "交叉编码器模型"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "对所有候选重新打分"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，再"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "取 Top-K。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "这种方式"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "精度最高，但"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "延迟"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "也最大。\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "4"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ". **简单合并"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "去重**  \n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "   直接将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "两路结果拼接"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，去除重复文档"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，然后按某"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "一路的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "分数或固定规则"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "截断。实现"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "最简单，但效果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "通常较差。\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "在实际生产"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "系统中，**RR"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "F 因无需"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "调参、对"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "分数尺度不敏感"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "、实现"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "简单**而被广泛"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "采用；若"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "对精度要求极高"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，则常在 R"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "RF"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 初排后再"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "加"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "一层交叉编码器重"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "排序。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

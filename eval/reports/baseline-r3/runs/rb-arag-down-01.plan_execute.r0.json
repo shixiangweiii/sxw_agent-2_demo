@@ -1,0 +1,823 @@
+{
+  "case_id": "rb-arag-down-01",
+  "engine": "plan_execute",
+  "text": "我将先检索企业知识库中关于混合召回 RAG 的相关资料。\n\n知识库检索暂不可用，我将基于常识回答您的问题。\n\n**混合召回 RAG（Retrieval-Augmented Generation）中的两路检索机制：**\n\n1. **向量检索（Vector Search / Dense Retrieval）**\n2. **关键词检索（Keyword Search / Sparse Retrieval）**\n\n---\n\n### 1. 向量检索的作用与原理\n\n**作用：**\n- 捕捉语义相似性，能够找到与查询在含义上相近但字面表达不同的文档\n- 解决同义词、 paraphrase（改写）等问题\n- 适合处理自然语言查询，理解上下文意图\n\n**原理：**\n- 将查询文本和文档通过嵌入模型（Embedding Model）转换为高维向量\n- 在向量空间中计算查询向量与文档向量之间的相似度（常用余弦相似度）\n- 返回相似度最高的 Top-K 文档\n- 核心是\"语义匹配\"而非\"字面匹配\"\n\n---\n\n### 2. 关键词检索的作用与原理\n\n**作用：**\n- 精确匹配特定术语、专有名词、数字等\n- 保证召回结果中包含查询中的关键词汇\n- 弥补向量检索在精确匹配上的不足\n\n**原理：**\n- 基于传统信息检索方法，如 BM25、TF-IDF 等算法\n- 对查询进行分词，提取关键词\n- 计算关键词在文档中的出现频率、逆文档频率等统计指标\n- 返回包含相关关键词且权重较高的文档\n- 核心是\"字面匹配\"和\"统计相关性\"\n\n---\n\n### 混合召回的优势\n\n将两路检索结果进行融合（如加权合并、重排序），可以兼顾**语义理解**和**精确匹配**，提高召回的全面性和准确性，是 RAG 系统中常用的最佳实践。",
+  "tool_calls": [
+    [
+      "knowledge_search",
+      {
+        "query": "混合召回 RAG 两路检索 向量检索 关键词检索"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "knowledge_search",
+      {
+        "hits": [],
+        "count": 0,
+        "degraded": true,
+        "note": "知识检索暂不可用，请基于常识直接回答，不要编造引用。"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 3,
+      "title": "定义混合召回 RAG 中的两路检索机制",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 3,
+      "title": "说明向量检索的作用与原理",
+      "status": "planned"
+    },
+    {
+      "step": 3,
+      "total": 3,
+      "title": "说明关键词检索的作用与原理",
+      "status": "planned"
+    },
+    {
+      "step": 3,
+      "total": 3,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 2355.7100830366835,
+  "total_ms": 10949.293167039286,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 3,
+        "title": "定义混合召回 RAG 中的两路检索机制",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 3,
+        "title": "说明向量检索的作用与原理",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 3,
+        "total": 3,
+        "title": "说明关键词检索的作用与原理",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "先检索企业知识库"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "中关于混合召回"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " RAG 的相关"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "资料。\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "knowledge_search",
+        "args": {
+          "query": "混合召回 RAG 两路检索 向量检索 关键词检索"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "knowledge_search",
+        "response": {
+          "hits": [],
+          "count": 0,
+          "degraded": true,
+          "note": "知识检索暂不可用，请基于常识直接回答，不要编造引用。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "知识库"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索暂不可用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，我将基于常识"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "回答您的问题"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n**混合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "召回 RAG"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（Retrieval"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "-Augmented"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Generation）中的两"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "路检索机制：**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n1. **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "向量检索（Vector"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Search / Dense Retrie"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "val）**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n2. **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "关键词检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（Keyword Search /"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Sparse Retrieval）**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n---\n\n###"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 1. "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "向量检索的作用与"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "原理\n\n**作用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：**\n- "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "捕捉语义相似性"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，能够找到"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "与查询在含义"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "上相近但字"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "面表达不同的文档"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 解决同义词"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "、"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " paraphrase（改写"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）等问题"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n- 适合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "处理自然语言查询"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "理解上下文意图\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**原理"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：**\n- "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "将查询文本和"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "文档通过"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "嵌入模型（Embed"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "ding Model）转换为"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "高维向量\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- 在向量"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "空间中计算查询"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "向量与文档向量"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "之间的相似度（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "常用余弦相似度"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）\n- "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "返回相似度最高的 Top"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "-K 文档\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- 核心是"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\"语义匹配"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\"而非\"字"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "面匹配\"\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "---\n\n### "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "2. 关键词"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索的作用与原理"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n**作用：**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n- 精确"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "匹配特定术语、"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "专有名词"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "、数字等\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "保证召回结果中包含"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "查询"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "中的关键词汇\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- 弥补向量"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索在"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "精确匹配上的不足"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n**原理"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：**\n- "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "基于传统信息检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "方法"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，如 BM2"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "5、TF-ID"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "F"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 等算法\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- 对"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "查询进行分词"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，提取"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "关键词\n- "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "计算"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "关键词在文档中的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "出现频率、逆"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "文档频率等"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "统计指标\n-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 返回包含相关"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "关键词且"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "权重较高的文档\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 核心是\""
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "字面匹配\""
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "和\"统计相关性"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\""
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n---\n\n###"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 混合召回的优势"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n将两路"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "进行融合（如"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "加权"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "合并、重排序"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "），可以兼顾"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**语义理解**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "和"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**精确匹配**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，提高召回的全面"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "性和准确性，是"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " RAG "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "系统中常用的最佳实践"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 3,
+        "total": 3,
+        "status": "done"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

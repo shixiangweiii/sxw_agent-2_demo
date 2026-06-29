@@ -1,0 +1,176 @@
+{
+  "case_id": "r-chitchat-neg-01",
+  "engine": "plan_execute",
+  "text": "你好呀！听到你心情不错，我也觉得很开心呢。😊\n\n既然想随便聊聊，不如说说看，今天是因为发生了什么特别的事情让你心情这么好吗？或者，你最近有没有在关注什么有趣的话题、电影或者书籍？我很乐意听听你的分享！",
+  "tool_calls": [],
+  "tool_results": [],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 2,
+      "title": "回应问候并分享愉快情绪",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "title": "发起轻松话题延续对话",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 2316.4387500146404,
+  "total_ms": 3265.618750010617,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 2,
+        "title": "回应问候并分享愉快情绪",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "title": "发起轻松话题延续对话",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "你好"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "呀！听到"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "你心情"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "不错，我也觉得很"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "开心呢。😊"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n既然想随便"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "聊聊，不如"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "说说看，今天"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "是因为"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "发生了什么特别的事情让你"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "心情这么好吗？"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "或者，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "你最近有没有在"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "关注什么有趣的话题"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "、电影或者书籍"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "？我很"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "乐意听听你的分享"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "！"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "status": "done"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

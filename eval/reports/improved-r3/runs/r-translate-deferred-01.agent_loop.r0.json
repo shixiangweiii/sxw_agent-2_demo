@@ -1,0 +1,124 @@
+{
+  "case_id": "r-translate-deferred-01",
+  "engine": "agent_loop",
+  "text": "翻译结果：`[ja] 谢谢`",
+  "tool_calls": [
+    [
+      "tool_search",
+      {
+        "query": "翻译"
+      }
+    ],
+    [
+      "translate",
+      {
+        "text": "谢谢",
+        "target_lang": "ja"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "tool_search",
+      {
+        "query": "翻译",
+        "available_tools": {
+          "translate": "把文本翻译到目标语言（参数 text, target_lang）"
+        },
+        "note": "可直接按工具名调用上述工具完成任务。"
+      }
+    ],
+    [
+      "translate",
+      {
+        "source": "谢谢",
+        "target_lang": "ja",
+        "translation": "[ja] 谢谢"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 4033.228542015422,
+  "total_ms": 4240.451083984226,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "tool_search",
+        "args": {
+          "query": "翻译"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "tool_search",
+        "response": {
+          "query": "翻译",
+          "available_tools": {
+            "translate": "把文本翻译到目标语言（参数 text, target_lang）"
+          },
+          "note": "可直接按工具名调用上述工具完成任务。"
+        }
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "translate",
+        "args": {
+          "text": "谢谢",
+          "target_lang": "ja"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "translate",
+        "response": {
+          "source": "谢谢",
+          "target_lang": "ja",
+          "translation": "[ja] 谢谢"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果：`["
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "ja] 谢谢"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "`"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

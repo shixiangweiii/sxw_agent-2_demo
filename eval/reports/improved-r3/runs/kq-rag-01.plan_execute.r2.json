@@ -1,0 +1,401 @@
+{
+  "case_id": "kq-rag-01",
+  "engine": "plan_execute",
+  "text": "根据检索到的知识库资料，混合召回 RAG 合并向量检索和全文检索两路结果的方式如下：\n\n1.  **并行检索**：混合召回同时使用向量检索与全文检索（BM25）[1]。\n2.  **融合算法**：使用**互惠排名融合（RRF）**来合并两路结果 [1]。\n3.  **目的**：这种机制旨在兼顾语义相似性与关键词精确匹配 [1]。\n\n资料中未提供 RRF 的具体计算公式或重排序的详细步骤，仅指出通过 RRF 进行合并。",
+  "tool_calls": [
+    [
+      "knowledge_search",
+      {
+        "query": "混合召回 RAG 向量检索 全文检索 结果合并 融合算法 重排序"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "knowledge_search",
+      {
+        "hits": [
+          {
+            "n": 1,
+            "title": "混合召回 RAG 流水线",
+            "doc_id": "kb-rag-pipeline",
+            "content": "# 混合召回 RAG 流水线\n生产级 RAG 通常包含：文档解析、切分（chunk）、向量化（embedding）、索引、检索、重排、生成。\n混合召回（hybrid retrieval）同时使用向量检索与全文检索（BM25），再用互惠排名融合（RRF）合并两路结果，兼顾语义相似与关键词精确匹配。\n查询改写（query rewrite）会把用户问题扩展为多个等价表述以提升召回率。"
+          },
+          {
+            "n": 2,
+            "title": "Agent-Loop 推理引擎",
+            "doc_id": "kb-agent-loop",
+            "content": "# Agent-Loop 推理引擎\nAgent-Loop 是 ReAct 式单循环推理引擎：模型在一个循环里反复思考、调用工具、观察结果，直到产出最终答案或计划全部完成。\n生产级加固包括：工具异常喂回（ToolErrorFeedback，把异常封装成 function_response 不中断对话）、上下文超长反应式截断重试（ContextOverflow）、计划续推（TaskPlanTool）。\n下图展示了循环的结构：\n![agent loop diagram](https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg)\n图片描述：一位女子在夕阳下的海滩上与她的金毛犬互动，狗狗正伸出爪子与她“握手”，画面温馨而充满爱意。"
+          },
+          {
+            "n": 3,
+            "title": "Google ADK 简介",
+            "doc_id": "kb-adk-overview",
+            "content": "# Google ADK 简介\nGoogle Agent Development Kit（ADK）是用于构建生产级 LLM 智能体的框架。\n核心概念包括 LlmAgent（大模型智能体）、Runner（运行时）、Tool（工具）、Session（会话）、Artifact（多模态制品）与 Plugin（生命周期插件）。\nADK 通过 LiteLlm 适配层支持任意 OpenAI 兼容模型端点，例如阿里云 DashScope 的 Qwen 系列。"
+          }
+        ],
+        "count": 3,
+        "note": "请基于以上资料回答，并在引用处用 [n] 标注（n 为资料序号）。"
+      }
+    ]
+  ],
+  "citations": [
+    {
+      "refs": [
+        {
+          "n": 1,
+          "title": "混合召回 RAG 流水线",
+          "doc_id": "kb-rag-pipeline"
+        }
+      ]
+    }
+  ],
+  "skill_events": [],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 3,
+      "title": "检索知识库",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 3,
+      "title": "解析混合召回的融合算法原理",
+      "status": "planned"
+    },
+    {
+      "step": 3,
+      "total": 3,
+      "title": "总结重排序与结果合并机制",
+      "status": "planned"
+    },
+    {
+      "step": 3,
+      "total": 3,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 5961.20904100826,
+  "total_ms": 8230.661207984667,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 3,
+        "title": "检索知识库",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 3,
+        "title": "解析混合召回的融合算法原理",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 3,
+        "total": 3,
+        "title": "总结重排序与结果合并机制",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "knowledge_search",
+        "args": {
+          "query": "混合召回 RAG 向量检索 全文检索 结果合并 融合算法 重排序"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "knowledge_search",
+        "response": {
+          "hits": [
+            {
+              "n": 1,
+              "title": "混合召回 RAG 流水线",
+              "doc_id": "kb-rag-pipeline",
+              "content": "# 混合召回 RAG 流水线\n生产级 RAG 通常包含：文档解析、切分（chunk）、向量化（embedding）、索引、检索、重排、生成。\n混合召回（hybrid retrieval）同时使用向量检索与全文检索（BM25），再用互惠排名融合（RRF）合并两路结果，兼顾语义相似与关键词精确匹配。\n查询改写（query rewrite）会把用户问题扩展为多个等价表述以提升召回率。"
+            },
+            {
+              "n": 2,
+              "title": "Agent-Loop 推理引擎",
+              "doc_id": "kb-agent-loop",
+              "content": "# Agent-Loop 推理引擎\nAgent-Loop 是 ReAct 式单循环推理引擎：模型在一个循环里反复思考、调用工具、观察结果，直到产出最终答案或计划全部完成。\n生产级加固包括：工具异常喂回（ToolErrorFeedback，把异常封装成 function_response 不中断对话）、上下文超长反应式截断重试（ContextOverflow）、计划续推（TaskPlanTool）。\n下图展示了循环的结构：\n![agent loop diagram](https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg)\n图片描述：一位女子在夕阳下的海滩上与她的金毛犬互动，狗狗正伸出爪子与她“握手”，画面温馨而充满爱意。"
+            },
+            {
+              "n": 3,
+              "title": "Google ADK 简介",
+              "doc_id": "kb-adk-overview",
+              "content": "# Google ADK 简介\nGoogle Agent Development Kit（ADK）是用于构建生产级 LLM 智能体的框架。\n核心概念包括 LlmAgent（大模型智能体）、Runner（运行时）、Tool（工具）、Session（会话）、Artifact（多模态制品）与 Plugin（生命周期插件）。\nADK 通过 LiteLlm 适配层支持任意 OpenAI 兼容模型端点，例如阿里云 DashScope 的 Qwen 系列。"
+            }
+          ],
+          "count": 3,
+          "note": "请基于以上资料回答，并在引用处用 [n] 标注（n 为资料序号）。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "根据"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "到的知识库资料，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "混合召回 RAG"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 合并向量检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "和全文"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索两路结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的方式如下：\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "1.  **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "并行"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索**：混合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "召回同时使用向量"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索与"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "全文检索（BM"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "25）["
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "1]。\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "2.  **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "融合算法**："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "使用**互惠排名"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "融合（RRF"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）**来合并两"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "路结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " [1]。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n3. "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **目的**："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "这种机制旨在兼顾"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "语义相似性与"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "关键词精确匹配 ["
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "1]。\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "资料中未提供"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " RRF 的具体"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "计算公式"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "或重排序的详细"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "步骤，仅指出"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "通过 RRF "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "进行"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "合并。"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 3,
+        "total": 3,
+        "status": "done"
+      }
+    },
+    {
+      "event": "citation",
+      "data": {
+        "refs": [
+          {
+            "n": 1,
+            "title": "混合召回 RAG 流水线",
+            "doc_id": "kb-rag-pipeline"
+          }
+        ]
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

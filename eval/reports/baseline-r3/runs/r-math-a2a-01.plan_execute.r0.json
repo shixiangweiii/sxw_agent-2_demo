@@ -1,0 +1,130 @@
+{
+  "case_id": "r-math-a2a-01",
+  "engine": "plan_execute",
+  "text": "23*47 的计算结果是 **1081**。",
+  "tool_calls": [
+    [
+      "math_expert",
+      {
+        "request": "计算 23*47"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "math_expert",
+      {
+        "result": "计算 $23 \\times 47$ 的步骤如下：\n\n**方法一：竖式乘法**\n\n1. 先计算 $23 \\times 7$：\n   $$23 \\times 7 = 161$$\n\n2. 再计算 $23 \\times 40$（即 $23 \\times 4$ 后补一个零）：\n   $$23 \\times 4 = 92$$\n   $$92 \\times 10 = 920$$\n\n3. 将两部分结果相加：\n   $$161 + 920 = 1081$$\n\n**方法二：分配律拆分**\n\n$$\n\\begin{aligned}\n23 \\times 47 &= 23 \\times (50 - 3) \\\\\n&= 23 \\times 50 - 23 \\times 3 \\\\\n&= 1150 - 69 \\\\\n&= 1081\n\\end{aligned}\n$$\n\n**最终结果：**\n$$1081$$"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 2,
+      "title": "调用 A2A 数学专家（math_expert）计算 23*47",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "title": "输出计算结果",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 9310.93304202659,
+  "total_ms": 9610.102792037651,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 2,
+        "title": "调用 A2A 数学专家（math_expert）计算 23*47",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "title": "输出计算结果",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "math_expert",
+        "args": {
+          "request": "计算 23*47"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "math_expert",
+        "response": {
+          "result": "计算 $23 \\times 47$ 的步骤如下：\n\n**方法一：竖式乘法**\n\n1. 先计算 $23 \\times 7$：\n   $$23 \\times 7 = 161$$\n\n2. 再计算 $23 \\times 40$（即 $23 \\times 4$ 后补一个零）：\n   $$23 \\times 4 = 92$$\n   $$92 \\times 10 = 920$$\n\n3. 将两部分结果相加：\n   $$161 + 920 = 1081$$\n\n**方法二：分配律拆分**\n\n$$\n\\begin{aligned}\n23 \\times 47 &= 23 \\times (50 - 3) \\\\\n&= 23 \\times 50 - 23 \\times 3 \\\\\n&= 1150 - 69 \\\\\n&= 1081\n\\end{aligned}\n$$\n\n**最终结果：**\n$$1081$$"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "2"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "3*47"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 的计算结果是 **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "1081"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**。"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "status": "done"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

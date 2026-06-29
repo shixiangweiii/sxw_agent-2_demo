@@ -1,0 +1,560 @@
+{
+  "case_id": "r-researcher-01",
+  "engine": "agent_loop",
+  "text": "我将把这个开放子问题委派给 researcher 子代理来获取结构化要点。\n\nresearcher 子代理已返回关于\"如何评估一个 RAG 系统的检索质量\"的结构化要点，包含以下6个核心维度：\n\n1. **相关性评估（Relevance）**：衡量检索到的文档片段与用户查询的语义匹配程度，常用指标包括命中率（Hit Rate）、平均倒数排名（MRR）和归一化折损累计增益（NDCG）。\n\n2. **上下文精确度（Context Precision）**：评估检索结果中相关信息的密度，即检索出的 chunk 中有多少比例真正包含回答问题所需的关键事实，排除噪声干扰。\n\n3. **召回率分析（Recall）**：检查系统是否成功检索到了所有支撑最终答案的必要证据片段，特别是在多跳推理或复杂查询场景下，确保关键信息无遗漏。\n\n4. **噪声鲁棒性（Noise Robustness）**：测试系统在混入无关或错误文档时的表现，评估其能否依然准确提取有效信息并忽略干扰项，通常通过注入负样本进行测试。\n\n5. **排序质量（Ranking Quality）**：分析相关文档在返回列表中的位置分布，理想情况下高相关性文档应排在前列，以减少大模型处理窗口压力并提升生成质量。\n\n6. **自动化评测框架应用**：利用 LLM-as-a-Judge（如 RAGAS、TruLens 等工具）进行规模化自动打分，结合人工抽样校验，建立从数据集构建到指标监控的闭环评估体系。",
+  "tool_calls": [
+    [
+      "researcher",
+      {
+        "request": "如何评估一个 RAG 系统的检索质量"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "researcher",
+      {
+        "result": "1. **相关性评估（Relevance）**：衡量检索到的文档片段与用户查询的语义匹配程度，常用指标包括命中率（Hit Rate）、平均倒数排名（MRR）和归一化折损累计增益（NDCG）。\n2. **上下文精确度（Context Precision）**：评估检索结果中相关信息的密度，即检索出的 chunk 中有多少比例真正包含回答问题所需的关键事实，排除噪声干扰。\n3. **召回率分析（Recall）**：检查系统是否成功检索到了所有支撑最终答案的必要证据片段，特别是在多跳推理或复杂查询场景下，确保关键信息无遗漏。\n4. **噪声鲁棒性（Noise Robustness）**：测试系统在混入无关或错误文档时的表现，评估其能否依然准确提取有效信息并忽略干扰项，通常通过注入负样本进行测试。\n5. **排序质量（Ranking Quality）**：分析相关文档在返回列表中的位置分布，理想情况下高相关性文档应排在前列，以减少大模型处理窗口压力并提升生成质量。\n6. **自动化评测框架应用**：利用 LLM-as-a-Judge（如 RAGAS、TruLens 等工具）进行规模化自动打分，结合人工抽样校验，建立从数据集构建到指标监控的闭环评估体系。"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 994.4107919582166,
+  "total_ms": 13880.581500008702,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "我将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "把这个"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "开放子问题委派"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "给 researcher 子"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "代理来获取结构化要点"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "researcher",
+        "args": {
+          "request": "如何评估一个 RAG 系统的检索质量"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "researcher",
+        "response": {
+          "result": "1. **相关性评估（Relevance）**：衡量检索到的文档片段与用户查询的语义匹配程度，常用指标包括命中率（Hit Rate）、平均倒数排名（MRR）和归一化折损累计增益（NDCG）。\n2. **上下文精确度（Context Precision）**：评估检索结果中相关信息的密度，即检索出的 chunk 中有多少比例真正包含回答问题所需的关键事实，排除噪声干扰。\n3. **召回率分析（Recall）**：检查系统是否成功检索到了所有支撑最终答案的必要证据片段，特别是在多跳推理或复杂查询场景下，确保关键信息无遗漏。\n4. **噪声鲁棒性（Noise Robustness）**：测试系统在混入无关或错误文档时的表现，评估其能否依然准确提取有效信息并忽略干扰项，通常通过注入负样本进行测试。\n5. **排序质量（Ranking Quality）**：分析相关文档在返回列表中的位置分布，理想情况下高相关性文档应排在前列，以减少大模型处理窗口压力并提升生成质量。\n6. **自动化评测框架应用**：利用 LLM-as-a-Judge（如 RAGAS、TruLens 等工具）进行规模化自动打分，结合人工抽样校验，建立从数据集构建到指标监控的闭环评估体系。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "research"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "er 子代理"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "已返回关于\""
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "如何评估一个"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " RAG 系统的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索质量\"的结构"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "化要点，包含"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "以下6个核心"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "维度"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：\n\n1."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **相关性评估（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Relevance）**："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "衡量检索到的文档"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "片段与用户"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "查询的语义匹配"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "程度，常用指标"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "包括命中率（Hit"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Rate）、平均倒数"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "排名（MRR"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）和归一"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "化折损累计"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "增益（NDC"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "G）。\n\n2"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ". **上下文精确"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "度（Context Precision"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）**：评估检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果中相关信息的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "密度，即检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "出的 chunk 中"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "有多少比例真正包含"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "回答问题所需的关键事实"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，排除噪声干扰"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n3."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **召回率分析"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（Recall）**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：检查系统是否"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "成功检索到了所有"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "支撑最终答案的必要"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "证据片段，特别是在"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "多跳推理或"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "复杂查询场景下"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，确保关键信息"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "无遗漏。\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "4. **噪声"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "鲁棒性（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Noise Robustness"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）**：测试系统在"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "混入无关或"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "错误文档时的表现"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，评估其能否"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "依然准确提取有效"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "信息并忽略干扰"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "项，通常通过"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "注入负样本进行测试"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n5."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **排序质量（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Ranking Quality）**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：分析相关文档"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "在返回列表中的位置"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "分布，理想情况下"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "高相关性文档应"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "排在前列，以减少"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "大模型处理窗口"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "压力并提升生成"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "质量。\n\n6"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ". **自动化评测"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "框架应用**："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "利用 LLM-as"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "-a-Judge（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "如 RAGAS"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "、TruLens"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 等工具）"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "进行规模化自动打分"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，结合人工抽样"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "校验，建立从"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "数据集构建到指标"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "监控的闭环评估"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "体系。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

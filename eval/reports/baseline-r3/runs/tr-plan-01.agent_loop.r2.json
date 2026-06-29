@@ -1,0 +1,583 @@
+{
+  "case_id": "tr-plan-01",
+  "engine": "agent_loop",
+  "text": "我来执行这个两步任务。首先登记任务计划，然后逐步执行。\n\n现在开始执行第一步：用 get_weather 查杭州天气。\n\n第一步已完成。现在更新计划进度，执行第二步：用 tool_search 找统计工具并统计『杭州今天很热』的字数。\n\n现在执行第二步：先用 tool_search 找统计工具。\n\n找到了 text_stats 工具，现在用它来统计『杭州今天很热』的字数。\n\n两步任务都已完成。现在更新计划为全部完成状态，并给出最终答案。\n\n任务已完成，以下是结果：\n\n**第一步：杭州天气**\n- 天气：晴\n- 温度：26°C\n- 湿度：40%\n\n**第二步：文本统计**\n- 文本：『杭州今天很热』\n- 字符数：6\n- 词数：1",
+  "tool_calls": [
+    [
+      "get_weather",
+      {
+        "city": "杭州"
+      }
+    ],
+    [
+      "tool_search",
+      {
+        "query": "统计"
+      }
+    ],
+    [
+      "text_stats",
+      {
+        "text": "杭州今天很热"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "get_weather",
+      {
+        "city": "杭州",
+        "weather": "晴",
+        "temperature_c": 26,
+        "humidity": "40%"
+      }
+    ],
+    [
+      "tool_search",
+      {
+        "query": "统计",
+        "available_tools": {
+          "text_stats": "统计文本的字符数与词数（参数 text）"
+        },
+        "note": "可直接按工具名调用上述工具完成任务。"
+      }
+    ],
+    [
+      "text_stats",
+      {
+        "chars": 6,
+        "words": 1
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 2,
+      "title": "用 get_weather 查杭州天气",
+      "status": "running"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "title": "用 tool_search 找统计工具并统计『杭州今天很热』的字数",
+      "status": "planned"
+    },
+    {
+      "step": 1,
+      "total": 2,
+      "title": "用 get_weather 查杭州天气",
+      "status": "done"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "title": "用 tool_search 找统计工具并统计『杭州今天很热』的字数",
+      "status": "running"
+    },
+    {
+      "step": 1,
+      "total": 2,
+      "title": "用 get_weather 查杭州天气",
+      "status": "done"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "title": "用 tool_search 找统计工具并统计『杭州今天很热』的字数",
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 780.3306249552406,
+  "total_ms": 15589.292540971655,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "我来"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "执行"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "这个两步任务。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "首先登记"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "任务计划，然后"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "逐步执行。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 2,
+        "title": "用 get_weather 查杭州天气",
+        "status": "running"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "title": "用 tool_search 找统计工具并统计『杭州今天很热』的字数",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "现在开始"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "执行第一步：用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " get_weather 查"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "杭州天气。\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "get_weather",
+        "args": {
+          "city": "杭州"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "get_weather",
+        "response": {
+          "city": "杭州",
+          "weather": "晴",
+          "temperature_c": 26,
+          "humidity": "40%"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "第一步"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "已完成。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "现在更新"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "计划进度"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，执行第二步："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "用 tool_search "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "找统计工具并"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "统计『杭州今天"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "很热』的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "字数。\n\n"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 2,
+        "title": "用 get_weather 查杭州天气",
+        "status": "done"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "title": "用 tool_search 找统计工具并统计『杭州今天很热』的字数",
+        "status": "running"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "现在"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "执行第二步：先用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " tool_search 找"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "统计工具。\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "tool_search",
+        "args": {
+          "query": "统计"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "tool_search",
+        "response": {
+          "query": "统计",
+          "available_tools": {
+            "text_stats": "统计文本的字符数与词数（参数 text）"
+          },
+          "note": "可直接按工具名调用上述工具完成任务。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "找到了"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " text"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "_stats 工具，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "现在用它来"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "统计『杭州今天"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "很热』的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "字数。\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "text_stats",
+        "args": {
+          "text": "杭州今天很热"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "text_stats",
+        "response": {
+          "chars": 6,
+          "words": 1
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "两步"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "任务都"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "已完成。现在更新"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "计划为"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "全部完成状态，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "并给出最终答案"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 2,
+        "title": "用 get_weather 查杭州天气",
+        "status": "done"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "title": "用 tool_search 找统计工具并统计『杭州今天很热』的字数",
+        "status": "done"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "任务"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "已完成，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "以下是"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：\n\n**第一步"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "杭州天气**\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- 天气："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "晴\n- "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "温度：26"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "°C\n- "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "湿度：40"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "%\n\n**第二步"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：文本统计**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n- 文本"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：『"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "杭州今天很热"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "』\n- "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "字符数：6"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n- 词"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "数：1"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

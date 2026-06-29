@@ -1,0 +1,216 @@
+{
+  "case_id": "r-translate-skill-01",
+  "engine": "agent_loop",
+  "text": "用户要求使用深度翻译技能（deep_translate）将『你好世界』翻译成英文。我直接调用该工具即可。\n\n根据 deep_translate 工具的返回结果，翻译结果为：\n\n**[en] 你好世界**\n\n这是深度翻译技能给出的输出。",
+  "tool_calls": [
+    [
+      "deep_translate",
+      {
+        "text": "你好世界",
+        "target_lang": "en"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "deep_translate",
+      {
+        "skill": "deep_translate",
+        "skipSummarization": false,
+        "content": "[en] 你好世界"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": true,
+      "isPartial": true,
+      "data": "正在分析源语言与语境…"
+    },
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": false,
+      "isPartial": true,
+      "data": "[en] 你"
+    },
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": false,
+      "isPartial": true,
+      "data": "好世界"
+    }
+  ],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 998.2214159681462,
+  "total_ms": 3833.411665982567,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "用户"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "要求使用深度"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译技能（deep"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "_translate）将『"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "你好世界』翻译成"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "英文。我直接"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "调用该"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "工具即可。\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "deep_translate",
+        "args": {
+          "text": "你好世界",
+          "target_lang": "en"
+        }
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": true,
+        "isPartial": true,
+        "data": "正在分析源语言与语境…"
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": false,
+        "isPartial": true,
+        "data": "[en] 你"
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": false,
+        "isPartial": true,
+        "data": "好世界"
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "deep_translate",
+        "response": {
+          "skill": "deep_translate",
+          "skipSummarization": false,
+          "content": "[en] 你好世界"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "根据"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " deep"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "_translate 工具的返回"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果，翻译结果为"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：\n\n**["
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "en] 你好"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "世界**\n\n这是"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "深度翻译技能给出的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "输出。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

@@ -1,0 +1,114 @@
+{
+  "case_id": "r-chitchat-neg-01",
+  "engine": "agent_loop",
+  "text": "你好呀！听到你心情不错，我也很开心呢。😊\n\n今天天气怎么样？要不要我帮你查一下所在城市的天气，看看是不是好天气衬托了好心情？或者你有什么感兴趣的话题想聊聊吗？",
+  "tool_calls": [],
+  "tool_results": [],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 1058.824832958635,
+  "total_ms": 1977.8099579853006,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "你好"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "呀！听到"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "你心情不错，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我也很开心"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "呢。😊\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "今天"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "天气怎么样？要不要"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我帮你查一下"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "所在"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "城市的天气，看看"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "是不是"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "好天气衬托了好"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "心情？或者你有什么"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "感兴趣的话题想聊聊"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "吗？"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

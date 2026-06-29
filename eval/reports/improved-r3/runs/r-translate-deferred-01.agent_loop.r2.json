@@ -1,0 +1,226 @@
+{
+  "case_id": "r-translate-deferred-01",
+  "engine": "agent_loop",
+  "text": "我将按照要求先搜索翻译工具，然后进行翻译。\n\n已找到 translate 工具。现在使用它将\"谢谢\"翻译成日文(ja)。\n\n翻译完成：「谢谢」翻译成日文的结果为 `[ja] 谢谢`（这是 demo 占位翻译）。",
+  "tool_calls": [
+    [
+      "tool_search",
+      {
+        "query": "翻译"
+      }
+    ],
+    [
+      "translate",
+      {
+        "text": "谢谢",
+        "target_lang": "ja"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "tool_search",
+      {
+        "query": "翻译",
+        "available_tools": {
+          "translate": "把文本翻译到目标语言（参数 text, target_lang）"
+        },
+        "note": "可直接按工具名调用上述工具完成任务。"
+      }
+    ],
+    [
+      "translate",
+      {
+        "source": "谢谢",
+        "target_lang": "ja",
+        "translation": "[ja] 谢谢"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 981.165167002473,
+  "total_ms": 5063.195291964803,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "我将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "按照"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "要求"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "先搜索翻译工具"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，然后进行翻译"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "tool_search",
+        "args": {
+          "query": "翻译"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "tool_search",
+        "response": {
+          "query": "翻译",
+          "available_tools": {
+            "translate": "把文本翻译到目标语言（参数 text, target_lang）"
+          },
+          "note": "可直接按工具名调用上述工具完成任务。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "已"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "找到 translate 工具"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。现在使用它将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\"谢谢\"翻译成"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "日文(ja)。"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "translate",
+        "args": {
+          "text": "谢谢",
+          "target_lang": "ja"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "translate",
+        "response": {
+          "source": "谢谢",
+          "target_lang": "ja",
+          "translation": "[ja] 谢谢"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "完成"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：「谢谢」"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译成日文的结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "为 `[ja]"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "谢谢`（这是"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " demo 占位"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译）。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

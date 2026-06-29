@@ -1,0 +1,364 @@
+{
+  "case_id": "tr-calc-translate-01",
+  "engine": "plan_execute",
+  "text": "我将按执行计划完成：\n\n1. 首先计算 (3+4)*5 的数值\n\n计算结果是 35。\n\n2. 现在将数字 35 翻译成英文单词\n\n翻译结果返回的是 \"35\"，但我需要的是英文单词形式。让我直接提供正确答案：\n\n计算结果：**35**\n\n35 的英文单词是：**thirty-five**",
+  "tool_calls": [
+    [
+      "calculator",
+      {
+        "expression": "(3+4)*5"
+      }
+    ],
+    [
+      "deep_translate",
+      {
+        "text": "35",
+        "target_lang": "en"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "calculator",
+      {
+        "expression": "(3+4)*5",
+        "result": 35.0
+      }
+    ],
+    [
+      "deep_translate",
+      {
+        "skill": "deep_translate",
+        "skipSummarization": false,
+        "content": "[en] 35"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": true,
+      "isPartial": true,
+      "data": "正在分析源语言与语境…"
+    },
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": false,
+      "isPartial": true,
+      "data": "[en] 3"
+    },
+    {
+      "skill": "deep_translate",
+      "dataType": "TEXT",
+      "isThinking": false,
+      "isPartial": true,
+      "data": "5"
+    }
+  ],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 2,
+      "title": "计算 (3+4)*5 的数值",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "title": "将计算结果转换为英文单词",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 2099.7214580420405,
+  "total_ms": 6456.59495802829,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 2,
+        "title": "计算 (3+4)*5 的数值",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "title": "将计算结果转换为英文单词",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "按"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "执行"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "计划完成"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：\n\n1."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 首先"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "计算 (3+"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "4)*5 "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的数值\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "calculator",
+        "args": {
+          "expression": "(3+4)*5"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "calculator",
+        "response": {
+          "expression": "(3+4)*5",
+          "result": 35.0
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "计算"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果是 35"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n\n2."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 现在将数字"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 35 "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译成英文单词\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "deep_translate",
+        "args": {
+          "text": "35",
+          "target_lang": "en"
+        }
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": true,
+        "isPartial": true,
+        "data": "正在分析源语言与语境…"
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": false,
+        "isPartial": true,
+        "data": "[en] 3"
+      }
+    },
+    {
+      "event": "skill_event",
+      "data": {
+        "skill": "deep_translate",
+        "dataType": "TEXT",
+        "isThinking": false,
+        "isPartial": true,
+        "data": "5"
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "deep_translate",
+        "response": {
+          "skill": "deep_translate",
+          "skipSummarization": false,
+          "content": "[en] 35"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "翻译"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果返回"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的是 \"35"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\"，但我"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "需要的是英文单词"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "形式。让我直接"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "提供正确答案：\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "计算"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果：**35"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n35 "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的英文"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "单词是：**th"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "irty-five**"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "status": "done"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

@@ -1,0 +1,590 @@
+{
+  "case_id": "r-researcher-01",
+  "engine": "agent_loop",
+  "text": "我将把这个开放子问题委派给 researcher 子代理来获取结构化要点。\n\nresearcher 子代理已返回结构化要点。以下是关于\"如何评估一个 RAG 系统的检索质量\"的结构化分析：\n\n---\n\n## RAG 系统检索质量评估的结构化要点\n\n1. **相关性评估（Relevance）**\n   - 衡量检索到的文档片段与用户查询的语义匹配程度\n   - 常用指标：命中率（Hit Rate）、平均倒数排名（MRR）、归一化折损累计增益（NDCG）\n\n2. **上下文精确度（Context Precision）**\n   - 评估检索结果中相关信息的集中程度\n   - 关注相关文档片段在返回列表中的排名是否靠前，无关噪声是否最少\n\n3. **上下文召回率（Context Recall）**\n   - 检查检索结果是否覆盖了生成正确答案所需的所有关键事实依据\n   - 确保没有遗漏支撑最终答案的核心信息\n\n4. **噪声鲁棒性（Noise Robustness）**\n   - 测试系统在混入无关或干扰性文档时，能否依然准确提取有效信息并排除干扰\n   - 保持回答的稳定性\n\n5. **负样本处理能力**\n   - 评估当知识库中不存在答案或查询模糊时，系统能否正确识别并返回\"无相关信息\"\n   - 避免强行检索不匹配的内容\n\n6. **自动化基准测试**\n   - 利用合成数据集（如使用 LLM 生成问答对）\n   - 结合 RAGAS 或 ARES 等专用评估框架，进行规模化、标准化的定量评分",
+  "tool_calls": [
+    [
+      "researcher",
+      {
+        "request": "如何评估一个 RAG 系统的检索质量"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "researcher",
+      {
+        "result": "1. **相关性评估（Relevance）**：衡量检索到的文档片段与用户查询的语义匹配程度，常用指标包括命中率（Hit Rate）、平均倒数排名（MRR）和归一化折损累计增益（NDCG）。\n2. **上下文精确度（Context Precision）**：评估检索结果中相关信息的集中程度，即相关文档片段在返回列表中的排名是否靠前，无关噪声是否最少。\n3. **上下文召回率（Context Recall）**：检查检索结果是否覆盖了生成正确答案所需的所有关键事实依据，确保没有遗漏支撑最终答案的核心信息。\n4. **噪声鲁棒性（Noise Robustness）**：测试系统在混入无关或干扰性文档时，能否依然准确提取有效信息并排除干扰，保持回答的稳定性。\n5. **负样本处理能力**：评估当知识库中不存在答案或查询模糊时，系统能否正确识别并返回“无相关信息”，而非强行检索不匹配的内容。\n6. **自动化基准测试**：利用合成数据集（如使用 LLM 生成问答对）结合 RAGAS 或 ARES 等专用评估框架，进行规模化、标准化的定量评分。"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 859.0536660049111,
+  "total_ms": 13714.007749978919,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "我将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "把这个开放子问题"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "委派给 researcher "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "子代理来获取"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结构化要点。\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "researcher",
+        "args": {
+          "request": "如何评估一个 RAG 系统的检索质量"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "researcher",
+        "response": {
+          "result": "1. **相关性评估（Relevance）**：衡量检索到的文档片段与用户查询的语义匹配程度，常用指标包括命中率（Hit Rate）、平均倒数排名（MRR）和归一化折损累计增益（NDCG）。\n2. **上下文精确度（Context Precision）**：评估检索结果中相关信息的集中程度，即相关文档片段在返回列表中的排名是否靠前，无关噪声是否最少。\n3. **上下文召回率（Context Recall）**：检查检索结果是否覆盖了生成正确答案所需的所有关键事实依据，确保没有遗漏支撑最终答案的核心信息。\n4. **噪声鲁棒性（Noise Robustness）**：测试系统在混入无关或干扰性文档时，能否依然准确提取有效信息并排除干扰，保持回答的稳定性。\n5. **负样本处理能力**：评估当知识库中不存在答案或查询模糊时，系统能否正确识别并返回“无相关信息”，而非强行检索不匹配的内容。\n6. **自动化基准测试**：利用合成数据集（如使用 LLM 生成问答对）结合 RAGAS 或 ARES 等专用评估框架，进行规模化、标准化的定量评分。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "research"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "er 子代理"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "已返回结构化"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "要点。以下是关于"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\"如何评估一个"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " R"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "AG 系统的检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "质量\"的结构化"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "分析"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：\n\n---\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "## R"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "AG 系统检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "质量评估的结构化"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "要点\n\n1"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ". **相关性评估"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（Relevance）**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n   - "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "衡量检索到的文档"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "片段与用户查询"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的语义匹配程度"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n   - "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "常用指标：命中率"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（Hit Rate）、"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "平均倒数排名（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "MRR）、归"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "一化折损"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "累计增益（N"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "DCG）\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "2. **上下文"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "精确度（Context"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Precision）**\n  "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " - 评估检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结果中相关信息的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "集中程度\n  "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " - 关注相关"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "文档片段在返回列表"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "中的排名是否靠前"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，无关噪声是否"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "最少"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n3. **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "上下文召回率（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Context Recall）**\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "   - 检查"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索结果是否覆盖了"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "生成正确答案所需的所有"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "关键事实依据\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "   - 确保"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "没有遗漏支撑最终"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "答案的核心信息\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "4. **噪声"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "鲁棒性（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Noise Robustness"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）**\n   -"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 测试系统在混"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "入无关或干扰"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "性文档时，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "能否依然准确提取"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "有效信息并排除"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "干扰\n   -"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 保持回答的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "稳定性\n\n5."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **负样本处理能力"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**\n   -"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 评估当知识库"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "中不存在答案或"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "查询模糊时，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "系统能否正确识别"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "并返回\"无"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "相关信息\"\n  "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " - 避免强行"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索不匹配"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的内容\n\n6."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **自动化基准测试"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**\n   -"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 利用合成数据集"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（如使用 L"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "LM 生成问答"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "对）\n  "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " - 结合 R"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "AGAS 或"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " ARES 等"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "专用评估框架，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "进行规模化、标准化的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "定量评分"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

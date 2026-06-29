@@ -1,0 +1,60 @@
+{
+  "case_id": "mm-img-01",
+  "engine": "agent_loop",
+  "text": "一位穿着格子衬衫的女士坐在夕阳下的沙滩上，微笑着与一只佩戴着彩色胸背带的金毛犬握手互动。",
+  "tool_calls": [],
+  "tool_results": [],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 2687.5989999971353,
+  "total_ms": 3388.8836670084856,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "一位"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "穿着"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "格子衬衫的女士"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "坐在夕阳下的沙滩上，微笑着与一只佩戴"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "着彩色胸背带的金毛犬握手"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "互动。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

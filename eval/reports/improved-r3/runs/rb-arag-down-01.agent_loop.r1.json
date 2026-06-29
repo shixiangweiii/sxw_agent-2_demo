@@ -1,0 +1,302 @@
+{
+  "case_id": "rb-arag-down-01",
+  "engine": "agent_loop",
+  "text": "未能访问知识库，以下基于常识\n\n混合召回（Hybrid Retrieval）在 RAG 中通常结合以下两路检索：\n\n1. **关键词检索（稀疏检索）**：如 BM25、TF-IDF 等，基于词项匹配，擅长精确匹配专有名词、术语。\n2. **向量检索（稠密检索）**：基于嵌入向量的语义相似度搜索（如使用 FAISS、Milvus 等），擅长捕捉语义层面的相关性。\n\n这两路结果通常会通过加权融合、倒数排名融合（RRF）等方式合并，以提升召回的全面性和准确性。",
+  "tool_calls": [
+    [
+      "knowledge_search",
+      {
+        "query": "混合召回 RAG 用到哪两路检索"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "knowledge_search",
+      {
+        "hits": [],
+        "count": 0,
+        "degraded": true,
+        "note": "知识检索暂不可用。请在回答开头显式声明『未能访问知识库，以下基于常识』，再谨慎作答；不要编造引用，也不要把常识冒充为检索结果。"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 2263.930374989286,
+  "total_ms": 4517.0139580150135,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "knowledge_search",
+        "args": {
+          "query": "混合召回 RAG 用到哪两路检索"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "knowledge_search",
+        "response": {
+          "hits": [],
+          "count": 0,
+          "degraded": true,
+          "note": "知识检索暂不可用。请在回答开头显式声明『未能访问知识库，以下基于常识』，再谨慎作答；不要编造引用，也不要把常识冒充为检索结果。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "未能"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "访问"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "知识库，以下基于"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "常识\n\n混合召回"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（Hybrid Retrie"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "val）在 R"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "AG 中通常"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "结合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "以下两路检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：\n\n1."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **关键词检索（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "稀疏"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索）**：如"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " BM25、"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "TF-IDF "
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "等，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "基于词项匹配"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "擅长精确匹配专有"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "名词"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "、术语。\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "2. **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "向量检索（稠"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "密检索）**："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "基于嵌入向量的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "语义相似度搜索（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "如使用"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " FAISS、Mil"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "vus 等"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "），擅长捕捉语义"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "层面的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "相关性。\n\n这两"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "路结果通常会通过"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "加权"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "融合、倒数排名"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "融合（RRF"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）等方式合并，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "以提升"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "召回的全面性和准确性"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

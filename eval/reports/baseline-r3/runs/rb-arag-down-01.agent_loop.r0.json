@@ -1,0 +1,296 @@
+{
+  "case_id": "rb-arag-down-01",
+  "engine": "agent_loop",
+  "text": "混合召回 RAG（Retrieval-Augmented Generation）通常用到以下两路检索：\n\n1. **向量检索（Vector Search / Dense Retrieval）**：基于语义相似度，将查询和文档嵌入到向量空间中进行匹配，擅长捕捉语义相关性。\n2. **关键词检索（Keyword Search / Sparse Retrieval）**：基于传统倒排索引（如 BM25），通过词项匹配进行检索，擅长精确匹配专有名词、术语等。\n\n这两路检索结果通常会通过重排序（Re-ranking）或融合策略（如 Reciprocal Rank Fusion, RRF）进行合并，以提升最终召回的质量和覆盖率。",
+  "tool_calls": [
+    [
+      "knowledge_search",
+      {
+        "query": "混合召回 RAG 用到哪两路检索"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "knowledge_search",
+      {
+        "hits": [],
+        "count": 0,
+        "degraded": true,
+        "note": "知识检索暂不可用，请基于常识直接回答，不要编造引用。"
+      }
+    ]
+  ],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 2450.523916981183,
+  "total_ms": 4860.47829198651,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "knowledge_search",
+        "args": {
+          "query": "混合召回 RAG 用到哪两路检索"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "knowledge_search",
+        "response": {
+          "hits": [],
+          "count": 0,
+          "degraded": true,
+          "note": "知识检索暂不可用，请基于常识直接回答，不要编造引用。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "混合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "召回 RAG（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Retrieval-Aug"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "mented Generation）通常"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "用到以下两路"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：\n\n1."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **向量检索（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Vector Search"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " / Dense Retrieval"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）**：基于语义"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "相似度，将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "查询和文档嵌入"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "到向量空间中进行"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "匹配，擅长捕捉"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "语义相关性"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "。\n2."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **关键词检索（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Keyword Search / Sparse"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " Retrieval）**："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "基于传统"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "倒排索引（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "如"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " BM25），"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "通过词项匹配"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "进行检索"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，擅长精确匹配"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "专有名词、"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "术语等。\n\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "这两路检索结果"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "通常会通过重排序"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（Re"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "-ranking）或融合"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "策略（如 Rec"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "iprocal Rank Fusion"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ","
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " RRF）进行"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "合并，以提升最终"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "召回的质量和覆盖率。"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

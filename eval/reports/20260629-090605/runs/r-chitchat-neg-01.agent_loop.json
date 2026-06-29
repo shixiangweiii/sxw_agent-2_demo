@@ -1,0 +1,108 @@
+{
+  "case_id": "r-chitchat-neg-01",
+  "engine": "agent_loop",
+  "text": "你好呀！很高兴听到你今天心情不错 😊\n\n既然心情好，要不要聊聊你最近有什么开心的事？或者如果你有什么想了解的、想计算的、想翻译的，我都可以帮你哦！",
+  "tool_calls": [],
+  "tool_results": [],
+  "citations": [],
+  "skill_events": [],
+  "plan_steps": [],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 783.4626670228317,
+  "total_ms": 1550.983792054467,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "text",
+      "data": {
+        "delta": "你好"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "呀！很高兴听到"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "你今天"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "心情不错"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 😊\n\n既然心情"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "好"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "，要不要聊聊你"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "最近有什么开心的事"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "？或者如果你有什么"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "想了解的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "、想计算的、"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "想翻译的，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我都可以"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "帮你哦！"
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

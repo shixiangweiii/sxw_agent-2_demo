@@ -1,0 +1,540 @@
+{
+  "case_id": "kq-adk-01",
+  "engine": "plan_execute",
+  "text": "我将先检索公司知识库中关于 Google ADK 的文档。\n\n根据知识库检索结果，Google ADK（Agent Development Kit）的核心概念包括：\n\n1. **LlmAgent**：大模型智能体 [1]\n2. **Runner**：运行时组件 [1]\n3. **Tool**：工具 [1]\n4. **Session**：会话管理 [1]\n5. **Artifact**：多模态制品 [1]\n6. **Plugin**：生命周期插件 [1]\n\n此外，ADK 还包含以下重要机制：\n\n- **Agent-Loop 推理引擎**：采用 ReAct 式单循环推理，模型在循环中反复思考、调用工具、观察结果，直到产出最终答案 [2]\n- **生产级加固特性**：包括工具异常喂回（ToolErrorFeedback）、上下文超长反应式截断重试（ContextOverflow）、计划续推（TaskPlanTool）[2]\n- **LiteLlm 适配层**：支持任意 OpenAI 兼容模型端点 [1]",
+  "tool_calls": [
+    [
+      "knowledge_search",
+      {
+        "query": "Google ADK 核心概念"
+      }
+    ]
+  ],
+  "tool_results": [
+    [
+      "knowledge_search",
+      {
+        "hits": [
+          {
+            "n": 1,
+            "title": "Google ADK 简介",
+            "doc_id": "kb-adk-overview",
+            "content": "# Google ADK 简介\nGoogle Agent Development Kit（ADK）是用于构建生产级 LLM 智能体的框架。\n核心概念包括 LlmAgent（大模型智能体）、Runner（运行时）、Tool（工具）、Session（会话）、Artifact（多模态制品）与 Plugin（生命周期插件）。\nADK 通过 LiteLlm 适配层支持任意 OpenAI 兼容模型端点，例如阿里云 DashScope 的 Qwen 系列。"
+          },
+          {
+            "n": 2,
+            "title": "Agent-Loop 推理引擎",
+            "doc_id": "kb-agent-loop",
+            "content": "# Agent-Loop 推理引擎\nAgent-Loop 是 ReAct 式单循环推理引擎：模型在一个循环里反复思考、调用工具、观察结果，直到产出最终答案或计划全部完成。\n生产级加固包括：工具异常喂回（ToolErrorFeedback，把异常封装成 function_response 不中断对话）、上下文超长反应式截断重试（ContextOverflow）、计划续推（TaskPlanTool）。\n下图展示了循环的结构：\n![agent loop diagram](https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg)\n图片描述：一位女子在夕阳下的海滩上与她的金毛犬互动，狗狗正伸出爪子与她“握手”，画面温馨而充满爱意。"
+          },
+          {
+            "n": 3,
+            "title": "混合召回 RAG 流水线",
+            "doc_id": "kb-rag-pipeline",
+            "content": "# 混合召回 RAG 流水线\n生产级 RAG 通常包含：文档解析、切分（chunk）、向量化（embedding）、索引、检索、重排、生成。\n混合召回（hybrid retrieval）同时使用向量检索与全文检索（BM25），再用互惠排名融合（RRF）合并两路结果，兼顾语义相似与关键词精确匹配。\n查询改写（query rewrite）会把用户问题扩展为多个等价表述以提升召回率。"
+          }
+        ],
+        "count": 3,
+        "note": "请基于以上资料回答，并在引用处用 [n] 标注（n 为资料序号）。"
+      }
+    ]
+  ],
+  "citations": [
+    {
+      "refs": [
+        {
+          "n": 1,
+          "title": "Google ADK 简介",
+          "doc_id": "kb-adk-overview"
+        },
+        {
+          "n": 2,
+          "title": "Agent-Loop 推理引擎",
+          "doc_id": "kb-agent-loop"
+        }
+      ]
+    }
+  ],
+  "skill_events": [],
+  "plan_steps": [
+    {
+      "step": 1,
+      "total": 2,
+      "title": "检索公司知识库中关于 Google ADK 的文档",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "title": "提取并总结 Google ADK 的核心概念",
+      "status": "planned"
+    },
+    {
+      "step": 2,
+      "total": 2,
+      "status": "done"
+    }
+  ],
+  "had_error": false,
+  "error_msg": "",
+  "finished": true,
+  "ttft_ms": 2068.116790964268,
+  "total_ms": 9558.89012501575,
+  "transport_error": "",
+  "raw_events": [
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 1,
+        "total": 2,
+        "title": "检索公司知识库中关于 Google ADK 的文档",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "title": "提取并总结 Google ADK 的核心概念",
+        "status": "planned"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "我将"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "先检索公司知识库"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "中关于 Google AD"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "K 的"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "文档。\n\n"
+      }
+    },
+    {
+      "event": "tool_call",
+      "data": {
+        "name": "knowledge_search",
+        "args": {
+          "query": "Google ADK 核心概念"
+        }
+      }
+    },
+    {
+      "event": "tool_result",
+      "data": {
+        "name": "knowledge_search",
+        "response": {
+          "hits": [
+            {
+              "n": 1,
+              "title": "Google ADK 简介",
+              "doc_id": "kb-adk-overview",
+              "content": "# Google ADK 简介\nGoogle Agent Development Kit（ADK）是用于构建生产级 LLM 智能体的框架。\n核心概念包括 LlmAgent（大模型智能体）、Runner（运行时）、Tool（工具）、Session（会话）、Artifact（多模态制品）与 Plugin（生命周期插件）。\nADK 通过 LiteLlm 适配层支持任意 OpenAI 兼容模型端点，例如阿里云 DashScope 的 Qwen 系列。"
+            },
+            {
+              "n": 2,
+              "title": "Agent-Loop 推理引擎",
+              "doc_id": "kb-agent-loop",
+              "content": "# Agent-Loop 推理引擎\nAgent-Loop 是 ReAct 式单循环推理引擎：模型在一个循环里反复思考、调用工具、观察结果，直到产出最终答案或计划全部完成。\n生产级加固包括：工具异常喂回（ToolErrorFeedback，把异常封装成 function_response 不中断对话）、上下文超长反应式截断重试（ContextOverflow）、计划续推（TaskPlanTool）。\n下图展示了循环的结构：\n![agent loop diagram](https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg)\n图片描述：一位女子在夕阳下的海滩上与她的金毛犬互动，狗狗正伸出爪子与她“握手”，画面温馨而充满爱意。"
+            },
+            {
+              "n": 3,
+              "title": "混合召回 RAG 流水线",
+              "doc_id": "kb-rag-pipeline",
+              "content": "# 混合召回 RAG 流水线\n生产级 RAG 通常包含：文档解析、切分（chunk）、向量化（embedding）、索引、检索、重排、生成。\n混合召回（hybrid retrieval）同时使用向量检索与全文检索（BM25），再用互惠排名融合（RRF）合并两路结果，兼顾语义相似与关键词精确匹配。\n查询改写（query rewrite）会把用户问题扩展为多个等价表述以提升召回率。"
+            }
+          ],
+          "count": 3,
+          "note": "请基于以上资料回答，并在引用处用 [n] 标注（n 为资料序号）。"
+        }
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "根据"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "知识库检索结果，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Google ADK（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Agent Development Kit）"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "的核心概念包括："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "\n\n1"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ". **Llm"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "Agent**：大"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "模型智能体 ["
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "1]\n2"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ". **Runner**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：运行时组件 ["
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "1]\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "3. **Tool"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**：工具 ["
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "1]\n4"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": ". **Session**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：会话管理 ["
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "1]\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "5. **Artifact"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**：多模"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "态制品 [1"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "]\n6."
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **Plugin**："
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "生命周期插件 [1"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "]\n\n此外，"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "ADK 还"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "包含以下重要机制"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：\n\n-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **Agent-Loop"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 推理引擎**"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "：采用 ReAct"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " 式单循环"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "推理，模型在"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "循环中反复思考"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "、调用工具、"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "观察结果，直到"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "产出最终答案 ["
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "2]\n-"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " **"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "生产级加固特性"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**：包括工具"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "异常喂回"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（ToolErrorFeedback"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "）、上下文超长反应"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "式截断重试"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "（ContextOverflow）、"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "计划续推（"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "TaskPlanTool）"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "[2]\n"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "- **LiteL"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "lm 适配层"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "**：支持任意"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": " OpenAI 兼容"
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "模型端点 ["
+      }
+    },
+    {
+      "event": "text",
+      "data": {
+        "delta": "1]"
+      }
+    },
+    {
+      "event": "plan_step",
+      "data": {
+        "step": 2,
+        "total": 2,
+        "status": "done"
+      }
+    },
+    {
+      "event": "citation",
+      "data": {
+        "refs": [
+          {
+            "n": 1,
+            "title": "Google ADK 简介",
+            "doc_id": "kb-adk-overview"
+          },
+          {
+            "n": 2,
+            "title": "Agent-Loop 推理引擎",
+            "doc_id": "kb-agent-loop"
+          }
+        ]
+      }
+    },
+    {
+      "event": "done",
+      "data": {
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}
