@@ -1,0 +1,292 @@
+[
+  {
+    "id": "gen-eval-urban-flood-01-threshold",
+    "gold_citations": [
+      "eval-urban-flood-01"
+    ],
+    "expected_answer": "关键触发阈值是15分钟滚动雨强超过38毫米。",
+    "query": "在评测语料中，海绵城市暴雨内涝联防手册 的关键触发阈值是什么？请基于知识库回答并引用。"
+  },
+  {
+    "id": "gen-eval-urban-flood-01-result",
+    "gold_citations": [
+      "eval-urban-flood-01"
+    ],
+    "expected_answer": "雨燕-27 的效果是平均封控提前量从12分钟提升到31分钟。",
+    "query": "雨燕-27 这个项目的复盘效果是什么？"
+  },
+  {
+    "id": "gen-eval-urban-flood-01-image",
+    "gold_citations": [
+      "eval-urban-flood-01"
+    ],
+    "expected_answer": "应命中《海绵城市暴雨内涝联防手册》，图片中文业务含义是暴雨传感器仪表盘。",
+    "query": "哪篇文档的配图视觉锚点是 Urban Flood Sensor Dashboard？这张图的中文业务含义是什么？"
+  },
+  {
+    "id": "gen-eval-urban-heat-02-threshold",
+    "gold_citations": [
+      "eval-urban-heat-02"
+    ],
+    "expected_answer": "关键触发阈值是连续3小时体感温度高于42摄氏度。",
+    "query": "在评测语料中，高温健康风险网格化响应指南 的关键触发阈值是什么？请基于知识库回答并引用。"
+  },
+  {
+    "id": "gen-eval-urban-heat-02-result",
+    "gold_citations": [
+      "eval-urban-heat-02"
+    ],
+    "expected_answer": "清凉伞-14 的效果是独居老人回访覆盖率达到96%。",
+    "query": "清凉伞-14 这个项目的复盘效果是什么？"
+  },
+  {
+    "id": "gen-eval-urban-heat-02-image",
+    "gold_citations": [
+      "eval-urban-heat-02"
+    ],
+    "expected_answer": "应命中《高温健康风险网格化响应指南》，图片中文业务含义是高温关怀地图。",
+    "query": "哪篇文档的配图视觉锚点是 Heatwave Care Map？这张图的中文业务含义是什么？"
+  },
+  {
+    "id": "gen-eval-urban-evac-03-threshold",
+    "gold_citations": [
+      "eval-urban-evac-03"
+    ],
+    "expected_answer": "关键触发阈值是站厅密度达到每平方米4.2人。",
+    "query": "在评测语料中，地铁站群大客流疏散演练复盘 的关键触发阈值是什么？请基于知识库回答并引用。"
+  },
+  {
+    "id": "gen-eval-urban-evac-03-result",
+    "gold_citations": [
+      "eval-urban-evac-03"
+    ],
+    "expected_answer": "北斗门-06 的效果是三次演练中站台清空时间稳定在7分40秒以内。",
+    "query": "北斗门-06 这个项目的复盘效果是什么？"
+  },
+  {
+    "id": "gen-eval-urban-evac-03-image",
+    "gold_citations": [
+      "eval-urban-evac-03"
+    ],
+    "expected_answer": "应命中《地铁站群大客流疏散演练复盘》，图片中文业务含义是地铁疏散路径图。",
+    "query": "哪篇文档的配图视觉锚点是 Metro Evacuation Route？这张图的中文业务含义是什么？"
+  },
+  {
+    "id": "gen-eval-urban-shelter-04-threshold",
+    "gold_citations": [
+      "eval-urban-shelter-04"
+    ],
+    "expected_answer": "关键触发阈值是72小时基础保障包按300人规模配置。",
+    "query": "在评测语料中，社区避难空间物资轮换规范 的关键触发阈值是什么？请基于知识库回答并引用。"
+  },
+  {
+    "id": "gen-eval-urban-shelter-04-result",
+    "gold_citations": [
+      "eval-urban-shelter-04"
+    ],
+    "expected_answer": "安栖-9号 的效果是过期物资率从8.5%降到0.7%。",
+    "query": "安栖-9号 这个项目的复盘效果是什么？"
+  },
+  {
+    "id": "gen-eval-urban-shelter-04-image",
+    "gold_citations": [
+      "eval-urban-shelter-04"
+    ],
+    "expected_answer": "应命中《社区避难空间物资轮换规范》，图片中文业务含义是避难空间物资货架。",
+    "query": "哪篇文档的配图视觉锚点是 Shelter Supply Shelf？这张图的中文业务含义是什么？"
+  },
+  {
+    "id": "gen-eval-factory-vision-01-threshold",
+    "gold_citations": [
+      "eval-factory-vision-01"
+    ],
+    "expected_answer": "关键触发阈值是误检率控制在1.8%以内。",
+    "query": "在评测语料中，机器视觉质检线灰度发布记录 的关键触发阈值是什么？请基于知识库回答并引用。"
+  },
+  {
+    "id": "gen-eval-factory-vision-01-result",
+    "gold_citations": [
+      "eval-factory-vision-01"
+    ],
+    "expected_answer": "银镜-V3 的效果是返修单日均减少42张。",
+    "query": "银镜-V3 这个项目的复盘效果是什么？"
+  },
+  {
+    "id": "gen-eval-factory-vision-01-image",
+    "gold_citations": [
+      "eval-factory-vision-01"
+    ],
+    "expected_answer": "应命中《机器视觉质检线灰度发布记录》，图片中文业务含义是视觉缺陷检测产线。",
+    "query": "哪篇文档的配图视觉锚点是 Vision Defect Inspection Line？这张图的中文业务含义是什么？"
+  },
+  {
+    "id": "gen-eval-factory-predict-02-threshold",
+    "gold_citations": [
+      "eval-factory-predict-02"
+    ],
+    "expected_answer": "关键触发阈值是轴承振动峰值超过7.6毫米每秒。",
+    "query": "在评测语料中，压缩机预测性维护特征说明 的关键触发阈值是什么？请基于知识库回答并引用。"
+  },
+  {
+    "id": "gen-eval-factory-predict-02-result",
+    "gold_citations": [
+      "eval-factory-predict-02"
+    ],
+    "expected_answer": "听诊器-11 的效果是非计划停机从每月5.4小时降至1.1小时。",
+    "query": "听诊器-11 这个项目的复盘效果是什么？"
+  },
+  {
+    "id": "gen-eval-factory-predict-02-image",
+    "gold_citations": [
+      "eval-factory-predict-02"
+    ],
+    "expected_answer": "应命中《压缩机预测性维护特征说明》，图片中文业务含义是预测性维护传感器。",
+    "query": "哪篇文档的配图视觉锚点是 Predictive Maintenance Sensor？这张图的中文业务含义是什么？"
+  },
+  {
+    "id": "gen-eval-factory-supply-03-threshold",
+    "gold_citations": [
+      "eval-factory-supply-03"
+    ],
+    "expected_answer": "关键触发阈值是关键物料安全库存低于2.5天。",
+    "query": "在评测语料中，多级供应链异常协同处置方案 的关键触发阈值是什么？请基于知识库回答并引用。"
+  },
+  {
+    "id": "gen-eval-factory-supply-03-result",
+    "gold_citations": [
+      "eval-factory-supply-03"
+    ],
+    "expected_answer": "灯塔-8D 的效果是缺料响应从18小时缩短到4小时。",
+    "query": "灯塔-8D 这个项目的复盘效果是什么？"
+  },
+  {
+    "id": "gen-eval-factory-supply-03-image",
+    "gold_citations": [
+      "eval-factory-supply-03"
+    ],
+    "expected_answer": "应命中《多级供应链异常协同处置方案》，图片中文业务含义是供应链控制塔。",
+    "query": "哪篇文档的配图视觉锚点是 Supply Chain Control Tower？这张图的中文业务含义是什么？"
+  },
+  {
+    "id": "gen-eval-carbon-microgrid-01-threshold",
+    "gold_citations": [
+      "eval-carbon-microgrid-01"
+    ],
+    "expected_answer": "关键触发阈值是储能SOC低于22%时禁止继续放电。",
+    "query": "在评测语料中，园区微电网削峰填谷运行规程 的关键触发阈值是什么？请基于知识库回答并引用。"
+  },
+  {
+    "id": "gen-eval-carbon-microgrid-01-result",
+    "gold_citations": [
+      "eval-carbon-microgrid-01"
+    ],
+    "expected_answer": "荷叶-M2 的效果是尖峰电量占比下降13.6%。",
+    "query": "荷叶-M2 这个项目的复盘效果是什么？"
+  },
+  {
+    "id": "gen-eval-carbon-microgrid-01-image",
+    "gold_citations": [
+      "eval-carbon-microgrid-01"
+    ],
+    "expected_answer": "应命中《园区微电网削峰填谷运行规程》，图片中文业务含义是微电网能耗看板。",
+    "query": "哪篇文档的配图视觉锚点是 Microgrid Energy Dashboard？这张图的中文业务含义是什么？"
+  },
+  {
+    "id": "gen-eval-carbon-wasteheat-02-threshold",
+    "gold_citations": [
+      "eval-carbon-wasteheat-02"
+    ],
+    "expected_answer": "关键触发阈值是回水温度稳定在48到52摄氏度。",
+    "query": "在评测语料中，余热回收项目投运复盘 的关键触发阈值是什么？请基于知识库回答并引用。"
+  },
+  {
+    "id": "gen-eval-carbon-wasteheat-02-result",
+    "gold_citations": [
+      "eval-carbon-wasteheat-02"
+    ],
+    "expected_answer": "暖流-5A 的效果是冬季天然气消耗下降18.4%。",
+    "query": "暖流-5A 这个项目的复盘效果是什么？"
+  },
+  {
+    "id": "gen-eval-carbon-wasteheat-02-image",
+    "gold_citations": [
+      "eval-carbon-wasteheat-02"
+    ],
+    "expected_answer": "应命中《余热回收项目投运复盘》，图片中文业务含义是余热回收闭环。",
+    "query": "哪篇文档的配图视觉锚点是 Waste Heat Recovery Loop？这张图的中文业务含义是什么？"
+  },
+  {
+    "id": "gen-eval-carbon-accounting-03-threshold",
+    "gold_citations": [
+      "eval-carbon-accounting-03"
+    ],
+    "expected_answer": "关键触发阈值是缺失数据超过6小时必须标记估算来源。",
+    "query": "在评测语料中，楼宇碳账本数据治理指引 的关键触发阈值是什么？请基于知识库回答并引用。"
+  },
+  {
+    "id": "gen-eval-carbon-accounting-03-result",
+    "gold_citations": [
+      "eval-carbon-accounting-03"
+    ],
+    "expected_answer": "青账本-2026 的效果是月度碳报表人工校对时间减少62%。",
+    "query": "青账本-2026 这个项目的复盘效果是什么？"
+  },
+  {
+    "id": "gen-eval-carbon-accounting-03-image",
+    "gold_citations": [
+      "eval-carbon-accounting-03"
+    ],
+    "expected_answer": "应命中《楼宇碳账本数据治理指引》，图片中文业务含义是楼宇碳账本。",
+    "query": "哪篇文档的配图视觉锚点是 Building Carbon Ledger？这张图的中文业务含义是什么？"
+  },
+  {
+    "id": "gen-multi-urban-01",
+    "gold_citations": [
+      "eval-urban-flood-01",
+      "eval-urban-heat-02"
+    ],
+    "expected_answer": "暴雨内涝为雨燕-27，阈值15分钟滚动雨强超过38毫米；高温健康为清凉伞-14，阈值连续3小时体感温度高于42摄氏度。",
+    "query": "比较城市韧性主题中，暴雨内涝手册和高温健康指南分别使用什么项目代号、关键阈值和联动角色？"
+  },
+  {
+    "id": "gen-multi-factory-01",
+    "gold_citations": [
+      "eval-factory-vision-01",
+      "eval-factory-predict-02"
+    ],
+    "expected_answer": "视觉质检线银镜-V3要求夜班低峰灰度到20%工位；预测性维护听诊器-11要求振动告警结合油温和负载率交叉确认。",
+    "query": "智能制造主题里，哪个文档要求夜班低峰灰度到20%工位，哪个文档要求结合油温和负载率交叉确认？"
+  },
+  {
+    "id": "gen-multi-carbon-01",
+    "gold_citations": [
+      "eval-carbon-microgrid-01",
+      "eval-carbon-wasteheat-02",
+      "eval-carbon-accounting-03"
+    ],
+    "expected_answer": "荷叶-M2关注储能SOC低于22%禁放；暖流-5A关注回水温度48到52摄氏度和压差旁通；青账本-2026关注缺失数据超过6小时标记估算来源及避免重复抵扣。",
+    "query": "低碳园区主题中，荷叶-M2、暖流-5A、青账本-2026 分别对应什么核心约束或风险？"
+  },
+  {
+    "id": "gen-cross-theme-01",
+    "gold_citations": [
+      "eval-urban-flood-01",
+      "eval-factory-supply-03",
+      "eval-carbon-microgrid-01"
+    ],
+    "expected_answer": "示例：雨燕-27泵站启停需双因子确认；灯塔-8D替代料启用前需工程变更单签核；荷叶-M2削峰策略不得覆盖消防和实验室关键负荷。",
+    "query": "请从三个主题各举一个“不能被自动策略覆盖或替代”的风险控制点。"
+  },
+  {
+    "id": "gen-negative-01",
+    "gold_citations": [],
+    "expected_answer": "应说明未找到相关资料。",
+    "query": "这些评测语料中有没有提到“凤凰城轨道无人机配送许可证编号”？如果没有请明确说明。"
+  },
+  {
+    "id": "gen-negative-02",
+    "gold_citations": [],
+    "expected_answer": "应说明未找到相关资料。",
+    "query": "知识库是否写明青账本-2026 的供应商合同金额？请不要猜测。"
+  }
+]

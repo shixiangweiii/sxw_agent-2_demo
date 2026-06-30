@@ -1,0 +1,192 @@
+[
+  {
+    "doc_id": "eval-urban-flood-01",
+    "title": "海绵城市暴雨内涝联防手册",
+    "theme": "urban_resilience",
+    "theme_name": "城市韧性与应急管理",
+    "file": "corpus/eval-urban-flood-01.md",
+    "chars": 3496,
+    "sections": 9,
+    "image_url": "https://placehold.co/900x500/png?text=Urban+Flood+Sensor+Dashboard",
+    "facts": {
+      "code": "雨燕-27",
+      "metric": "15分钟滚动雨强超过38毫米",
+      "place": "青岚路下穿隧道",
+      "team": "排水调度、交警、社区网格员三方联动",
+      "result": "平均封控提前量从12分钟提升到31分钟",
+      "risk": "泵站远程启停和窨井液位传感器必须双因子确认",
+      "image_anchor": "Urban Flood Sensor Dashboard"
+    }
+  },
+  {
+    "doc_id": "eval-urban-heat-02",
+    "title": "高温健康风险网格化响应指南",
+    "theme": "urban_resilience",
+    "theme_name": "城市韧性与应急管理",
+    "file": "corpus/eval-urban-heat-02.md",
+    "chars": 2682,
+    "sections": 7,
+    "image_url": "https://placehold.co/900x500/png?text=Heatwave+Care+Map",
+    "facts": {
+      "code": "清凉伞-14",
+      "metric": "连续3小时体感温度高于42摄氏度",
+      "place": "南桥老街与河滨社区",
+      "team": "社区医生、物业管家、志愿者小队",
+      "result": "独居老人回访覆盖率达到96%",
+      "risk": "空调避暑点不得只登记人数，还要记录离场时间",
+      "image_anchor": "Heatwave Care Map"
+    }
+  },
+  {
+    "doc_id": "eval-urban-evac-03",
+    "title": "地铁站群大客流疏散演练复盘",
+    "theme": "urban_resilience",
+    "theme_name": "城市韧性与应急管理",
+    "file": "corpus/eval-urban-evac-03.md",
+    "chars": 2721,
+    "sections": 7,
+    "image_url": "https://placehold.co/900x500/png?text=Metro+Evacuation+Route",
+    "facts": {
+      "code": "北斗门-06",
+      "metric": "站厅密度达到每平方米4.2人",
+      "place": "银杏广场站与会展中心站",
+      "team": "站务、公安、公交接驳组",
+      "result": "三次演练中站台清空时间稳定在7分40秒以内",
+      "risk": "临时导流栏必须避开盲道和消防卷帘下降区",
+      "image_anchor": "Metro Evacuation Route"
+    }
+  },
+  {
+    "doc_id": "eval-urban-shelter-04",
+    "title": "社区避难空间物资轮换规范",
+    "theme": "urban_resilience",
+    "theme_name": "城市韧性与应急管理",
+    "file": "corpus/eval-urban-shelter-04.md",
+    "chars": 2658,
+    "sections": 7,
+    "image_url": "https://placehold.co/900x500/png?text=Shelter+Supply+Shelf",
+    "facts": {
+      "code": "安栖-9号",
+      "metric": "72小时基础保障包按300人规模配置",
+      "place": "松禾小学体育馆",
+      "team": "民政仓储、学校后勤、街道应急办",
+      "result": "过期物资率从8.5%降到0.7%",
+      "risk": "饮用水和急救包必须分区扫码盘点",
+      "image_anchor": "Shelter Supply Shelf"
+    }
+  },
+  {
+    "doc_id": "eval-factory-vision-01",
+    "title": "机器视觉质检线灰度发布记录",
+    "theme": "smart_manufacturing",
+    "theme_name": "智能制造与供应链协同",
+    "file": "corpus/eval-factory-vision-01.md",
+    "chars": 2616,
+    "sections": 7,
+    "image_url": "https://placehold.co/900x500/png?text=Vision+Defect+Inspection+Line",
+    "facts": {
+      "code": "银镜-V3",
+      "metric": "误检率控制在1.8%以内",
+      "place": "三号装配岛",
+      "team": "工艺工程、算法工程、班组长",
+      "result": "返修单日均减少42张",
+      "risk": "新模型只允许在夜班低峰时段灰度到20%工位",
+      "image_anchor": "Vision Defect Inspection Line"
+    }
+  },
+  {
+    "doc_id": "eval-factory-predict-02",
+    "title": "压缩机预测性维护特征说明",
+    "theme": "smart_manufacturing",
+    "theme_name": "智能制造与供应链协同",
+    "file": "corpus/eval-factory-predict-02.md",
+    "chars": 3454,
+    "sections": 9,
+    "image_url": "https://placehold.co/900x500/png?text=Predictive+Maintenance+Sensor",
+    "facts": {
+      "code": "听诊器-11",
+      "metric": "轴承振动峰值超过7.6毫米每秒",
+      "place": "空压站B区",
+      "team": "设备科、能源班、备件管理员",
+      "result": "非计划停机从每月5.4小时降至1.1小时",
+      "risk": "振动告警必须结合油温和负载率交叉确认",
+      "image_anchor": "Predictive Maintenance Sensor"
+    }
+  },
+  {
+    "doc_id": "eval-factory-supply-03",
+    "title": "多级供应链异常协同处置方案",
+    "theme": "smart_manufacturing",
+    "theme_name": "智能制造与供应链协同",
+    "file": "corpus/eval-factory-supply-03.md",
+    "chars": 2674,
+    "sections": 7,
+    "image_url": "https://placehold.co/900x500/png?text=Supply+Chain+Control+Tower",
+    "facts": {
+      "code": "灯塔-8D",
+      "metric": "关键物料安全库存低于2.5天",
+      "place": "华东总仓与两家二级供应商",
+      "team": "采购、计划、物流承运商",
+      "result": "缺料响应从18小时缩短到4小时",
+      "risk": "替代料启用前必须完成工程变更单签核",
+      "image_anchor": "Supply Chain Control Tower"
+    }
+  },
+  {
+    "doc_id": "eval-carbon-microgrid-01",
+    "title": "园区微电网削峰填谷运行规程",
+    "theme": "low_carbon_park",
+    "theme_name": "低碳园区与能源运营",
+    "file": "corpus/eval-carbon-microgrid-01.md",
+    "chars": 2693,
+    "sections": 7,
+    "image_url": "https://placehold.co/900x500/png?text=Microgrid+Energy+Dashboard",
+    "facts": {
+      "code": "荷叶-M2",
+      "metric": "储能SOC低于22%时禁止继续放电",
+      "place": "东湖科创园一期",
+      "team": "能源站、物业调度、入驻企业用能代表",
+      "result": "尖峰电量占比下降13.6%",
+      "risk": "削峰策略不得覆盖消防和实验室关键负荷",
+      "image_anchor": "Microgrid Energy Dashboard"
+    }
+  },
+  {
+    "doc_id": "eval-carbon-wasteheat-02",
+    "title": "余热回收项目投运复盘",
+    "theme": "low_carbon_park",
+    "theme_name": "低碳园区与能源运营",
+    "file": "corpus/eval-carbon-wasteheat-02.md",
+    "chars": 2675,
+    "sections": 7,
+    "image_url": "https://placehold.co/900x500/png?text=Waste+Heat+Recovery+Loop",
+    "facts": {
+      "code": "暖流-5A",
+      "metric": "回水温度稳定在48到52摄氏度",
+      "place": "北区数据中心与综合楼",
+      "team": "暖通组、数据中心运维、财务测算员",
+      "result": "冬季天然气消耗下降18.4%",
+      "risk": "换热器压差异常时优先旁通而不是强制升温",
+      "image_anchor": "Waste Heat Recovery Loop"
+    }
+  },
+  {
+    "doc_id": "eval-carbon-accounting-03",
+    "title": "楼宇碳账本数据治理指引",
+    "theme": "low_carbon_park",
+    "theme_name": "低碳园区与能源运营",
+    "file": "corpus/eval-carbon-accounting-03.md",
+    "chars": 2762,
+    "sections": 7,
+    "image_url": "https://placehold.co/900x500/png?text=Building+Carbon+Ledger",
+    "facts": {
+      "code": "青账本-2026",
+      "metric": "缺失数据超过6小时必须标记估算来源",
+      "place": "A座、B座与共享会议中心",
+      "team": "碳管理专员、IT数据组、第三方核证员",
+      "result": "月度碳报表人工校对时间减少62%",
+      "risk": "绿电凭证不得和屋顶光伏发电量重复抵扣",
+      "image_anchor": "Building Carbon Ledger"
+    }
+  }
+]

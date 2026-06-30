@@ -1,0 +1,474 @@
+{
+  "run_root": "/Users/shixiangweii/run_proj/sxw_optimization_demo/eval/eval_docs/first_eval/runs/engine_compare_20260630-105422",
+  "strict_total": {
+    "agent_loop": 95.325,
+    "plan_execute": 91.981
+  },
+  "strict_delta_agent_loop_minus_plan_execute": 3.3440000000000083,
+  "without_C07_normalized": {
+    "agent_loop": {
+      "score": 90.075,
+      "max": 94.75,
+      "norm": 95.06596306068602
+    },
+    "plan_execute": {
+      "score": 87.431,
+      "max": 94.75,
+      "norm": 92.2754617414248
+    }
+  },
+  "per_question_delta": [
+    {
+      "id": "S01",
+      "difficulty": "simple",
+      "type": "single_fact",
+      "agent_loop": 2.0,
+      "plan_execute": 2.0,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "S02",
+      "difficulty": "simple",
+      "type": "single_fact",
+      "agent_loop": 2.0,
+      "plan_execute": 2.0,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "S03",
+      "difficulty": "simple",
+      "type": "single_fact",
+      "agent_loop": 2.0,
+      "plan_execute": 2.0,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "S04",
+      "difficulty": "simple",
+      "type": "single_fact",
+      "agent_loop": 2.0,
+      "plan_execute": 2.0,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "S05",
+      "difficulty": "simple",
+      "type": "image_recall",
+      "agent_loop": 2.0,
+      "plan_execute": 2.0,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "S06",
+      "difficulty": "simple",
+      "type": "single_fact",
+      "agent_loop": 2.0,
+      "plan_execute": 2.0,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "S07",
+      "difficulty": "simple",
+      "type": "single_fact",
+      "agent_loop": 2.0,
+      "plan_execute": 2.0,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "S08",
+      "difficulty": "simple",
+      "type": "single_fact",
+      "agent_loop": 2.0,
+      "plan_execute": 2.0,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "M01",
+      "difficulty": "medium",
+      "type": "single_doc_calc",
+      "agent_loop": 3.0,
+      "plan_execute": 3.0,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search",
+        "calculator"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search",
+        "calculator"
+      ]
+    },
+    {
+      "id": "M02",
+      "difficulty": "medium",
+      "type": "same_doc_reasoning",
+      "agent_loop": 3.0,
+      "plan_execute": 3.0,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "M03",
+      "difficulty": "medium",
+      "type": "same_doc_reasoning",
+      "agent_loop": 3.0,
+      "plan_execute": 3.0,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "M04",
+      "difficulty": "medium",
+      "type": "single_doc_calc",
+      "agent_loop": 3.0,
+      "plan_execute": 3.0,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search",
+        "calculator"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search",
+        "calculator"
+      ]
+    },
+    {
+      "id": "M05",
+      "difficulty": "medium",
+      "type": "same_doc_reasoning",
+      "agent_loop": 3.0,
+      "plan_execute": 3.0,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "M06",
+      "difficulty": "medium",
+      "type": "same_doc_reasoning",
+      "agent_loop": 3.0,
+      "plan_execute": 3.0,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "M07",
+      "difficulty": "medium",
+      "type": "single_doc_calc",
+      "agent_loop": 3.0,
+      "plan_execute": 3.0,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "calculator",
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search",
+        "calculator"
+      ]
+    },
+    {
+      "id": "M08",
+      "difficulty": "medium",
+      "type": "same_doc_reasoning",
+      "agent_loop": 3.0,
+      "plan_execute": 3.0,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "M09",
+      "difficulty": "medium",
+      "type": "same_doc_reasoning",
+      "agent_loop": 3.0,
+      "plan_execute": 3.0,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "M10",
+      "difficulty": "medium",
+      "type": "same_doc_reasoning",
+      "agent_loop": 3.0,
+      "plan_execute": 3.0,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "M11",
+      "difficulty": "medium",
+      "type": "two_doc_compare",
+      "agent_loop": 2.85,
+      "plan_execute": 2.85,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search",
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search",
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "M12",
+      "difficulty": "medium",
+      "type": "two_doc_compare",
+      "agent_loop": 2.85,
+      "plan_execute": 2.85,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search",
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search",
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "M13",
+      "difficulty": "medium",
+      "type": "image_recall_compare",
+      "agent_loop": 3.0,
+      "plan_execute": 2.85,
+      "delta": 0.15,
+      "agent_loop_tools": [
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search",
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "M14",
+      "difficulty": "medium",
+      "type": "same_doc_causal",
+      "agent_loop": 3.0,
+      "plan_execute": 3.0,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "C01",
+      "difficulty": "complex",
+      "type": "cross_theme_risk",
+      "agent_loop": 4.9,
+      "plan_execute": 3.413,
+      "delta": 1.487,
+      "agent_loop_tools": [
+        "knowledge_search",
+        "knowledge_search",
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search",
+        "knowledge_search",
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "C02",
+      "difficulty": "complex",
+      "type": "multi_doc_calc",
+      "agent_loop": 4.987,
+      "plan_execute": 4.987,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search",
+        "knowledge_search",
+        "calculator",
+        "calculator"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search",
+        "knowledge_search",
+        "calculator",
+        "calculator"
+      ]
+    },
+    {
+      "id": "C03",
+      "difficulty": "complex",
+      "type": "three_doc_synthesis",
+      "agent_loop": 4.9,
+      "plan_execute": 4.9,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search",
+        "knowledge_search",
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search",
+        "knowledge_search",
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "C04",
+      "difficulty": "complex",
+      "type": "multi_image_recall",
+      "agent_loop": 5.25,
+      "plan_execute": 4.856,
+      "delta": 0.394,
+      "agent_loop_tools": [
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search",
+        "knowledge_search",
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "C05",
+      "difficulty": "complex",
+      "type": "reverse_contradiction",
+      "agent_loop": 5.25,
+      "plan_execute": 5.25,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search"
+      ]
+    },
+    {
+      "id": "C06",
+      "difficulty": "complex",
+      "type": "multi_doc_percent_calc",
+      "agent_loop": 2.888,
+      "plan_execute": 2.888,
+      "delta": 0.0,
+      "agent_loop_tools": [
+        "calculator"
+      ],
+      "plan_execute_tools": [
+        "calculator"
+      ]
+    },
+    {
+      "id": "C07",
+      "difficulty": "complex",
+      "type": "knowledge_plus_text_stats",
+      "agent_loop": 5.25,
+      "plan_execute": 4.55,
+      "delta": 0.7,
+      "agent_loop_tools": [
+        "knowledge_search",
+        "tool_search",
+        "text_stats"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search",
+        "claude_skill_data_analysis"
+      ]
+    },
+    {
+      "id": "C08",
+      "difficulty": "complex",
+      "type": "negative_reverse",
+      "agent_loop": 4.2,
+      "plan_execute": 3.587,
+      "delta": 0.613,
+      "agent_loop_tools": [
+        "knowledge_search",
+        "knowledge_search"
+      ],
+      "plan_execute_tools": [
+        "knowledge_search",
+        "knowledge_search"
+      ]
+    }
+  ]
+}
