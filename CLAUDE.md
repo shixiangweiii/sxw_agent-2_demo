@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> 详尽的能力总览见 `README.md`，逐步运行/环境变量/排障见 `RUNBOOK.md`，设计依据见 `roadmap/`，评测方案见 `eval/README.md`。本文件只记录跨多文件、不易从单文件读出的「大局」与项目特定约定。
+> 详尽的能力总览见 `README.md`，逐步运行/环境变量/排障见 `RUNBOOK.md`，设计依据见 `roadmap/`，评测方案见 `eval/README.md`，深度评审与评测报告解读见 `review/`。本文件只记录跨多文件、不易从单文件读出的「大局」与项目特定约定。
 
 ## 这是什么
 
@@ -45,6 +45,8 @@ find agent arag common skillcenter a2a_service -name '*.py' | xargs "$PY" -m py_
 
 ```bash
 export DASHSCOPE_API_KEY=sk-***   # 仅环境变量，切勿写入任何文件
+bash eval/run_eval.sh             # 一键主 pass：两引擎各跑一遍 + 聚合报告（arag-down pass 需手动停 arag 后单独跑，脚本末尾有提示）
+# 或手动分步：
 $PY -m eval.harness.runner --engine agent_loop   --base-url http://127.0.0.1:8000 --out eval/reports/<ts>
 $PY -m eval.harness.runner --engine plan_execute --base-url http://127.0.0.1:8001 --out eval/reports/<ts>
 $PY -m eval.harness.report --out eval/reports/<ts>      # 聚合出 summary.md
@@ -63,6 +65,8 @@ $PY -m eval.harness.report --out eval/reports/<ts>      # 聚合出 summary.md
                       └─→ a2a_service(:8300)   A2A 远程子代理（ADK to_a2a 暴露 math_expert）
 ```
 **对外只需访问 agent**。下游不可用时一律 **best-effort 降级**（不阻断 agent 启动 / 不中断对话），对应能力静默跳过——排障时按 `[QaRetrieve] degraded`、`[SkillCatalog] ... skip`、`[A2ALoad] ... skip` 等日志定位。
+
+agent 还内置浏览器 Web Chat：`web/`（纯静态 HTML/JS，无构建步骤）由 `agent/main.py` 挂载在 `GET /chat-ui/`（根路径 `/` 重定向到它）；其文档上传走 agent 的 `POST /api/v1/documents/index` 代理转发到 arag `/v1/index`。
 
 ### 两代推理引擎（核心抽象）
 `agent/engine/base.py` 定义统一端口 `ReasoningEngine.run_stream(ctx) -> AsyncIterator[StreamEvent]`，由 `build_engine()` 按 `ENGINE` 配置选型：
