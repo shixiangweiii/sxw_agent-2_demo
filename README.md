@@ -1,10 +1,28 @@
-# sxw_optimization_demo — 生产级 Agent 运行时（规划/推理引擎）+ 混合召回 RAG
+# sxw_agent-2_demo — 生产级 Agent 运行时（规划/推理引擎）+ 混合召回 RAG
 
-基于 **Google ADK** 精简复刻的一套**可独立运行的生产级 AI Agent 系统**，凸显「**Agent 运行时规划与推理引擎**」。
-双服务（Agent 运行时 + RAG 检索）经 HTTP 协作，覆盖：提问 → 意图识别 → 规划/执行 → 技能调用 → 结果返回、
-多模态图片/文件、流式 SSE/长连接、混合召回 RAG、可观测性。
+基于 **Google ADK 2.3** 精简复刻的一套**可独立运行的生产级 AI Agent 系统**，核心展示「**Agent 运行时的规划/推理引擎**」与混合召回 RAG。系统由 agent、arag、skill-center、a2a_service **4 个 FastAPI 服务**经 HTTP 协作，覆盖提问、规划与执行、工具/技能调用、知识检索、多模态输入、SSE 流式返回和全链路可观测。
 
-> 设计依据与里程碑见 [`roadmap/`](roadmap/README.md)。
+## 项目定位与背景
+
+本项目从公司生产项目的核心链路中抽取、简化而来，用于个人学习、技术方案验证和面试展示。它保留生产系统的关键架构形状与工程取舍，但不是生产源码的完整镜像，也不承担真实线上流量。
+
+生产参考主要来自四个方向：接入层的会话管理与文件上传、Agent 核心运行时与推理引擎、技能中心与 A2A、ARAG 检索。仓库把这些能力裁剪并重新组织成可在本机独立运行的最小完整系统。
+
+## 项目目标
+
+1. 展示两代推理引擎从 Plan-Execute 到 Agent-Loop 的演进、统一抽象与行为差异。
+2. 复刻工具调用、技能执行、子代理委派、异常反馈、熔断和降级等生产级 Agent 主链路。
+3. 展示向量检索、BM25、RRF 融合、查询改写、多模态入库和引用生成组成的工程化 RAG。
+4. 通过统一 SSE、trace_id、结构化日志和真实 LLM 评测，让系统可运行、可观察、可比较。
+5. 形成一套结构清晰、边界诚实、适合讲解和持续实验的 AI Agent 样板工程。
+
+## 设计与改造原则
+
+- 这是学习与面试项目，后续改造**不要求历史兼容、存量技术债兼容或线上灰度兼容**；可以调整接口、数据结构和模块边界，优先采用当前更先进、更清晰的技术方案。
+- “不考虑兼容性”不等于忽略工程质量。任何改动仍应保持主链路可运行、关键失败可降级、配置/文档/评测同步更新。
+- 优先保留能体现 Agent 核心能力和工程取舍的内容，非核心企业治理能力可以裁剪，过时实现可以直接替换或删除。
+- 对未完整实现的能力保持诚实：Anthropic PromptCache 在默认 DashScope/Qwen 下是 no-op；AgentBay、GraphStore 等仍是演示桩或预留端口；LocalSandbox 不等同于生产级隔离。
+- 密钥只通过环境变量或本地 `.env` 注入，禁止写入代码、文档、评测数据或 Git 历史。
 
 ---
 
@@ -44,7 +62,7 @@
 | **混合召回 RAG** | 向量 + BM25 双路召回 → RRF 互惠排名融合 → 低价值过滤；查询改写 |
 | **知识问答 + 引用** | agent→arag 微服务调用（超时降级）；正文 `[n]` → 末尾引用块；无命中不编造 |
 | **技能调用（skill-center）** | agent→skill-center 第 3 个微服务；启动拉技能目录(快照)→技能包装成工具；NDJSON `SkillResultDTO` 流（思考/卡片/增量/算粒错误）经 UI 队列合并为 `skill_event` 实时流出 |
-| **SKILL 沙箱执行（claude-skill）** | 技能包(SKILL.md)作为**子代理在沙箱中执行**；沙箱 provider 抽象（LocalSandbox 可跑 / AgentBay 云桩）+ file/shell/code 服务；两契约（output→LLM / 事件→UI） |
+| **SKILL 沙箱执行** | `agent/claude_skill/` 中的技能包（SKILL.md）作为**子代理在沙箱中执行**；沙箱 provider 抽象（LocalSandbox 可跑 / AgentBay 云桩）+ file/shell/code 服务；两契约（output→LLM / 事件→UI） |
 | **A2A 远程子代理** | ADK 原生 A2A（`a2a-sdk` + `RemoteA2aAgent` 客户端 + `to_a2a` 服务端）；`a2a_service`(:8300) 暴露 agent-card + JSON-RPC，skill-center 作注册表，agent 经 agent-card 发现 + 远程委派 |
 | **多模态** | 图片输入（ADK artifact + 视觉模型）；文档图片 caption 入库可检索 |
 | **流式 SSE** | `text / tool_call / tool_result / plan_step / citation / skill_event / done` 事件 |
@@ -63,7 +81,7 @@ LLM = 阿里云 DashScope `qwen3.7-plus`（文本+视觉+function-calling）· �
 ## 快速开始
 
 ```bash
-cd sxw_optimization_demo
+cd sxw_agent-2_demo
 
 # 1) 配置（填入真实 DASHSCOPE_API_KEY，切勿提交）
 cp .env.example .env
@@ -99,7 +117,7 @@ curl -N -X POST http://127.0.0.1:8000/api/v1/chat/demo/stream \
 curl -N -X POST http://127.0.0.1:8000/api/v1/chat/demo/stream \
   -F 'query=用天气卡片技能 query_weather 查询杭州天气' -F user_id=u1 -F session_id=s1
 
-# SKILL 沙箱执行（claude-skill：子代理在沙箱跑 numpy）
+# SKILL 沙箱执行（子代理在沙箱跑 numpy）
 curl -N -X POST http://127.0.0.1:8000/api/v1/chat/demo/stream \
   -F 'query=用数据分析技能算 12,7,9,20 的均值和方差' -F user_id=u1 -F session_id=s1
 
@@ -152,7 +170,8 @@ arag/    混合召回 RAG 服务
 skillcenter/   技能中心（MCP 风格执行网关 + A2A 注册表）：{skills,api,a2a_api,main,config}
 a2a_service/   A2A 运行时（ADK to_a2a 暴露 math_expert 子代理）：{agents,main,config}
 common/{obs.py, skill_contract.py}    通用可观测性 + 技能线协议契约
-roadmap/         设计依据与实施里程碑
+eval/            真实 LLM 黑盒评测、数据集、评分器与历史报告
+web/             内置浏览器 Chat UI（静态 HTML/JS/CSS）
 ```
 
 ---
@@ -165,7 +184,7 @@ roadmap/         设计依据与实施里程碑
 4. **依赖倒置**让存储中间件可演进（本地→pgvector/ES/Neo4j 零改业务）。
 5. **全链路流式与可观测**：SSE 增量、计划步骤/工具调用事件、trace_id 贯穿、结构化日志埋点；微服务边界含超时与降级。
 
-> ⚠️ 诚实声明：PromptCache 的显式缓存断点为 Anthropic 专属，本 demo 默认 provider（DashScope/Qwen）下为 no-op（见 `roadmap/05`）。
+> ⚠️ 诚实声明：PromptCache 的显式缓存断点为 Anthropic 专属，本 demo 默认 provider（DashScope/Qwen）下为 no-op。
 
 ---
 
@@ -177,6 +196,6 @@ roadmap/         设计依据与实施里程碑
 - 复杂治理：老路径 `ReferenceRewriter`、生产版 CitationInjector 完整 feed/flush 状态机、多语言标题白名单、历史引用清洗、图片 `__IMG__` placeholder 流式替换
 - 入口形态：匿名游客问答、群聊 @ / 群感知、deviceType/dialogType 等 A2A 上下文字段
 
-准确定性是「**保留主链路形状 + 关键工程取舍**」，而非「完整保留所有生产逻辑」。被裁剪项的对应关系见 `roadmap/01-architecture.md` 映射表与 `roadmap/05`。
+准确定性是「**保留主链路形状 + 关键工程取舍**」，而非「完整保留所有生产逻辑」。判断是否新增或保留一项能力时，以它能否帮助理解 Agent Runtime、RAG、扩展机制、可靠性或评测为主要标准。
 
 > **两类工具失败模型**（面试可展开）：业务可预期失败由工具返回结构化错误（如 `calculator` / `knowledge_search` 降级）；框架级异常由 Plugin `on_tool_error_callback` 封装成 `function_response` 喂回模型、不中断 turn（可用 `simulate_unstable_operation(should_fail=true)` 现场演示）。

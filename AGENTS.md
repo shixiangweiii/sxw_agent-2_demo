@@ -1,10 +1,40 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+This file provides guidance to Codex when working with code in this repository.
 
-> 详尽的能力总览见 `README.md`，逐步运行/环境变量/排障见 `RUNBOOK.md`，设计依据见 `roadmap/`，评测方案见 `eval/README.md`。本文件只记录跨多文件、不易从单文件读出的「大局」与项目特定约定。
+> 项目定位与能力总览见 `README.md`，逐步运行、环境变量和排障见 `RUNBOOK.md`，评测方案见 `eval/README.md`。本文件记录 AI 编码时需要掌握的项目背景、目标、跨模块架构与工程约定。
 
-## 这是什么
+## 项目背景与定位
+
+本项目由公司生产项目的核心链路抽取、简化而来，用于个人学习、技术方案验证和面试准备。目标是保留生产级 Agent 系统的主链路形状和关键工程取舍，并将它们组织成可在本机独立运行、便于讲解和持续实验的样板工程；它不是生产源码的完整镜像，也不承担真实线上流量。
+
+需要对照生产实现时，可参考以下本机源码，但应提炼设计而不是机械复制内部治理逻辑：
+
+| 方向 | 参考路径 |
+|---|---|
+| 接入层、会话管理、文件上传 | `/Users/shixiangweii/IdeaProjects/sxw_work/codes/fy26_albert_chat2/albert-chat-2` |
+| Agent 核心运行时与推理引擎 | `/Users/shixiangweii/PycharmProjects/fy26_deap_agent/albert-agent-2` |
+| 技能中心与 A2A | `/Users/shixiangweii/IdeaProjects/sxw_work/codes/2026_albert-skill-center_proj/albert-skill-center` |
+| ARAG | `/Users/shixiangweii/PycharmProjects/arag_learn_proj/lippi-arag` |
+
+## 项目目标
+
+1. 展示 Plan-Execute 与 Agent-Loop 两代推理引擎的演进、统一抽象、适用场景和行为差异。
+2. 复刻工具调用、技能执行、子代理委派、异常反馈、熔断、降级和引用生成等生产级主链路。
+3. 展示向量检索、BM25、RRF 融合、查询改写、多模态入库与持久化组成的工程化 RAG。
+4. 通过 SSE、trace_id、结构化日志和真实 LLM 黑盒评测，让系统可运行、可观察、可比较。
+5. 为面试讲解和后续技术实验提供结构清晰、边界诚实、易于演进的代码基线。
+
+## 改造原则与交付要求
+
+- **先进方案优先**：本项目不要求历史兼容、存量技术债兼容或线上灰度兼容。旧接口、数据结构和实现不再合理时，可以直接调整、替换或删除，无须为历史行为保留兼容层。
+- **主链路必须完整**：不背兼容包袱不等于降低工程质量。改动后应保持四服务可启动、核心链路可运行、可选下游故障可降级，并完成与风险相称的验证。
+- **跨文件保持一致**：代码变更涉及架构、配置、端口、命令、能力边界或评测行为时，同步更新 `README.md`、`RUNBOOK.md`、本文件、`CLAUDE.md` 和相关评测资料。
+- **聚焦核心价值**：优先实现能说明 Agent Runtime、RAG、技能/A2A、可靠性或评测方法的能力；与学习和面试主线无关的企业内部治理可以继续裁剪。
+- **诚实描述边界**：不得把演示桩或预留端口写成已投产能力。PromptCache 的显式缓存断点仅对 Anthropic 生效；AgentBay 未接真实 SDK；GraphStore 未接检索流；LocalSandbox 不是生产级隔离。
+- **保护敏感信息**：API Key 只允许通过真实环境变量或被 Git 忽略的本地 `.env` 注入，禁止写入代码、文档、评测产物或提交历史。
+
+## 当前系统概览
 
 基于 **Google ADK 2.3** 精简复刻的生产级 AI Agent 系统，由 **4 个独立的 FastAPI/uvicorn 服务**经 HTTP 协作。核心卖点是「**Agent 运行时的规划/推理引擎**」与混合召回 RAG。代码与文档以中文为主。
 
@@ -45,11 +75,16 @@ find agent arag common skillcenter a2a_service -name '*.py' | xargs "$PY" -m py_
 
 ```bash
 export DASHSCOPE_API_KEY=sk-***   # 仅环境变量，切勿写入任何文件
+bash eval/run_eval.sh             # 两引擎各跑一遍并聚合报告；arag-down pass 需手动停 arag 后单独跑
+# 或手动分步：
 $PY -m eval.harness.runner --engine agent_loop   --base-url http://127.0.0.1:8000 --out eval/reports/<ts>
 $PY -m eval.harness.runner --engine plan_execute --base-url http://127.0.0.1:8001 --out eval/reports/<ts>
 $PY -m eval.harness.report --out eval/reports/<ts>      # 聚合出 summary.md
 # 单 suite：--suite routing；arag-down 鲁棒性子集：先停 arag 再加 --only-arag-down
+# 降方差：--repeat 3；不重跑 LLM 只重评分：$PY -m eval.harness.rescore --out eval/reports/<ts>
 ```
+
+> 首版报告位于 `eval/reports/20260629-090605/`；A/B prompt 回归位于 `eval/reports/{baseline-r3,improved-r3}/`。现有结果表明同一 prompt 改动可能让两代引擎产生相反收益，因此修改 prompt、工具集或循环控制时必须分别验证两代引擎，不能用一套结果代替另一套。
 
 ## 架构大局
 
@@ -60,6 +95,8 @@ $PY -m eval.harness.report --out eval/reports/<ts>      # 聚合出 summary.md
                       └─→ a2a_service(:8300)   A2A 远程子代理（ADK to_a2a 暴露 math_expert）
 ```
 **对外只需访问 agent**。下游不可用时一律 **best-effort 降级**（不阻断 agent 启动 / 不中断对话），对应能力静默跳过——排障时按 `[QaRetrieve] degraded`、`[SkillCatalog] ... skip`、`[A2ALoad] ... skip` 等日志定位。
+
+agent 还内置浏览器 Web Chat：`web/` 中的静态资源由 `agent/main.py` 挂载到 `GET /chat-ui/`，根路径 `/` 重定向到该页面；文档上传经 agent 的 `POST /api/v1/documents/index` 代理转发到 arag `/v1/index`。
 
 ### 两代推理引擎（核心抽象）
 `agent/engine/base.py` 定义统一端口 `ReasoningEngine.run_stream(ctx) -> AsyncIterator[StreamEvent]`，由 `build_engine()` 按 `ENGINE` 配置选型：
@@ -76,7 +113,7 @@ $PY -m eval.harness.report --out eval/reports/<ts>      # 聚合出 summary.md
 
 ### 三种「扩展智能体」机制（不要混淆）
 - **skill-center 技能**（`agent/skills/` → `skillcenter/`）：远程 MCP 风格执行网关；启动拉技能目录(快照)包装成工具；NDJSON `SkillResultDTO` 流经 UI 队列合并为 `skill_event`。
-- **Codex-skill 沙箱**（`agent/claude_skill/`）：技能包 `SKILL.md` 作为**子代理在沙箱中执行**；沙箱 provider 抽象（`LocalSandbox` 可跑 / `AgentBay` 云桩）。纯本地能力，不依赖任何下游。
+- **SKILL 沙箱**（代码目录 `agent/claude_skill/`）：技能包 `SKILL.md` 作为**子代理在沙箱中执行**；沙箱 provider 抽象（`LocalSandbox` 可跑 / `AgentBay` 云桩）。纯本地能力，不依赖任何下游。
 - **A2A 远程子代理**（`agent/a2a/loader.py` + `a2a_service/`）：ADK 原生 A2A，经 agent-card 发现 + JSON-RPC 委派；skill-center 作注册表。
 
 ### RAG（arag）
@@ -97,5 +134,5 @@ $PY -m eval.harness.report --out eval/reports/<ts>      # 聚合出 summary.md
 
 - **通用工具**：在 `agent/tools/builtin_tools.py` 写带类型注解 + docstring 的函数 → 加入 `build_builtin_tools()`（ADK 自动转 FunctionTool）。
 - **skill-center 技能**：在 `skillcenter/skills.py` 的 `SKILL_DEFS` 加定义 + 在 `execute_sync`/`execute_streaming` 加分支。
-- **Codex-skill（沙箱）**：在 `agent/claude_skill/skills_data/<id>/SKILL.md` 写 frontmatter(name/description) + 指令体，自动被加载。
+- **SKILL 沙箱技能**：在 `agent/claude_skill/skills_data/<id>/SKILL.md` 写 frontmatter(name/description) + 指令体，自动被加载。
 - **A2A 子代理**：在 `a2a_service/agents.py` 定义 ADK `LlmAgent` 并 `to_a2a` 暴露；在 `skillcenter/a2a_api.py` 注册到 `/instance/list`。

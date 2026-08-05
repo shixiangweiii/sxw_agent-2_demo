@@ -1,0 +1,12 @@
+这是一个基于公司生产项目简化后的，用于我个人学习、准备面试的项目，所以这个项目相关的改动不用考虑历史兼容性，
+不用考虑技术负债，不用考虑线上兼容性，只管用最先进、最优秀的技术方案思路即可，
+
+相关生产项目源码参考如下
+
+接入层会话管理、文件上传等处理：/Users/shixiangweii/IdeaProjects/sxw_work/codes/fy26_albert_chat2/albert-chat-2
+
+整体核心运行时推理引擎：/Users/shixiangweii/PycharmProjects/fy26_deap_agent/albert-agent-2
+
+技能中心 & A2A：/Users/shixiangweii/IdeaProjects/sxw_work/codes/2026_albert-skill-center_proj/albert-skill-center
+
+ARAG：/Users/shixiangweii/PycharmProjects/arag_learn_proj/lippi-arag

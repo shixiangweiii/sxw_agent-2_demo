@@ -1,13 +1,22 @@
 # 运行手册（RUNBOOK）
 
 > 面向新手：照本手册可在本机快速启动全部服务并跑通各项能力；含全部环境变量、功能特性开关与开发指南。
-> 设计依据见 [`roadmap/`](roadmap/README.md)，能力总览见 [`README.md`](README.md)。
+> 项目定位与能力总览见 [`README.md`](README.md)，Agent 开发约定见 [`AGENTS.md`](AGENTS.md)，评测方案见 [`eval/README.md`](eval/README.md)。
 
 ---
 
-## 1. 这是什么 · 服务与端口
+## 1. 项目定位、运行边界与服务端口
 
-精简复刻的生产级 Agent 运行时，由 **4 个 Python 服务**组成（均 FastAPI/uvicorn，基于 **Google ADK**）：
+这是从公司生产项目核心链路中抽取、简化的个人学习与面试项目，重点验证和展示 Agent 运行时推理引擎、混合召回 RAG、技能/A2A 扩展以及生产级容错与可观测。它是可独立运行的工程样板，不是线上系统，也不承担历史兼容、存量技术债兼容或灰度发布要求。
+
+开发时可以优先采用当前更先进、更清晰的方案，并直接调整旧接口或过时实现；但交付结果仍须满足以下底线：
+
+- 四服务主链路可以按本文档启动，核心能力有与风险相称的验证。
+- 下游故障遵循 best-effort 降级，不因可选能力不可用而中断基本对话。
+- 配置、README、RUNBOOK、Agent 开发约定和评测用例与代码保持同步。
+- 密钥不得进入文件或 Git；演示桩、provider 限制和非生产隔离能力必须明确说明。
+
+系统由 **4 个 Python 服务**组成（均 FastAPI/uvicorn，基于 **Google ADK 2.3**）：
 
 | 服务 | 默认端口 | 作用 | 启动模块 |
 |---|---|---|---|
@@ -29,7 +38,7 @@
 
 ### 重建虚拟环境（仅当 `.venv/` 与 `env_sxw_demo/` 都不存在）
 ```bash
-cd sxw_optimization_demo
+cd sxw_agent-2_demo
 python3.12 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 # 网络受限可加清华镜像：
@@ -42,7 +51,7 @@ python3.12 -m venv .venv
 ## 3. 快速开始（一键启动）
 
 ```bash
-cd sxw_optimization_demo
+cd sxw_agent-2_demo
 
 # 1) 配置：从样例复制 .env，填入你的真实 DASHSCOPE_API_KEY（其余可保持默认）
 cp .env.example .env
@@ -69,7 +78,7 @@ curl -N -X POST http://127.0.0.1:8000/api/v1/chat/demo/stream \
 所有服务从同目录的 `.env` 读配置；`DASHSCOPE_API_KEY` 也可用环境变量覆盖。手动运行时先按规则选择解释器：若 `env_sxw_demo/bin/python` 存在则优先使用，否则使用 `.venv/bin/python`。
 
 ```bash
-cd sxw_optimization_demo
+cd sxw_agent-2_demo
 if [ -x env_sxw_demo/bin/python ]; then
   PY=env_sxw_demo/bin/python
 else
@@ -117,7 +126,7 @@ curl -X POST http://127.0.0.1:8100/v1/index/sample
 | `SKILL_CENTER_BASE_URL` | `http://127.0.0.1:8200` | skill-center 地址（技能目录 + A2A 注册表） |
 | `SKILL_CENTER_TIMEOUT_MS` | `8000` | 技能同步/目录超时 |
 | `SKILL_CENTER_STREAM_TIMEOUT_MS` | `60000` | 技能流式执行超时 |
-| `SANDBOX_PROVIDER` | `local` | **claude-skill 沙箱**：`local`（可跑）\| `agentbay`（云桩，不可跑） |
+| `SANDBOX_PROVIDER` | `local` | **SKILL 沙箱**：`local`（可跑）\| `agentbay`（云桩，不可跑） |
 
 ### 5.3 arag（:8100）
 | 变量 | 默认 | 说明 |
@@ -161,7 +170,7 @@ ENGINE=plan_execute "$PY" -m uvicorn agent.main:app --port 8000
 - 默认走 DashScope `qwen3.7-plus`。**换模型/换厂商**只改三项：`LLM_MODEL` / `LLM_BASE_URL` / `DASHSCOPE_API_KEY`（agent 内部用 `openai/<LLM_MODEL>` 让 litellm 走 openai 兼容 provider）。
 - 推理模型的"思考过程"已通过 `extra_body={"enable_thinking": false}` 关闭，避免污染流式输出（代码内置，无需配）。
 
-### 6.3 claude-skill 沙箱 provider —— `SANDBOX_PROVIDER`
+### 6.3 SKILL 沙箱 provider —— `SANDBOX_PROVIDER`
 - `SANDBOX_PROVIDER=local`（默认）：本地沙箱，真实跑 `run_python`/`run_shell`（子进程 + 超时 + 工作目录限制）。
 - `SANDBOX_PROVIDER=agentbay`：AgentBay 云沙箱**桩**，调用即返回 `SandboxUnavailableError`（演示 provider 抽象；生产换 wuying-agentbay-sdk）。
 > ⚠️ LocalSandbox 仅演示用，**非生产隔离**。
@@ -178,7 +187,7 @@ ENGINE=plan_execute "$PY" -m uvicorn agent.main:app --port 8000
 - 不起 `arag` → 知识问答自动降级纯对话（`[QaRetrieve] degraded`）。
 - 不起 `skill-center` → skill-center 技能 + A2A 发现跳过（`[SkillCatalog]/[A2ALoad] load failed, skip`）。
 - 不起 `a2a_service` → A2A 工具在调用时报错喂回（不影响其它）。
-- claude-skill（沙箱）是**本地**能力，不依赖任何下游。
+- SKILL 沙箱是**本地**能力，不依赖任何下游（代码目录为 `agent/claude_skill/`）。
 
 ---
 
@@ -201,7 +210,7 @@ curl -N -X POST $A -F 'query=这张图里有什么？' -F user_id=u1 -F session_
 # skill-center 技能（流式 skill_event：思考帧/卡片）
 curl -N -X POST $A -F 'query=用天气卡片技能 query_weather 查询杭州天气' -F user_id=u1 -F session_id=s1
 
-# SKILL 沙箱执行（claude-skill：子代理在沙箱跑 numpy）
+# SKILL 沙箱执行（子代理在沙箱跑 numpy）
 curl -N -X POST $A -F 'query=用数据分析技能算 12,7,9,20 的均值和方差' -F user_id=u1 -F session_id=s1
 
 # A2A 远程子代理（agent-card 发现 + JSON-RPC 委派）
@@ -240,7 +249,8 @@ arag/       RAG：components/* + processor/* + store/*（存储端口）
 skillcenter/ 技能中心 + A2A 注册表
 a2a_service/ A2A 运行时（ADK to_a2a）
 common/     obs.py(trace+JSON日志) · skill_contract.py(技能线协议)
-roadmap/    设计依据与里程碑（01–08）
+eval/       真实 LLM 黑盒评测、数据集、评分器与历史报告
+web/        内置浏览器 Chat UI（静态资源，无构建步骤）
 ```
 
 ### 常用开发动作
@@ -252,7 +262,7 @@ roadmap/    设计依据与里程碑（01–08）
   ```
 - **加一个通用工具**：在 `agent/tools/builtin_tools.py` 写带类型注解 + docstring 的函数 → 加入 `build_builtin_tools()`（ADK 自动转 FunctionTool）。
 - **加一个 skill-center 技能**：在 `skillcenter/skills.py` 的 `SKILL_DEFS` 加定义 + 在 `execute_sync`/`execute_streaming` 加分支。
-- **加一个 claude-skill（沙箱）**：在 `agent/claude_skill/skills_data/<id>/SKILL.md` 写 frontmatter(name/description) + 指令体，自动被加载。
+- **加一个 SKILL 沙箱技能**：在 `agent/claude_skill/skills_data/<id>/SKILL.md` 写 frontmatter(name/description) + 指令体，自动被加载。
 - **加一个 A2A 子代理**：在 `a2a_service/agents.py` 定义 ADK `LlmAgent` 并 `to_a2a` 暴露；在 `skillcenter/a2a_api.py` 注册到 `/instance/list`。
 - **可观测性**：日志为结构化 JSON，含 `trace_id`（跨服务透传）；按 `[Tag]` 前缀检索，如 `[QaRetrieve]` `[SkillInvoke]` `[ClaudeSkill]` `[A2ALoad]` `[LoopControl]`。
 
