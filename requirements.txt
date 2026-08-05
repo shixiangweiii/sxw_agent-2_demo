@@ -15,6 +15,7 @@ python-multipart                 # multipart 上传（多模态图片/文件）
 # --- HTTP / config ---
 httpx
 pydantic-settings
+PyYAML>=6,<7                    # Claude SKILL frontmatter 安全解析
 
 # --- LLM / embeddings ---
 openai                           # 嵌入直连 DashScope compatible-mode

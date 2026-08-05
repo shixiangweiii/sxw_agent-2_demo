@@ -6,6 +6,8 @@ SandboxUnavailableError——用于演示 provider 抽象与可切换性（mirro
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from agent.claude_skill.sandbox.base import (
     BaseSandbox,
     CodeService,
@@ -23,6 +25,9 @@ class AgentbaySandbox(BaseSandbox):
         self._session_id = "agentbay-stub"
 
     async def try_create(self) -> None:
+        raise SandboxUnavailableError(_MSG)
+
+    async def stage_directory(self, source: Path, destination: str) -> None:
         raise SandboxUnavailableError(_MSG)
 
     def get_session_id(self) -> str:

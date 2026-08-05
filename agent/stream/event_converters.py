@@ -47,12 +47,14 @@ def adk_event_to_stream_events(event: Any) -> list[StreamEvent]:
         fc = getattr(part, "function_call", None)
         if fc is not None:
             out.append(StreamEvent("tool_call", {
+                "id": getattr(fc, "id", None),
                 "name": getattr(fc, "name", ""),
                 "args": dict(getattr(fc, "args", None) or {}),
             }))
         fr = getattr(part, "function_response", None)
         if fr is not None:
             out.append(StreamEvent("tool_result", {
+                "id": getattr(fr, "id", None),
                 "name": getattr(fr, "name", ""),
                 "response": _json_safe(getattr(fr, "response", None)),
             }))

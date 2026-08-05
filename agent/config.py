@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,7 +33,11 @@ class AgentSettings(BaseSettings):
     agent_uuid: str = "demo-agent"
 
     # --- claude-skill 沙箱 ---
-    sandbox_provider: str = "local"       # local | agentbay（agentbay 为桩，不可跑）
+    sandbox_provider: Literal["local", "agentbay"] = "local"  # agentbay 为桩，不可跑
+    skill_call_timeout_seconds: float = Field(default=120, gt=0)
+    skill_max_llm_calls: int = Field(default=16, gt=0)
+    skill_max_parallel_calls: int = Field(default=2, gt=0)
+    skill_result_max_chars: int = Field(default=8000, gt=0)
 
     log_level: str = "INFO"
 

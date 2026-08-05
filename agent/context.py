@@ -13,6 +13,8 @@ from agent.llm.hardened_litellm import HardenedLiteLlm, build_llm
 from agent.a2a.loader import load_a2a_agent_tools
 from agent.claude_skill.catalog import load_claude_skills
 from agent.claude_skill.claude_skill_tool import ClaudeSkillTool
+from agent.claude_skill.contracts import SkillRuntimeConfig
+from agent.claude_skill.execution_coordinator import SkillExecutionCoordinator
 from agent.session.session_service import SessionManager
 from agent.skills.catalog import load_skill_tools
 from agent.tools.builtin_tools import build_builtin_tools, simulate_unstable_operation
@@ -27,6 +29,7 @@ class AgentContext:
     tools: list[Callable[..., Any]]
     session_manager: SessionManager
     artifact_service: InMemoryArtifactService
+    skill_coordinator: SkillExecutionCoordinator
 
 
 def build_agent_context(settings: AgentSettings) -> AgentContext:
@@ -38,6 +41,7 @@ def build_agent_context(settings: AgentSettings) -> AgentContext:
                simulate_unstable_operation],
         session_manager=SessionManager(),
         artifact_service=build_artifact_service(),
+        skill_coordinator=SkillExecutionCoordinator(settings.skill_max_parallel_calls),
     )
 
 
@@ -50,8 +54,20 @@ async def attach_skill_tools(ctx: AgentContext) -> None:
 def attach_claude_skill_tools(ctx: AgentContext) -> None:
     """加载本地 claude-skill 包 → ClaudeSkillTool 注入 ctx.tools（沙箱执行，两代引擎共享）。"""
     skills = load_claude_skills()
+    runtime_config = SkillRuntimeConfig(
+        call_timeout_seconds=ctx.settings.skill_call_timeout_seconds,
+        max_llm_calls=ctx.settings.skill_max_llm_calls,
+        result_max_chars=ctx.settings.skill_result_max_chars,
+    )
     ctx.tools.extend(
-        ClaudeSkillTool(skill, ctx.llm, ctx.settings.sandbox_provider) for skill in skills
+        ClaudeSkillTool(
+            skill=skill,
+            llm=ctx.llm,
+            sandbox_provider=ctx.settings.sandbox_provider,
+            coordinator=ctx.skill_coordinator,
+            runtime_config=runtime_config,
+        )
+        for skill in skills
     )
 
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 
 class EnumSandboxProvider(str, Enum):
@@ -69,6 +70,11 @@ class BaseSandbox(ABC):
 
     @abstractmethod
     async def try_create(self) -> None: ...
+
+    @abstractmethod
+    async def stage_directory(self, source: Path, destination: str) -> None:
+        """把一个完整本地目录安全复制到沙箱内的相对路径。"""
+        ...
 
     @abstractmethod
     def get_session_id(self) -> str: ...

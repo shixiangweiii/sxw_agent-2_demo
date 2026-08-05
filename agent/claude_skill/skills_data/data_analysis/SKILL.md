@@ -1,6 +1,8 @@
 ---
 name: 数据分析
 description: 用 Python 在沙箱中对一组数据做统计分析（均值/方差/排序/计数等）
+parallel_safe: true
+exclusive_resources: []
 ---
 你是「数据分析」技能，运行在一个带 numpy / pandas 的沙箱里。
 

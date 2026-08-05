@@ -21,7 +21,13 @@ def extract_error(result: SkillResultDTO) -> Optional[str]:
     return None
 
 
-def to_skill_event(skill_name: str, result: SkillResultDTO) -> Optional[StreamEvent]:
+def to_skill_event(
+    skill_name: str,
+    result: SkillResultDTO,
+    *,
+    skill_call_id: Optional[str] = None,
+    parent_invocation_id: Optional[str] = None,
+) -> Optional[StreamEvent]:
     """展示帧 → skill_event；结束帧/非展示帧返回 None。"""
     if extract_error(result) is not None or result.eof or not result.is_display:
         return None
@@ -29,6 +35,11 @@ def to_skill_event(skill_name: str, result: SkillResultDTO) -> Optional[StreamEv
         return None
     return StreamEvent("skill_event", {
         "skill": skill_name,
+        "skillCallId": skill_call_id,
+        "parentInvocationId": parent_invocation_id,
+        "requestId": result.request_id,
+        "seq": result.seq,
+        "subEvent": "display",
         "dataType": result.data_type.value if result.data_type else None,
         "isThinking": bool(result.is_thinking),
         "isPartial": bool(result.is_partial),

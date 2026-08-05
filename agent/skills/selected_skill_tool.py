@@ -13,6 +13,7 @@ from google.adk.tools._gemini_schema_util import _to_gemini_schema
 from google.genai.types import FunctionDeclaration
 
 from agent.skills.args_coercion import coerce_args_by_schema
+from agent.skills.call_identity import resolve_skill_call_identity
 from agent.skills.client import SKILL_EXECUTION_ERROR, SkillCenterClient, SkillQuotaError
 from agent.skills.request_context import get_request_context
 from agent.skills.result_parser import extract_error, extract_text, to_skill_event
@@ -62,6 +63,14 @@ class SelectedSkillTool(BaseTool):
 
     async def run_async(self, *, args: dict[str, Any], tool_context: Optional[ToolContext]) -> Any:
         rc = get_request_context()
+        identity = resolve_skill_call_identity(
+            tool_context,
+            logger=logger,
+            tag="SkillInvoke",
+            skill=self._skill_id,
+        )
+        skill_call_id = identity.skill_call_id
+        parent_invocation_id = identity.parent_invocation_id
         agent_uuid = rc.agent_uuid if rc else "demo-agent"
         user = rc.user if rc and rc.user else {"userId": "demo-user"}
         request = SkillToolExecuteRequestDTO(
@@ -69,7 +78,16 @@ class SelectedSkillTool(BaseTool):
             arguments=coerce_args_by_schema(args or {}, self._raw_schema),
             context=self._build_context(),
         )
-        log_kv(logger, logging.INFO, "SkillInvoke", "start", skill=self._skill_id, tool=self._tool_name)
+        log_kv(
+            logger,
+            logging.INFO,
+            "SkillInvoke",
+            "start",
+            skill=self._skill_id,
+            tool=self._tool_name,
+            skill_call_id=skill_call_id,
+            parent_invocation_id=parent_invocation_id,
+        )
 
         text_parts: list[str] = []
         card: Any = None
@@ -83,7 +101,12 @@ class SelectedSkillTool(BaseTool):
                     # failure-sticky：首个失败最接近根因，后续成功/失败帧均不覆盖。
                     error_msg = frame_error
                     error_code = result.error_code or SKILL_EXECUTION_ERROR
-                event = to_skill_event(self._tool_name, result)
+                event = to_skill_event(
+                    self._tool_name,
+                    result,
+                    skill_call_id=skill_call_id,
+                    parent_invocation_id=parent_invocation_id,
+                )
                 if event is not None:
                     await emit_skill_event(event)
                 text_parts.append(extract_text(result))
@@ -119,5 +142,6 @@ class SelectedSkillTool(BaseTool):
             out["content"] = "技能执行完成。"
         log_kv(logger, logging.INFO, "SkillInvoke", "done",
                skill=self._skill_id, answer_len=len(aggregated), error=bool(error_msg),
-               error_code=error_code)
+               error_code=error_code, skill_call_id=skill_call_id,
+               parent_invocation_id=parent_invocation_id)
         return out

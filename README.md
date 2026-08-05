@@ -10,7 +10,7 @@
 
 ## 项目目标
 
-1. 展示两代推理引擎从 Plan-Execute 到 Agent-Loop 的演进、统一抽象与行为差异。
+1. 展示两代推理引擎从 Plan-Execute 到统一 Tool-Use Agent Loop 的演进、统一抽象与行为差异。
 2. 复刻工具调用、技能执行、子代理委派、异常反馈、熔断和降级等生产级 Agent 主链路。
 3. 展示向量检索、BM25、RRF 融合、查询改写、多模态入库和引用生成组成的工程化 RAG。
 4. 通过统一 SSE、trace_id、结构化日志和真实 LLM 评测，让系统可运行、可观察、可比较。
@@ -36,12 +36,12 @@
 │  POST /api/v1/chat/{uuid}/stream                                   │
 │  ReasoningEngine（ENGINE 可切换）                                  │
 │    ├─ Gen1 Plan-Execute：decision planner → execution planner      │
-│    └─ Gen2 Agent-Loop：ReAct 单循环 + 插件加固                     │
+│    └─ Gen2 Tool-Use Agent Loop：ReAct 单循环 + 插件加固            │
 │         · ToolArgsGuard（非对象参数→反馈，不分发真实工具）          │
 │         · ToolErrorFeedback（异常→function_response，不中断）       │
 │         · ContextOverflow（超长截断重试）· PromptCache(provider-aware)│
 │         · TaskPlan 续推 · force-summary · message budget            │
-│         · sub-agent 委派 · tool-search 动态发现                     │
+│         · Agent-as-Tool（SKILL 子 Agent）· tool-search 动态发现      │
 │  knowledge_search ──httpx(超时降级)──┐  citation([n]→引用块) · 多模态 │
 └──────────────────────────────────────┼────────────────────────────┘
                                         ▼ POST /v1/retrieve
@@ -58,12 +58,12 @@
 
 | 能力 | 实现 |
 |---|---|
-| **两代可切换推理引擎** | Plan-Execute（先规划后执行）/ Agent-Loop（ReAct 单循环），统一 `ReasoningEngine` 端口，`ENGINE` 配置切换 |
+| **两代可切换推理引擎** | Plan-Execute（先规划后执行）/ Tool-Use Agent Loop（ReAct 单循环），统一 `ReasoningEngine` 端口，`ENGINE` 配置切换 |
 | **生产级循环加固** | LiteLlm 工具参数规范化 + ADK Plugin 分发前短路/异常喂回，以及上下文超长截断重试、计划续推、force-summary、消息预算 |
 | **混合召回 RAG** | 向量 + BM25 双路召回 → RRF 互惠排名融合 → 低价值过滤；查询改写 |
 | **知识问答 + 引用** | agent→arag 微服务调用（超时降级）；正文 `[n]` → 末尾引用块；无命中不编造 |
 | **技能调用（skill-center）** | agent→skill-center 第 3 个微服务；NDJSON `SkillResultDTO` 采用数据帧 + 独立 EOF，缺 EOF/坏帧按稳定错误码处理；任意失败帧使整体失败并保留首个根因，错误码透传到 function response 和结构化日志；展示帧合并为 `skill_event` |
-| **SKILL 沙箱执行** | `agent/claude_skill/` 中的技能包（SKILL.md）作为**子代理在沙箱中执行**；沙箱 provider 抽象（LocalSandbox 可跑 / AgentBay 云桩）+ file/shell/code 服务；独立 Runner 同样带工具参数分发前 guard |
+| **SKILL Agent-as-Tool** | 每个 SKILL 作为主 Tool-Use Agent Loop 中的标准工具；每次调用把完整技能包复制到独立沙箱，子 Agent 首先读取 `SKILL.md` 后再执行；Runtime 负责超时、调用身份、并发与取消，主 Agent 根据 `tool_result` 继续决策 |
 | **A2A 远程子代理** | ADK 原生 A2A（`a2a-sdk` + `RemoteA2aAgent` 客户端 + `to_a2a` 服务端）；远程调用是无父对话历史的新会话，因此工具声明要求 request 展开指代并携带完整上下文 |
 | **多模态** | 图片输入（ADK artifact + 视觉模型）；文档图片 caption 入库可检索 |
 | **流式 SSE** | `text / tool_call / tool_result / plan_step / citation / skill_event / done` 事件 |
@@ -129,6 +129,32 @@ curl -N -X POST http://127.0.0.1:8000/api/v1/chat/demo/stream \
 
 切换引擎：编辑 `.env` 的 `ENGINE=plan_execute|agent_loop`（默认 `agent_loop`）。
 
+### Claude SKILL Agent-as-Tool
+
+Claude SKILL 不使用独立的多 Skill 编排器。主 Agent 将每次 Skill Agent 调用视为标准 `tool_use → tool_result`：有依赖的 Skill 在收到上游结果后跨轮串行调用；同轮调用只适用于彼此独立的任务。同一 invocation 内默认串行执行 Claude SKILL，只有 `parallel_safe: true` 且 `exclusive_resources: []` 的 Skill 才允许并行，同时仍受进程级并发上限约束。
+
+每次调用都会把 `agent/claude_skill/skills_data/<id>/` 完整复制到独立沙箱的 `skills/<id>/`，包括 `scripts/`、`references/` 和资源文件；子 Agent 必须先读取该目录根部的 `SKILL.md`。技能 frontmatter 示例：
+
+```yaml
+---
+name: 数据分析
+description: 使用 Python 执行统计分析
+parallel_safe: true
+exclusive_resources: []
+---
+```
+
+相关 agent 配置（修改后需重启）：
+
+| 变量 | 默认 | 说明 |
+|---|---:|---|
+| `SKILL_CALL_TIMEOUT_SECONDS` | `120` | 单次 Claude SKILL 调用总超时，包含排队、装载、执行与结果整理 |
+| `SKILL_MAX_LLM_CALLS` | `16` | 单个 Skill Agent 的最大模型调用次数 |
+| `SKILL_MAX_PARALLEL_CALLS` | `2` | 进程内 Claude SKILL 最大并发调用数 |
+| `SKILL_RESULT_MAX_CHARS` | `8000` | 回灌主 Agent 的 Skill 结果最大字符数 |
+
+当前不支持 Artifact 跨 Skill 传递、Claude SKILL HITL/暂停恢复和真实 AgentBay；`agentbay` provider 仍是不可运行的云桩。LocalSandbox 会在调用结束后删除临时目录，因此不能依赖共享目录在多个 Skill 间传文件。
+
 ---
 
 ## 接口
@@ -179,11 +205,12 @@ web/             内置浏览器 Chat UI（静态 HTML/JS/CSS）
 
 ## 面试脉络（talking points）
 
-1. **两代推理引擎的演进与取舍**：Plan-Execute（前置规划、可控可解释）vs Agent-Loop（动态 ReAct、强适应），统一端口、配置切换。
+1. **两代推理引擎的演进与取舍**：Plan-Execute（前置规划、可控可解释）vs Tool-Use Agent Loop（动态 ReAct、强适应），统一端口、配置切换。
 2. **「用 ADK」不止调 Runner**：生产加固落在 ADK 的 **Plugin**（工具参数分发前短路、续推/预算/force-summary、异常喂回）与 **LiteLlm 子类/适配层**（非对象参数规范化、超长截断重试、异常分类、缓存断点 provider-aware）。
 3. **RAG 是混合召回 + RRF 融合的工程化**，不是单路 `similarity_search`；查询改写、低价值过滤、图片多模态入库。
 4. **依赖倒置**让存储中间件可演进（本地→pgvector/ES/Neo4j 零改业务）。
 5. **全链路流式与可观测**：SSE 增量、计划步骤/工具调用事件、trace_id 贯穿、结构化日志埋点；微服务边界含超时与降级。
+6. **Agent-as-Tool 而非额外编排器**：一个 Skill Agent 执行一个完整 SKILL 包；多 Skill 串并行仍由主 Tool-Use Agent Loop 动态决定，Runtime 只治理身份、并发、超时、取消和沙箱隔离。
 
 > ⚠️ 诚实声明：PromptCache 的显式缓存断点为 Anthropic 专属，本 demo 默认 provider（DashScope/Qwen）下为 no-op。
 
@@ -196,6 +223,7 @@ web/             内置浏览器 Chat UI（静态 HTML/JS/CSS）
 - 内部基建：Nacos 灰度 / A2A 信封 / HSF 用户体系 / SLS·langfuse·rocketmq / MaaS 内部网关 / 计费·限流·租户权限
 - 复杂治理：老路径 `ReferenceRewriter`、生产版 CitationInjector 完整 feed/flush 状态机、多语言标题白名单、历史引用清洗、图片 `__IMG__` placeholder 流式替换
 - 入口形态：匿名游客问答、群聊 @ / 群感知、deviceType/dialogType 等 A2A 上下文字段
+- Claude SKILL 高阶能力：Artifact 跨 Skill 传递、HITL/暂停恢复和真实 AgentBay 执行尚未实现
 
 准确定性是「**保留主链路形状 + 关键工程取舍**」，而非「完整保留所有生产逻辑」。判断是否新增或保留一项能力时，以它能否帮助理解 Agent Runtime、RAG、扩展机制、可靠性或评测为主要标准。
 

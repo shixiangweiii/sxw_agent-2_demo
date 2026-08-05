@@ -117,7 +117,7 @@ curl -X POST http://127.0.0.1:8100/v1/index/sample
 ### 5.2 agent（:8000）
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `ENGINE` | `agent_loop` | **推理引擎**：`agent_loop`（ReAct 单循环）\| `plan_execute`（先规划后执行） |
+| `ENGINE` | `agent_loop` | **推理引擎**：`agent_loop`（Tool-Use Agent Loop）\| `plan_execute`（先规划后执行） |
 | `MAX_LOOP_ITERS` | `8` | agent-loop 软收尾轮次（硬熔断 = 该值 + 2；同值 +2 也作 plan_execute 执行相硬熔断） |
 | `AGENT_PORT` | `8000` | 端口 |
 | `AGENT_UUID` | `demo-agent` | 智能体标识（技能/A2A 调用上下文 tenantId） |
@@ -127,6 +127,10 @@ curl -X POST http://127.0.0.1:8100/v1/index/sample
 | `SKILL_CENTER_TIMEOUT_MS` | `8000` | 技能同步/目录超时 |
 | `SKILL_CENTER_STREAM_TIMEOUT_MS` | `60000` | 技能流式执行超时 |
 | `SANDBOX_PROVIDER` | `local` | **SKILL 沙箱**：`local`（可跑）\| `agentbay`（云桩，不可跑） |
+| `SKILL_CALL_TIMEOUT_SECONDS` | `120` | 单次 Claude SKILL 调用总超时（含排队、装载、执行与结果整理） |
+| `SKILL_MAX_LLM_CALLS` | `16` | 单个 Skill Agent 最大模型调用次数 |
+| `SKILL_MAX_PARALLEL_CALLS` | `2` | 进程内 Claude SKILL 最大并发调用数 |
+| `SKILL_RESULT_MAX_CHARS` | `8000` | 回灌主 Agent 的 Skill 结果最大字符数 |
 
 ### 5.3 arag（:8100）
 | 变量 | 默认 | 说明 |
@@ -156,7 +160,7 @@ curl -X POST http://127.0.0.1:8100/v1/index/sample
 改 `.env` 后**重启对应服务**生效。
 
 ### 6.1 走哪种推理引擎 —— `ENGINE`
-- `ENGINE=agent_loop`（默认）：**ReAct 单循环**，模型迭代调工具直到产出；带计划续推、工具异常喂回、force-summary、硬熔断、子代理/动态工具发现。
+- `ENGINE=agent_loop`（默认）：统一 **Tool-Use Agent Loop**，模型通过 `tool_use → tool_result` 迭代直到产出；带计划续推、工具异常喂回、force-summary、硬熔断、Agent-as-Tool/动态工具发现。
 - `ENGINE=plan_execute`：**先规划后执行**，decision planner 出计划 → execution planner 逐步执行；执行相同样带**工具异常喂回（ToolErrorFeedback）+ 框架硬熔断**，但**无**计划续推 / force-summary（那是 agent-loop 专属）。
 ```bash
 PY=env_sxw_demo/bin/python
@@ -171,10 +175,16 @@ ENGINE=plan_execute "$PY" -m uvicorn agent.main:app --port 8000
 - 推理模型的"思考过程"已通过 `extra_body={"enable_thinking": false}` 关闭，避免污染流式输出（代码内置，无需配）。
 - 模型返回顶层数组、标量或损坏的工具参数时，LiteLlm 适配层会转换为安全 sentinel，Plugin 在真实工具分发前返回 `ToolArgumentsParseError`；正常对象参数仍走 ADK 原路径。该适配依赖精确锁定的 `google-adk==2.3.0`。
 
-### 6.3 SKILL 沙箱 provider —— `SANDBOX_PROVIDER`
+### 6.3 Claude SKILL Agent-as-Tool 与沙箱
+
+Claude SKILL 作为主 Tool-Use Agent Loop 中的标准工具运行，不另设 MultiSkillOrchestrator、DAG 或独立 Skill 状态机。一个调用只执行一个 SKILL 包：有数据依赖时，主 Agent 必须在收到上游 `tool_result` 后跨轮调用下游；同轮多个调用仅用于彼此独立的任务。
+
+- 每次调用把 `agent/claude_skill/skills_data/<id>/` 整包复制到独立沙箱的 `skills/<id>/`，包括 `scripts/`、`references/` 和资源文件；子 Agent 必须先读取根部 `SKILL.md`。
+- 同一 invocation 内默认串行执行 Claude SKILL；仅当 frontmatter 同时满足 `parallel_safe: true` 与 `exclusive_resources: []` 才允许并行，并受 `SKILL_MAX_PARALLEL_CALLS` 的进程级上限约束。声明同名独占资源的调用跨请求互斥。
+- `SKILL_CALL_TIMEOUT_SECONDS` 覆盖排队、装载、执行和结果整理；`SKILL_MAX_LLM_CALLS` 限制子循环；`SKILL_RESULT_MAX_CHARS` 限制回灌主 Agent 的结果长度。
 - `SANDBOX_PROVIDER=local`（默认）：本地沙箱，真实跑 `run_python`/`run_shell`（子进程 + 超时 + 工作目录限制）。
 - `SANDBOX_PROVIDER=agentbay`：AgentBay 云沙箱**桩**，调用即返回 `SandboxUnavailableError`（演示 provider 抽象；生产换 wuying-agentbay-sdk）。
-> ⚠️ LocalSandbox 仅演示用，**非生产隔离**。
+> ⚠️ LocalSandbox 仅演示用，**非生产隔离**。当前不支持 Artifact 跨 Skill 传递、Claude SKILL HITL/暂停恢复和真实 AgentBay；调用结束后临时目录会被删除，不能用共享目录在多个 Skill 间传文件。
 
 ### 6.4 RAG 存储后端 —— `VECTOR_BACKEND` / `EMBEDDING_STORAGE_DIR` / `FULLTEXT_BACKEND` / `GRAPH_BACKEND`
 - 端口-适配器设计；当前仅 `local` 实现。向量与 chunk 元数据持久化在 `EMBEDDING_STORAGE_DIR`（默认 `local_storage/embedding`），arag 重启后会自动加载并用 chunks 重建 BM25；`pgvector`/`es`/`neo4j` 为预留端口（生产可零改业务接入）。
@@ -193,7 +203,7 @@ ENGINE=plan_execute "$PY" -m uvicorn agent.main:app --port 8000
 ### 6.7 技能流与 A2A 调用约束
 - skill-center 的 NDJSON 流必须以若干 `eof=false` 数据帧加一个 `eof=true, data=null` 独立结束帧收口；缺失 EOF、损坏帧或 `data+eof` 合帧会返回结构化协议错误，部分文本/卡片不会覆盖终止错误。
 - 技能错误采用 failure-sticky：首个失败帧的 `errorCode/errorMsg` 保留到模型可见的 function response，后续成功或失败帧不覆盖。框架错误码包括 `SKILL_HTTP_ERROR`、`SKILL_TRANSPORT_ERROR`、`SKILL_STREAM_EMPTY`、`SKILL_STREAM_INCOMPLETE`、`SKILL_PROTOCOL_ERROR`；上游失败未给错误码时使用 `SKILL_EXECUTION_ERROR`，相同错误码写入 `[SkillInvoke]` 结构化日志。
-- Claude SKILL 使用独立 `InMemoryRunner`，其沙箱工具也启用轻量 ToolArgsGuard。
+- Claude SKILL 使用独立 `InMemoryRunner`，其沙箱工具也启用轻量 ToolArgsGuard；每次调用以标准、长度受限的 `tool_result` 回灌主 Agent，子 Agent 内部历史不进入父上下文。
 - A2A `AgentTool` 每次调用都会为远端创建新会话，不继承当前父对话；委派 request 必须展开“它/上面的内容”等指代，并包含目标、范围、约束、输入和必要上下文。
 
 ---
@@ -269,7 +279,7 @@ web/        内置浏览器 Chat UI（静态资源，无构建步骤）
   ```
 - **加一个通用工具**：在 `agent/tools/builtin_tools.py` 写带类型注解 + docstring 的函数 → 加入 `build_builtin_tools()`（ADK 自动转 FunctionTool）。
 - **加一个 skill-center 技能**：在 `skillcenter/skills.py` 的 `SKILL_DEFS` 加定义 + 在 `execute_sync`/`execute_streaming` 加分支。
-- **加一个 SKILL 沙箱技能**：在 `agent/claude_skill/skills_data/<id>/SKILL.md` 写 frontmatter(name/description) + 指令体，自动被加载。
+- **加一个 SKILL 沙箱技能**：在 `agent/claude_skill/skills_data/<id>/SKILL.md` 写 `name`、`description`、`parallel_safe`、`exclusive_resources` frontmatter + 指令体；脚本、参考资料和资源文件与 `SKILL.md` 放在同一技能包目录，调用时整包装载。未声明 `parallel_safe` 时默认为 `false`，未声明 `exclusive_resources` 时默认为空列表。
 - **加一个 A2A 子代理**：在 `a2a_service/agents.py` 定义 ADK `LlmAgent` 并 `to_a2a` 暴露；在 `skillcenter/a2a_api.py` 注册到 `/instance/list`。
 - **可观测性**：日志为结构化 JSON，含 `trace_id`（跨服务透传）；按 `[Tag]` 前缀检索，如 `[QaRetrieve]` `[SkillInvoke]` `[ClaudeSkill]` `[A2ALoad]` `[LoopControl]`。
 

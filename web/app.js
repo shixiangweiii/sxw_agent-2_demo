@@ -56,6 +56,14 @@ function escapeText(value) {
   return String(value ?? "");
 }
 
+function shortCallId(value) {
+  const callId = String(value ?? "");
+  if (!callId) {
+    return "";
+  }
+  return callId.length <= 8 ? callId : callId.slice(-8);
+}
+
 function appendMessage(role, content = "", extraClass = "") {
   const node = document.createElement("article");
   node.className = `message ${role} ${extraClass}`.trim();
@@ -395,11 +403,23 @@ function handleSseEvent(event, assistant) {
     return;
   }
   if (event.type === "tool_call") {
-    addProcessItem(assistant.node, `tool_call · ${payload.name || ""}`, payload.args || {});
+    const callId = shortCallId(payload.id);
+    const callLabel = callId ? ` · #${callId}` : "";
+    addProcessItem(
+      assistant.node,
+      `tool_call · ${payload.name || ""}${callLabel}`,
+      payload,
+    );
     return;
   }
   if (event.type === "tool_result") {
-    addProcessItem(assistant.node, `tool_result · ${payload.name || ""}`, payload.response || {});
+    const callId = shortCallId(payload.id || payload.response?.skillCallId);
+    const callLabel = callId ? ` · #${callId}` : "";
+    addProcessItem(
+      assistant.node,
+      `tool_result · ${payload.name || ""}${callLabel}`,
+      payload,
+    );
     return;
   }
   if (event.type === "plan_step") {
@@ -407,7 +427,10 @@ function handleSseEvent(event, assistant) {
     return;
   }
   if (event.type === "skill_event") {
-    const label = payload.dataType === "CARD" ? `skill_card · ${payload.skill || ""}` : `skill_event · ${payload.skill || ""}`;
+    const eventName = payload.dataType === "CARD" ? "skill_card" : "skill_event";
+    const callId = shortCallId(payload.skillCallId);
+    const callLabel = callId ? ` · #${callId}` : "";
+    const label = `${eventName} · ${payload.skill || ""}${callLabel}`;
     addProcessItem(assistant.node, label, payload.data ?? payload);
     return;
   }
