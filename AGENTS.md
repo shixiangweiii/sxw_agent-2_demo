@@ -36,18 +36,14 @@ This file provides guidance to Codex when working with code in this repository.
 
 ## 当前系统概览
 
-基于 **Google ADK 2.3** 精简复刻的生产级 AI Agent 系统，由 **4 个独立的 FastAPI/uvicorn 服务**经 HTTP 协作。核心卖点是「**Agent 运行时的规划/推理引擎**」与混合召回 RAG。代码与文档以中文为主。
+基于 **Google ADK 2.6.2** 精简复刻的生产级 AI Agent 系统，由 **4 个独立的 FastAPI/uvicorn 服务**经 HTTP 协作。核心卖点是「**Agent 运行时的规划/推理引擎**」与混合召回 RAG。代码与文档以中文为主。
 
 ## 常用命令
 
-所有 Python 命令都走仓库自带虚拟环境（**不要用系统 python**）。解释器选择规则：若 `env_sxw_demo/bin/python` 存在则优先使用它；否则使用当前默认的 `.venv/bin/python`：
+所有 Python 命令都走仓库自带 `.venv`（**不要用系统 python**）：
 
 ```bash
-if [ -x env_sxw_demo/bin/python ]; then
-  PY=env_sxw_demo/bin/python
-else
-  PY=.venv/bin/python
-fi
+PY=.venv/bin/python
 
 # 一键启动全部 4 服务（先下游后 agent，自动健康检查 + 入库样本知识库），Ctrl-C 一并退出
 bash scripts/run_all.sh
@@ -61,7 +57,7 @@ $PY -m uvicorn agent.main:app       --port 8000
 # 入库样本知识库（首次运行或清空 local_storage/embedding 后执行；重复入库按 chunk_id 覆盖）
 curl -X POST http://127.0.0.1:8100/v1/index/sample
 
-# 重建虚拟环境（仅当 env_sxw_demo/ 与 .venv/ 都不存在；默认新建 .venv/）
+# 重建虚拟环境（仅当 .venv/ 不存在）
 python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
 
@@ -128,8 +124,8 @@ Claude SKILL 采用 **Agent-as-Tool**：一个 Skill Agent 只执行一个 SKILL
 
 - **配置**：每个服务用 `pydantic-settings` 读取**同目录 `.env`**（字段名大写即环境变量名，真实环境变量优先）。改 `.env` 后须**重启对应服务**才生效。密钥 `DASHSCOPE_API_KEY` 切勿提交。
 - **换模型/换厂商**只改 `LLM_MODEL` / `LLM_BASE_URL` / `DASHSCOPE_API_KEY`（内部用 `openai/<LLM_MODEL>` 走 litellm 的 openai 兼容 provider）。
-- **`a2a-sdk` 必须 pin 0.3.x**（`>=0.3.4,<0.4`，与 google-adk 2.3.0 对齐）；**1.x 不兼容**。ADK 的 A2A 仍标 EXPERIMENTAL，导入有 `UserWarning` 属正常。
-- **工具参数 shim 依赖 ADK 私有转换切面**：仓库精确 pin `google-adk==2.3.0`；升级 ADK 时必须重新审查 `agent/llm/tool_args_normalizer.py`，私有符号不匹配应启动失败而非静默降级。
+- **A2A 依赖精确锁定**：`google-adk[a2a]==2.6.2`、`a2a-sdk==1.1.2`。ADK 的 A2A 仍标 EXPERIMENTAL，导入有 `UserWarning` 属正常。
+- **ADK 私有契约须随版本审计**：工具参数 shim 依赖 LiteLlm 私有转换切面，`ClaudeSkillTool._detect_error_in_response` 依赖 function flow 的动态 telemetry hook。仓库精确 pin `google-adk==2.6.2`；私有符号不匹配应启动失败而非静默降级。
 - **熔断**：`MAX_LOOP_ITERS`（默认 8）是 agent-loop 软收尾轮次；框架硬熔断 = 该值 + 2（`RunConfig.max_llm_calls`），plan_execute 执行相也用同值作硬熔断。
 - **Claude SKILL 运行时配置**：`SKILL_CALL_TIMEOUT_SECONDS=120`（含排队、装载、执行和结果整理）、`SKILL_MAX_LLM_CALLS=16`、`SKILL_MAX_PARALLEL_CALLS=2`、`SKILL_RESULT_MAX_CHARS=8000`。修改后须重启 agent。
 - **Claude SKILL 并发**：同一 invocation 内默认串行；只有 frontmatter 为 `parallel_safe: true` 且 `exclusive_resources: []` 时才允许并行，同时受进程级并发上限控制。声明同名独占资源的调用跨请求互斥。

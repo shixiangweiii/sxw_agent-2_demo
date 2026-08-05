@@ -9,7 +9,6 @@ import logging
 from typing import Any, Optional
 
 from google.adk.tools import BaseTool, ToolContext
-from google.adk.tools._gemini_schema_util import _to_gemini_schema
 from google.genai.types import FunctionDeclaration
 
 from agent.skills.args_coercion import coerce_args_by_schema
@@ -44,10 +43,13 @@ class SelectedSkillTool(BaseTool):
         self._tool_name = tool_name
         self._client = client
         self._raw_schema = input_schema  # 保留原始 schema 供执行前参数 coercion
-        self._input_schema = _to_gemini_schema(input_schema) if input_schema else None
 
     def _get_declaration(self) -> FunctionDeclaration:
-        return FunctionDeclaration(name=self.name, description=self.description, parameters=self._input_schema)
+        return FunctionDeclaration(
+            name=self.name,
+            description=self.description,
+            parameters_json_schema=self._raw_schema,
+        )
 
     def _build_context(self) -> Optional[SkillToolExecuteContext]:
         rc = get_request_context()

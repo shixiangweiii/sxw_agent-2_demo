@@ -275,7 +275,7 @@ report.aggregate(records) -> reports/<ts>/
 
 **矩阵** = `引擎 {agent_loop, plan_execute}` × `case（按 engines 适配）`。
 
-**引擎切换难点**：`ENGINE` 是服务端启动配置，单请求不可切。采用**双实例并行**（推荐，免重启、可同时跑）。下表中的 `$PY` 按仓库约定选择：`env_sxw_demo/bin/python` 存在则优先，否则使用 `.venv/bin/python`。
+**引擎切换难点**：`ENGINE` 是服务端启动配置，单请求不可切。采用**双实例并行**（推荐，免重启、可同时跑）。下表中的 `$PY` 统一使用 `.venv/bin/python`。
 
 | 实例 | 命令（env） | 端口 |
 |---|---|---|
@@ -318,11 +318,7 @@ harness `--engine agent_loop|plan_execute` 选对应端口，只跑 `engines` �
 ```bash
 cd sxw_optimization_demo
 export DASHSCOPE_API_KEY=sk-***          # 仅 env，切勿写入任何文件
-if [ -x env_sxw_demo/bin/python ]; then
-  PY=env_sxw_demo/bin/python
-else
-  PY=.venv/bin/python
-fi
+PY=.venv/bin/python
 
 # 1) 起下游 + 双引擎实例 + 入库样本知识
 bash scripts/run_all.sh                   # 起 a2a_service/skill-center/arag/agent(8000=agent_loop) + seed

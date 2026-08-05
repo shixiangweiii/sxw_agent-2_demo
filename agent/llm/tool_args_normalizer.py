@@ -1,4 +1,4 @@
-"""ADK 2.3.0 工具参数适配。
+"""ADK 2.6.2 工具参数适配。
 
 ADK 在把 LiteLLM 消息转换成 ``types.FunctionCall`` 时要求 args 为对象；部分
 模型会返回顶层数组或标量，导致 Pydantic 在插件回调前抛错。这里仅包装该
@@ -21,11 +21,11 @@ from agent.tool_args_contract import (
 _INSTALL_MARKER = "__sxw_tool_args_normalizer_v1__"
 _UNCHANGED = object()
 _PLAN_TOOL_NAME = "update_task_plan"
-_SUPPORTED_ADK_VERSION = "2.3.0"
+_SUPPORTED_ADK_VERSION = "2.6.2"
 
 
 def install_adk_tool_args_normalizer() -> None:
-    """幂等安装 ADK 2.3.0 消息转换 shim。"""
+    """幂等安装 ADK 2.6.2 消息转换 shim。"""
     import google.adk.models.lite_llm as adk_lite_llm
 
     installed_version = version("google-adk")

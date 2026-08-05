@@ -4,12 +4,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-if [ -x "$ROOT/env_sxw_demo/bin/python" ]; then
-  PY="$ROOT/env_sxw_demo/bin/python"
-elif [ -x "$ROOT/.venv/bin/python" ]; then
-  PY="$ROOT/.venv/bin/python"
-else
-  echo "缺少虚拟环境：请先创建 .venv（或兼容旧路径 env_sxw_demo）并 pip install -r requirements.txt"
+PY="$ROOT/.venv/bin/python"
+if [ ! -x "$PY" ]; then
+  echo "缺少虚拟环境：请先创建 .venv 并 pip install -r requirements.txt"
   exit 1
 fi
 

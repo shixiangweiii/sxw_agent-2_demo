@@ -1,10 +1,12 @@
 # sxw_optimization_demo — Python 3.12 依赖清单
-# 安装：.venv/bin/pip install -r requirements.txt（若保留旧路径 env_sxw_demo/ 也兼容）
+# 安装：.venv/bin/pip install -r requirements.txt
 # 镜像兜底：-i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
 
 # --- Agent runtime (Google ADK) ---
-google-adk[extensions]==2.3.0    # 含 litellm；用最新版（2.3.0）复刻业务逻辑，已验证关键类全可用
-a2a-sdk>=0.3.4,<0.4              # A2A 协议（与 google-adk 2.3.0 对齐：ADK RemoteA2aAgent/to_a2a 依赖；不可用 1.x）
+google-adk[a2a]==2.6.2           # 仅启用项目实际使用的 A2A 可选集成
+a2a-sdk==1.1.2                   # A2A 1.0 SDK；ADK 通过兼容层承接现有 JSON-RPC 链路
+litellm==1.95.0                  # ADK LiteLlm provider，项目亦直接引用其异常类型
+google-genai==2.16.0             # FunctionDeclaration / Content / Part 等公开类型
 
 # --- Web / SSE ---
 fastapi
@@ -18,7 +20,7 @@ pydantic-settings
 PyYAML>=6,<7                    # Claude SKILL frontmatter 安全解析
 
 # --- LLM / embeddings ---
-openai                           # 嵌入直连 DashScope compatible-mode
+openai==2.53.0                   # 嵌入与单轮文本直连 DashScope compatible-mode
 tiktoken                         # token 计数（message budget）
 
 # --- RAG storage (local backends) ---

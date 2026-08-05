@@ -3,7 +3,7 @@
 对应原项目 `qwen_lite_llm.py` + `llm_exception_handler.py`：
 - M0（当前）：基础接通 DashScope（OpenAI 兼容端点，litellm `openai/` provider）。
 - M3 填充：ContextOverflow 反应式截断重试、PromptCache(provider-aware)、异常分类。
-- ADK 2.3 适配：FunctionCall 构造前规范化非对象工具参数，交由 Plugin 安全反馈。
+- ADK 2.6.2 适配：FunctionCall 构造前规范化非对象工具参数，交由 Plugin 安全反馈。
 
 为何用 LiteLlm 子类：模型调用层是做「上下文超长 / 限流 / 缓存断点」等生产加固的唯一切面，
 ADK 把每次模型调用收敛到 `generate_content_async`，子类覆写即可全局生效。

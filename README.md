@@ -1,6 +1,6 @@
 # sxw_agent-2_demo — 生产级 Agent 运行时（规划/推理引擎）+ 混合召回 RAG
 
-基于 **Google ADK 2.3** 精简复刻的一套**可独立运行的生产级 AI Agent 系统**，核心展示「**Agent 运行时的规划/推理引擎**」与混合召回 RAG。系统由 agent、arag、skill-center、a2a_service **4 个 FastAPI 服务**经 HTTP 协作，覆盖提问、规划与执行、工具/技能调用、知识检索、多模态输入、SSE 流式返回和全链路可观测。
+基于 **Google ADK 2.6.2** 精简复刻的一套**可独立运行的生产级 AI Agent 系统**，核心展示「**Agent 运行时的规划/推理引擎**」与混合召回 RAG。系统由 agent、arag、skill-center、a2a_service **4 个 FastAPI 服务**经 HTTP 协作，覆盖提问、规划与执行、工具/技能调用、知识检索、多模态输入、SSE 流式返回和全链路可观测。
 
 ## 项目定位与背景
 
@@ -74,7 +74,7 @@
 
 ## 技术栈
 
-Python 3.12 · **Google ADK 2.3** · LiteLlm · FastAPI · SSE · numpy · rank_bm25 · jieba ·
+Python 3.12 · **Google ADK 2.6.2** · LiteLlm · FastAPI · SSE · numpy · rank_bm25 · jieba ·
 LLM = 阿里云 DashScope `qwen3.7-plus`（文本+视觉+function-calling）· 嵌入 = `text-embedding-v3`。
 
 ---
@@ -87,7 +87,7 @@ cd sxw_agent-2_demo
 # 1) 配置（填入真实 DASHSCOPE_API_KEY，切勿提交）
 cp .env.example .env
 
-# 2) 依赖（当前默认虚拟环境为 .venv/；如兼容旧路径 env_sxw_demo/ 存在则优先使用）
+# 2) 依赖（统一使用 .venv/）
 #    如需重建：python3.12 -m venv .venv
 #    .venv/bin/pip install -r requirements.txt
 

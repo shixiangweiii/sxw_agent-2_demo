@@ -16,7 +16,7 @@
 - 配置、README、RUNBOOK、Agent 开发约定和评测用例与代码保持同步。
 - 密钥不得进入文件或 Git；演示桩、provider 限制和非生产隔离能力必须明确说明。
 
-系统由 **4 个 Python 服务**组成（均 FastAPI/uvicorn，基于 **Google ADK 2.3**）：
+系统由 **4 个 Python 服务**组成（均 FastAPI/uvicorn，基于 **Google ADK 2.6.2**）：
 
 | 服务 | 默认端口 | 作用 | 启动模块 |
 |---|---|---|---|
@@ -34,9 +34,9 @@
 
 - macOS / Linux，**Python 3.12**（已用 3.12.10 验证）。
 - 一个 **OpenAI 兼容**的大模型 API Key（默认走阿里云 **DashScope**，模型 `qwen3.7-plus` + 嵌入 `text-embedding-v3`）。
-- 已存在虚拟环境 `.venv/`（兼容旧路径 `env_sxw_demo/`；若没有，见下方"重建虚拟环境"）。
+- 已存在虚拟环境 `.venv/`（若没有，见下方“重建虚拟环境”）。
 
-### 重建虚拟环境（仅当 `.venv/` 与 `env_sxw_demo/` 都不存在）
+### 重建虚拟环境（仅当 `.venv/` 不存在）
 ```bash
 cd sxw_agent-2_demo
 python3.12 -m venv .venv
@@ -44,7 +44,7 @@ python3.12 -m venv .venv
 # 网络受限可加清华镜像：
 # .venv/bin/pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
 ```
-> `requirements.txt` 已 pin `a2a-sdk>=0.3.4,<0.4`（与 `google-adk 2.3.0` 对齐；**勿装 a2a-sdk 1.x，不兼容**）。
+> `requirements.txt` 已精确 pin `google-adk[a2a]==2.6.2` 与 `a2a-sdk==1.1.2`；ADK 的 A2A 集成仍属实验能力。
 
 ---
 
@@ -75,15 +75,11 @@ curl -N -X POST http://127.0.0.1:8000/api/v1/chat/demo/stream \
 ## 4. 单独启动各服务（开发调试用）
 
 `run_all.sh` 之外，也可分别起（注意：`agent` 启动时会去拉 skill-center 技能目录、发现 A2A，故**先起下游再起 agent**）。
-所有服务从同目录的 `.env` 读配置；`DASHSCOPE_API_KEY` 也可用环境变量覆盖。手动运行时先按规则选择解释器：若 `env_sxw_demo/bin/python` 存在则优先使用，否则使用 `.venv/bin/python`。
+所有服务从同目录的 `.env` 读配置；`DASHSCOPE_API_KEY` 也可用环境变量覆盖。手动运行统一使用 `.venv/bin/python`。
 
 ```bash
 cd sxw_agent-2_demo
-if [ -x env_sxw_demo/bin/python ]; then
-  PY=env_sxw_demo/bin/python
-else
-  PY=.venv/bin/python
-fi
+PY=.venv/bin/python
 
 # 下游
 $PY -m uvicorn a2a_service.main:app   --port 8300   # A2A（需 key）
@@ -163,8 +159,7 @@ curl -X POST http://127.0.0.1:8100/v1/index/sample
 - `ENGINE=agent_loop`（默认）：统一 **Tool-Use Agent Loop**，模型通过 `tool_use → tool_result` 迭代直到产出；带计划续推、工具异常喂回、force-summary、硬熔断、Agent-as-Tool/动态工具发现。
 - `ENGINE=plan_execute`：**先规划后执行**，decision planner 出计划 → execution planner 逐步执行；执行相同样带**工具异常喂回（ToolErrorFeedback）+ 框架硬熔断**，但**无**计划续推 / force-summary（那是 agent-loop 专属）。
 ```bash
-PY=env_sxw_demo/bin/python
-[ -x "$PY" ] || PY=.venv/bin/python
+PY=.venv/bin/python
 ENGINE=plan_execute "$PY" -m uvicorn agent.main:app --port 8000
 ```
 > 两引擎共享同一套工具/检索/技能/citation 下游，以及 ToolErrorFeedback 插件与 LiteLlm 加固；切换只影响"如何编排"。
@@ -173,7 +168,8 @@ ENGINE=plan_execute "$PY" -m uvicorn agent.main:app --port 8000
 - 运行时基于 **Google ADK**（`Runner` + `LlmAgent`）；模型经 ADK **LiteLlm** 适配 → 任意 **OpenAI 兼容**端点。
 - 默认走 DashScope `qwen3.7-plus`。**换模型/换厂商**只改三项：`LLM_MODEL` / `LLM_BASE_URL` / `DASHSCOPE_API_KEY`（agent 内部用 `openai/<LLM_MODEL>` 让 litellm 走 openai 兼容 provider）。
 - 推理模型的"思考过程"已通过 `extra_body={"enable_thinking": false}` 关闭，避免污染流式输出（代码内置，无需配）。
-- 模型返回顶层数组、标量或损坏的工具参数时，LiteLlm 适配层会转换为安全 sentinel，Plugin 在真实工具分发前返回 `ToolArgumentsParseError`；正常对象参数仍走 ADK 原路径。该适配依赖精确锁定的 `google-adk==2.3.0`。
+- 模型返回顶层数组、标量或损坏的工具参数时，LiteLlm 适配层会转换为安全 sentinel，Plugin 在真实工具分发前返回 `ToolArgumentsParseError`；正常对象参数仍走 ADK 原路径。该适配依赖精确锁定的 `google-adk==2.6.2`，升级 ADK 时必须重新审查私有转换切面。
+- Claude Skill 的结构化失败会通过 `_detect_error_in_response` 供 ADK telemetry 动态识别；该 hook 同样按 ADK 2.6.2 源码审计，不属于稳定公共 API。
 
 ### 6.3 Claude SKILL Agent-as-Tool 与沙箱
 
@@ -273,8 +269,7 @@ web/        内置浏览器 Chat UI（静态资源，无构建步骤）
 ### 常用开发动作
 - **编译校验（必做，替代单测）**：
   ```bash
-  PY=env_sxw_demo/bin/python
-  [ -x "$PY" ] || PY=.venv/bin/python
+  PY=.venv/bin/python
   find agent arag common skillcenter a2a_service -name '*.py' | xargs "$PY" -m py_compile
   ```
 - **加一个通用工具**：在 `agent/tools/builtin_tools.py` 写带类型注解 + docstring 的函数 → 加入 `build_builtin_tools()`（ADK 自动转 FunctionTool）。
@@ -293,7 +288,7 @@ web/        内置浏览器 Chat UI（静态资源，无构建步骤）
 | 调用返回 `error` / 模型不应答 | 确认 key 有效、`LLM_MODEL`/`LLM_BASE_URL` 正确；看 agent 日志 |
 | 知识问答无引用/答不上 | 首次运行或清空 `local_storage/embedding` 后先 `curl -X POST :8100/v1/index/sample` 入库；arag 未起则降级（日志 `[QaRetrieve] degraded`） |
 | 端口被占用 | 改 `.env` 对应 `*_PORT`，或 `lsof -i:8000` 杀进程 |
-| `a2a` 相关导入/调用失败 | 确认 `a2a-sdk` 为 0.3.x（`pip show a2a-sdk`）；**1.x 与 adk 2.3.0 不兼容** |
+| `a2a` 相关导入/调用失败 | 确认 `google-adk==2.6.2`、`a2a-sdk==1.1.2`，并执行 `.venv/bin/python -m pip check` |
 | 用 `agentbay` 沙箱报错 | 预期行为（云桩未实现）；用 `SANDBOX_PROVIDER=local` |
 | A2A 调用报错 | 确认 `a2a_service`(:8300) 已起且 `/.well-known/agent-card.json` 可访问 |
 | 改了 `.env` 不生效 | 重启对应服务（配置在启动时读取） |

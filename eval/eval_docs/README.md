@@ -24,8 +24,7 @@ curl -X POST http://127.0.0.1:8100/v1/index \
 现有 harness 支持 `--dataset`，可在 agent/arags 服务启动并入库本语料后执行：
 
 ```bash
-PY=env_sxw_demo/bin/python
-[ -x "$PY" ] || PY=.venv/bin/python
+PY=.venv/bin/python
 OUT=eval/reports/generated-rag-$(date +%Y%m%d-%H%M%S)
 $PY -m eval.harness.runner --engine agent_loop --base-url http://127.0.0.1:8000 --dataset eval/eval_docs/generated_eval/cases_generated_rag.jsonl --out "$OUT"
 $PY -m eval.harness.report --out "$OUT"

@@ -6,7 +6,6 @@ import logging
 from typing import Any, Optional
 
 from google.adk.tools import BaseTool, ToolContext
-from google.adk.tools._gemini_schema_util import _to_gemini_schema
 from google.genai.types import FunctionDeclaration
 
 from agent.asyncio_utils import await_with_deferred_cancellation
@@ -90,7 +89,7 @@ class ClaudeSkillTool(BaseTool):
         return FunctionDeclaration(
             name=self.name,
             description=self.description,
-            parameters=_to_gemini_schema({
+            parameters_json_schema={
                 "type": "object",
                 "properties": {
                     "query": {
@@ -99,11 +98,11 @@ class ClaudeSkillTool(BaseTool):
                     },
                 },
                 "required": ["query"],
-            }),
+            },
         )
 
     def _detect_error_in_response(self, response: Any) -> Optional[str]:
-        # ADK 2.3 在 function flow 中通过 getattr 动态调用，用于设置 telemetry error_type。
+        # ADK 2.6.2 在 function flow 中通过 getattr 动态调用，用于设置 telemetry error_type。
         if isinstance(response, dict) and response.get("isError"):
             error = response.get("error")
             if isinstance(error, dict) and isinstance(error.get("code"), str):
