@@ -22,25 +22,35 @@ async def merge_runner_events(
     runner_events: AsyncIterator[Any],
     convert: Callable[[Any], list[StreamEvent]],
 ) -> AsyncIterator[StreamEvent]:
+    # 设计要点：把"两个并发的事件来源"汇成一条队列，再由本生成器单点吐出。
+    #   来源 A：ADK Runner 事件流（模型文本、工具调用、工具结果）——由下面的 pump 任务搬运；
+    #   来源 B：技能/沙箱工具在"一次工具调用内部"推进来的展示帧——由工具自己 put。
+    # 没有它的话，技能执行期间前端会长时间静默，直到工具整体返回才一次性看到结果。
     queue: "asyncio.Queue[Any]" = asyncio.Queue()
     token = set_ui_queue(queue)   # 必须在 create_task 之前设置：子任务复制当前 context 才能拿到队列
 
+    # pump：后台把 Runner 事件搬进队列。跑在独立 task 里，才能与来源 B 真正并发。
     async def pump() -> None:
         try:
             async for event in runner_events:
-                for se in convert(event):
+                for se in convert(event):        # convert = 引擎传进来的事件翻译器
                     await queue.put(se)
         except asyncio.CancelledError:
             # 客户端断开/上游关闭生成器属于正常取消，不应伪装成 error SSE。
             raise
         except Exception as exc:  # noqa: BLE001 - Runner 异常转 error 事件，保证收口
+            # Runner 内部异常（如硬熔断 LlmCallsLimitExceededError）在这里被转成 error 事件，
+            # 而不是让异常穿透——这样 SSE 流仍能正常收尾，前端不会卡在半截。
             await queue.put(StreamEvent("error", {"message": str(exc)}))
         finally:
+            # 哨兵是消费侧唯一的"结束信号"。用 put_nowait 而非 await put：
+            # 取消场景下 await 可能挂住，导致消费侧永远等不到结束。
             queue.put_nowait(_SENTINEL)
 
     task = asyncio.create_task(pump())
     primary_failed = False
     try:
+        # 消费侧：谁先入队就先吐谁，于是 skill_event 能实时穿插在 tool_call / text 之间。
         while True:
             item = await queue.get()
             if item is _SENTINEL:
@@ -50,6 +60,8 @@ async def merge_runner_events(
         primary_failed = True
         raise
     finally:
+        # 收口顺序很讲究：先停 pump 并等它真的退出，再关 Runner 事件流。
+        # 反过来（先关流）会让 pump 在一个已关闭的生成器上迭代而报错。
         async def close_sources() -> None:
             if not task.done():
                 task.cancel()
@@ -58,7 +70,7 @@ async def merge_runner_events(
                 await task
             close = getattr(runner_events, "aclose", None)
             if close is not None:
-                await close()
+                await close()   # 触发 ADK 生成器的 finally → 在途工具/沙箱得以清理
 
         def log_close_error(exc: BaseException) -> None:
             logger.warning(
@@ -67,6 +79,9 @@ async def merge_runner_events(
             )
 
         try:
+            # 为什么不能直接 await close_sources()：客户端断开时本协程已处于"被取消"状态，
+            # 裸 await 会被再次抛入的 CancelledError 打断，清理做到一半就中止。
+            # await_with_deferred_cancellation 会持续等清理完成，再把取消重新抛出去。
             await await_with_deferred_cancellation(
                 close_sources(),
                 on_error_after_cancel=log_close_error,

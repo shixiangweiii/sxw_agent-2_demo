@@ -21,15 +21,16 @@ from agent.tools.builtin_tools import build_builtin_tools, simulate_unstable_ope
 from agent.tools.knowledge_search import build_knowledge_search_tool
 
 
+# 进程级共享装配（每请求一份的运行参数见 engine/base.py 的 RunContext）。
 @dataclass
 class AgentContext:
     settings: AgentSettings
-    llm: HardenedLiteLlm
-    chat: AgentChatClient
-    tools: list[Callable[..., Any]]
-    session_manager: SessionManager
-    artifact_service: InMemoryArtifactService
-    skill_coordinator: SkillExecutionCoordinator
+    llm: HardenedLiteLlm                        # ADK 循环里"调模型"最终落到它
+    chat: AgentChatClient                       # 轻量单轮补全，仅供 plan_execute 规划相使用
+    tools: list[Callable[..., Any]]             # ★ 两代引擎共享的工具集，启动期组装、请求期只读
+    session_manager: SessionManager             # 多轮对话历史（ADK session）
+    artifact_service: InMemoryArtifactService   # 多模态图片等制品
+    skill_coordinator: SkillExecutionCoordinator  # Claude SKILL 并发/独占资源治理（进程级单例）
 
 
 def build_agent_context(settings: AgentSettings) -> AgentContext:

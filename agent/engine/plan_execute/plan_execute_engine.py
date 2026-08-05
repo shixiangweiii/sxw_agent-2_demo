@@ -18,9 +18,14 @@ class PlanExecuteEngine(ReasoningEngine):
         self._executor = ExecutionPlanner(ctx)
 
     async def run_stream(self, ctx: RunContext) -> AsyncIterator[StreamEvent]:
+        # Gen1 与 Gen2 的关键差异全在这个方法里：多了一个"规划相"。
+        # 注意执行相用的仍然是同一个 ADK 循环（Runner.run_async），
+        # 所以两代引擎的区别不是"有没有循环"，而是"循环外面包了什么"。
         query = extract_text(ctx.user_message)
 
         # 规划相：产出显式计划并以 plan_step 事件流出
+        # 这一步是独立的一次 LLM 调用（走轻量 AgentChatClient，不带工具），
+        # 计划一旦定下就写进执行相的 instruction，中途不会再改——这就是"计划是铁轨"。
         plan = await self._planner.plan(query)
         for i, step in enumerate(plan):
             yield StreamEvent("plan_step", {

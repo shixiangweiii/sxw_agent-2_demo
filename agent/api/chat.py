@@ -37,9 +37,12 @@ async def chat_stream(
     session_id: str = Form("demo-session"),
     image: Optional[UploadFile] = File(None),  # noqa: B008 - FastAPI 依赖注入惯用法
 ) -> StreamingResponse:
+    # ── 主链路第 1 步：接住用户提问 ──────────────────────────────────────
+    # ctx 是启动期装配好的运行时单例（LLM / 工具集 / 会话 / 制品），见 agent/main.py 的 lifespan。
     ctx: AgentContext = request.app.state.ctx
 
     # 多模态：文本 +（可选）图片。ADK LiteLlm 会把图片 inline_data 转成 base64 image_url 喂给视觉模型。
+    # 这里构造的是 ADK/GenAI 的标准 Content 结构：一条消息由多个 Part 组成，文本和图片是并列的 Part。
     parts = [types.Part(text=query)]
     if image is not None:
         raw = await image.read()
@@ -54,7 +57,13 @@ async def chat_stream(
             log_kv(logger, logging.INFO, "Multimodal", "image attached",
                    filename=image.filename, bytes=len(raw))
     user_message = types.Content(role="user", parts=parts)
+    # ── 主链路第 2 步：准备会话与引擎 ────────────────────────────────────
+    # 会话必须先存在，ADK Runner 才能把本轮事件（模型输出、工具调用、工具结果）追加进去；
+    # 多轮对话的"记忆"就来自这个 session 里累积的历史事件（当前是 InMemory 实现）。
     await ctx.session_manager.get_or_create(user_id, session_id)
+    # 按 ENGINE 配置选 Gen1(plan_execute) 或 Gen2(agent_loop)；两者实现同一个 ReasoningEngine 端口。
+    # 注意：build_engine 放在 generator 外面，所以引擎构造失败会直接变成 HTTP 500，
+    # 而不是先返回 200 再吐一个 error 事件——这两种失败形态对客户端是不同的。
     engine = build_engine(ctx)
     run_ctx = RunContext(
         agent_uuid=agent_uuid,
@@ -66,19 +75,33 @@ async def chat_stream(
     log_kv(logger, logging.INFO, "Chat", "request",
            agent=agent_uuid, engine=ctx.settings.engine, query=query)
 
+    # ── 主链路第 3 步：把推理过程包装成 SSE 流 ───────────────────────────
+    # 注意这是个异步生成器：函数体在 StreamingResponse 开始拉取时才真正执行，
+    # 每 yield 一个字符串就是一帧 SSE 推给浏览器/curl。
     async def generator() -> AsyncIterator[str]:
         # 设置每请求技能执行上下文（供 SelectedSkillTool 构造 skill-center 执行上下文）
+        # 用 contextvar 而不是参数透传的原因：工具是被 ADK 在很深的调用栈里执行的，
+        # 中间隔着 Runner/Flow，没法把请求级信息（谁问的、哪个会话）当参数一路传下去。
         token = set_request_context(SkillRequestContext(
             agent_uuid=agent_uuid, user_id=user_id, session_id=session_id,
             text=query, user={"userId": user_id},
         ))
         try:
+            # 这一行是整条主链路的中枢，从里往外读：
+            #   engine.run_stream(run_ctx) → 驱动 ADK Runner 做推理，吐出统一 StreamEvent
+            #   with_citations(...)        → 途中记录检索命中、扫描正文 [n]，在 done 前补 citation 事件
+            #   sse_format(se)             → StreamEvent → "event: xxx\ndata: {...}\n\n" 文本帧
             async for se in with_citations(engine.run_stream(run_ctx)):
                 yield sse_format(se)
         except Exception as exc:  # noqa: BLE001 - 兜底为 error 事件，保证流可收口
+            # 走到这里说明推理链路抛了未被下层接住的异常（如硬熔断 LlmCallsLimitExceededError）。
+            # HTTP 200 已经发出去了，改不了状态码，所以只能以 error 事件形式告知客户端并正常收流。
             log_kv(logger, logging.ERROR, "Chat", "stream error", error=type(exc).__name__)
             yield sse_format(StreamEvent("error", {"message": str(exc)}))
         finally:
+            # 必须还原 contextvar，否则会污染同一 task 后续逻辑（客户端断开走的也是这里）。
             reset_request_context(token)
 
+    # 返回后 FastAPI 才开始迭代 generator；客户端断开会向生成器抛入取消，
+    # 沿 with_citations → engine → Runner 一路传播，最终由技能/沙箱层做清理。
     return StreamingResponse(generator(), media_type="text/event-stream")

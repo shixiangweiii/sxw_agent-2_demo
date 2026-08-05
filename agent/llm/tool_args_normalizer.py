@@ -55,8 +55,10 @@ def install_adk_tool_args_normalizer() -> None:
     split_message = adk_lite_llm._split_message_content_and_tool_calls
     parse_arguments = adk_lite_llm._parse_tool_call_arguments
 
+    # 包装策略：正常参数完全不碰（走原函数、零回归风险），只有异常参数才复制并定点替换。
     @wraps(original)
     def normalized_message_to_response(message: Any, *args: Any, **kwargs: Any) -> Any:
+        # 先用 ADK 自己的拆分逻辑预演一遍，看看这条消息里的工具参数能不能正常解析。
         content, tool_calls = split_message(message)
         replacements: dict[int, str] = {}
         for index, tool_call in enumerate(tool_calls):
@@ -71,6 +73,7 @@ def install_adk_tool_args_normalizer() -> None:
             if replacement is not _UNCHANGED:
                 replacements[index] = replacement
 
+        # 绝大多数情况走这里：参数正常 → 原样交给 ADK，不深拷贝、不重序列化。
         if not replacements:
             return original(message, *args, **kwargs)
 
@@ -89,23 +92,30 @@ def install_adk_tool_args_normalizer() -> None:
     adk_lite_llm._message_to_generate_content_response = normalized_message_to_response
 
 
+# 判定单个工具调用的参数该原样放行、修复、还是换成错误 sentinel。
 def _coerce_tool_arguments(
     raw_arguments: Any,
     tool_name: str,
     parse_arguments: Any,
 ) -> object | str:
     try:
+        # 复用 ADK 自带的解析（含 JSON、Python literal、未加引号键等修复能力）。
         parsed = parse_arguments(raw_arguments)
     except (TypeError, ValueError) as exc:
+        # 连 ADK 都解析不了（坏 JSON）→ 换 sentinel。注意不记录原始参数，避免泄漏。
         return _json_payload(build_tool_args_parse_error(type(exc).__name__))
 
     if isinstance(parsed, dict):
-        return _UNCHANGED
+        return _UNCHANGED        # 正常对象：不动
+    # 唯一的"可无歧义恢复"特例：模型给 update_task_plan 直接返回了步骤数组
+    # （而非 schema 要求的 {steps, current_step} 对象）。这种形态含义明确，修好比报错好。
     if tool_name == _PLAN_TOOL_NAME and isinstance(parsed, list):
         try:
             return _json_payload(normalize_task_plan_args(parsed))
         except TaskPlanArgumentsError as exc:
             return _json_payload(build_tool_args_parse_error(type(exc).__name__))
+    # 其余非对象形态（顶层数组、标量……）无法猜出模型本意，一律换 sentinel，
+    # 交给 Plugin 在分发前短路并把结构化错误喂回模型，让它自己重新生成参数。
     return _json_payload(build_tool_args_parse_error("NonObjectToolArguments"))
 
 

@@ -18,16 +18,20 @@ if TYPE_CHECKING:
     from agent.context import AgentContext
 
 
+# 单次请求的运行参数（区别于 AgentContext：那是进程级共享装配，这是每请求一份）。
 @dataclass
 class RunContext:
     agent_uuid: str
     user_id: str
     session_id: str
-    user_message: types.Content
-    settings: AgentSettings
+    user_message: types.Content     # 已构造好的 ADK 消息（文本 + 可选图片 Part）
+    settings: AgentSettings         # 引擎从中取 max_loop_iters 等熔断参数
 
 
 class ReasoningEngine(ABC):
+    # 两代引擎唯一的公共契约：喂进一个 RunContext，吐出统一的 StreamEvent 序列。
+    # 正因为端口收得这么窄，上游（chat.py / citation / SSE 格式化）完全不知道
+    # 背后是"先规划再执行"还是"ReAct 单循环"——换引擎不需要改上游任何一行。
     @abstractmethod
     def run_stream(self, ctx: RunContext) -> AsyncIterator[StreamEvent]:
         """产出统一 SSE 流事件序列。"""
@@ -40,6 +44,9 @@ def extract_text(content: types.Content) -> str:
 
 
 def build_engine(ctx: "AgentContext") -> ReasoningEngine:
+    # 每次请求都新建引擎实例（引擎本身无状态，真正的共享状态都在 ctx 里）。
+    # 延迟 import 是为了避免两代引擎的模块在启动时互相牵连，只加载实际选中的那一代。
+    # 注意：ENGINE 是启动期配置，不能按请求切换——评测因此需要起两个 agent 实例（8000/8001）。
     engine = ctx.settings.engine
     if engine == "plan_execute":
         from agent.engine.plan_execute.plan_execute_engine import PlanExecuteEngine

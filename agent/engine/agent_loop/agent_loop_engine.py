@@ -53,11 +53,17 @@ _LOOP_INSTRUCTION = (
 
 
 def build_loop_agent(ctx: "AgentContext") -> LlmAgent:
+    # 组装本轮循环里模型"能看见"的全部工具。ADK 会把每个工具转成 FunctionDeclaration
+    # 塞进每次模型请求——所以这张表直接决定了模型每一轮的可选动作空间。
+    # ctx.tools 是两代引擎共享的部分（内置工具 + knowledge_search + skill-center 技能
+    # + Claude SKILL + A2A 子代理）；下面 4 行是 agent_loop 独有的，plan_execute 没有。
     tools: list[Any] = list(ctx.tools)                # 内置：calculator / get_weather
     tools.append(update_task_plan)                    # 计划即工具
     tools.append(tool_search)                         # 动态工具发现
     tools.extend(build_deferred_tools())              # 延迟工具：translate / text_stats
     tools.append(build_sub_agent_tool(ctx.llm))       # 子代理委派
+    # 注意这里没有配 sub_agents：researcher 和 Claude SKILL 都是被包成 AgentTool 的"普通工具"
+    # （Agent-as-Tool），对主循环表现为一次标准 tool_use，不走 ADK 的 agent transfer 机制。
     return LlmAgent(name="agent_loop", model=ctx.llm, instruction=_LOOP_INSTRUCTION, tools=tools)
 
 
@@ -67,33 +73,51 @@ class AgentLoopEngine(ReasoningEngine):
 
     async def run_stream(self, rc: RunContext) -> AsyncIterator[StreamEvent]:
         agent = build_loop_agent(self._ctx)
+        # LoopController 每请求一份（它要记本轮的迭代次数），随插件注入到 ADK。
         controller = LoopController(max_iters=rc.settings.max_loop_iters, budget=MessageBudget())
         runner = Runner(
             app_name=APP_NAME,
             agent=agent,
-            session_service=self._ctx.session_manager.service,
-            artifact_service=self._ctx.artifact_service,
+            session_service=self._ctx.session_manager.service,   # 与 chat.py 里 get_or_create 的是同一个
+            artifact_service=self._ctx.artifact_service,         # 多模态图片走这里存取
+            # ★ 生产加固的注入点：ADK Plugin 是官方扩展点，不需要 fork 框架。
+            #   这一个插件同时承担：工具参数 sentinel 短路、工具异常喂回、
+            #   以及把 before_model 委托给 LoopController（续推/预算/force-summary）。
             plugins=[AgentInvocationPlugin(controller)],
         )
         # 两层循环控制：业务层 force-summary（软收尾，LoopController）+ 框架层硬熔断。
         hard_cap = rc.settings.max_loop_iters + _HARD_CAP_MARGIN
         log_kv(logger, logging.INFO, "AgentLoop", "start",
                max_iters=rc.settings.max_loop_iters, hard_cap=hard_cap)
+        # 事件翻译器：ADK Event → 本项目统一的 StreamEvent。对 update_task_plan 做特殊处理，
+        # 让"计划"在 UI 上表现为进度条（plan_step）而不是一次普通的工具调用噪音。
         def _convert(event: Any) -> list[StreamEvent]:
             plan_evs = plan_events_from(event)
             if plan_evs is not None:
-                return plan_evs
+                return plan_evs          # 计划工具的调用 → 翻译成一组 plan_step 事件
             if is_plan_tool_response(event):
-                return []
-            return adk_event_to_stream_events(event)
+                return []                # 计划工具的返回 → 直接丢弃，不给用户看
+            return adk_event_to_stream_events(event)   # 其余照常翻译成 text/tool_call/tool_result
 
+        # ★ 真正的"循环"从这一行开始，但它不在本文件里：
+        #   runner.run_async → LlmAgent._run_async_impl → BaseLlmFlow.run_async()，
+        #   后者内部是 `while True: 调模型 → 执行工具 → 判断 is_final_response()`。
+        #   本文件的职责是"给这个循环装上工具面、策略、熔断和事件出口"，而不是自己实现循环。
+        #   （详见 sxw_aicoding/代码分析/agent_loop_循环在哪里_ADK_flow_拆解.md）
+        # 这里拿到的是异步生成器，尚未开始执行；下面 async for 拉取时才真正跑起来。
         runner_events = runner.run_async(
             user_id=rc.user_id,
             session_id=rc.session_id,
             new_message=rc.user_message,
+            # StreamingMode.SSE：让模型输出按 token 增量返回，前端才有打字机效果；
+            # max_llm_calls：框架层硬熔断，ADK 在每次调模型前检查，超限抛 LlmCallsLimitExceededError。
             run_config=RunConfig(streaming_mode=StreamingMode.SSE, max_llm_calls=hard_cap),
         )
         # merge_runner_events 并发 drain 技能 UI 队列 → skill_event 实时穿插
+        # 为什么需要它：技能/沙箱工具在"一次工具调用内部"会产生大量中间展示帧，
+        # 但 ADK 只在工具整体返回后才吐 tool_result。工具把中间帧推进 contextvar 里的队列，
+        # 这里并发消费两个来源（Runner 事件 + UI 队列），技能过程才能真正边跑边显示。
         async for se in merge_runner_events(runner_events, _convert):
             yield se
+        # 循环自然结束（模型不再调工具）→ 补一个 done 收尾，前端据此关闭流。
         yield StreamEvent("done", {"finish_reason": "stop"})

@@ -38,14 +38,18 @@ def adk_event_to_stream_events(event: Any) -> list[StreamEvent]:
     content = getattr(event, "content", None)
     parts = getattr(content, "parts", None) if content else None
     if not parts:
-        return out
+        return out           # 纯控制类事件（无内容）不产生 SSE
+    # partial=True 表示这是流式增量块；ADK 在一轮结束时还会再发一个 partial=False 的聚合事件。
     is_partial = bool(getattr(event, "partial", False))
     for part in parts:
         text = getattr(part, "text", None)
+        # 只取增量、丢弃聚合：否则用户会先看到逐字输出、末尾再被完整重复一遍。
         if text and is_partial:
             out.append(StreamEvent("text", {"delta": text}))
         fc = getattr(part, "function_call", None)
         if fc is not None:
+            # 工具调用/结果只出现在非流式事件里，原样转出即可。
+            # id 是 ADK 分配的 function call id，前端用它把同名工具的多次并行调用区分开。
             out.append(StreamEvent("tool_call", {
                 "id": getattr(fc, "id", None),
                 "name": getattr(fc, "name", ""),

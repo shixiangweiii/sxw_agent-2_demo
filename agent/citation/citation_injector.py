@@ -50,6 +50,11 @@ async def with_citations(events: AsyncIterator[StreamEvent]) -> AsyncIterator[St
 
     对两代引擎通用（只要工具里有 knowledge_search）。
     """
+    # 这是一个"透明中间件"：所有事件原样放行，只额外做两件事——
+    #   1) 侦听 knowledge_search 的结果，建立 序号 n → 文档 的映射；
+    #   2) 累积正文，在 done 之前补一个 citation 事件。
+    # 之所以要程序端维护映射：LLM 只被允许输出 [n] 标记，不接触文件名/URL，
+    # 这样"引用哪篇文档"由检索结果决定而不是由模型生成，从根上避免引用幻觉。
     injector = CitationInjector()
     answer_parts: list[str] = []
     async for ev in events:
@@ -63,8 +68,11 @@ async def with_citations(events: AsyncIterator[StreamEvent]) -> AsyncIterator[St
             answer_parts.append(ev.data.get("delta", ""))
             yield ev
         elif ev.event == "done":
+            # 在 done 之前才扫描：此时正文已完整，能正确识别被流式拆开的 marker。
             injector.scan_text("".join(answer_parts))
             citation = injector.build_event()
+            # 只有正文里真的出现过、且能对上检索命中的 [n] 才会生成引用块；
+            # 检索无命中 → 映射为空 → 这里返回 None → 不发 citation（不编造引用）。
             if citation is not None:
                 yield citation
             yield ev

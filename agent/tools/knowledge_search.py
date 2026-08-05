@@ -34,6 +34,8 @@ def build_knowledge_search_tool(settings: AgentSettings) -> Callable[..., Any]:
                 )
                 resp.raise_for_status()
                 data = resp.json()
+            # 给每条命中编号 n（从 1 开始）——这个编号就是模型正文里 [n] 标记的依据，
+            # 也是 CitationInjector 建立"序号 → 文档"映射的键。
             chunks = data.get("chunks", [])
             hits = [
                 {"n": i + 1, "title": c.get("title", ""), "doc_id": c.get("doc_id", ""),
@@ -47,6 +49,9 @@ def build_knowledge_search_tool(settings: AgentSettings) -> Callable[..., Any]:
                                 "不要编造引用，也不要给出资料未提供的具体来源性事实（算法名/参数/函数名）。"}
             return {"hits": hits, "count": len(hits),
                     "note": "请基于以上资料回答，并在引用处用 [n] 标注（n 为资料序号）。"}
+        # ★ 微服务边界的降级点：arag 挂了/超时不能让整轮对话失败。
+        # 这里返回结构化结果而不是抛异常——属于"业务可预期失败"，
+        # 模型收到 degraded 标记后会声明未访问知识库再作答，循环继续正常推进。
         except Exception as exc:  # noqa: BLE001 - 检索失败降级为纯对话，不抛错
             log_kv(logger, logging.WARNING, "QaRetrieve", "degraded, fallback to chat mode",
                    error=type(exc).__name__)
