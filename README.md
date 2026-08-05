@@ -62,7 +62,7 @@
 | **生产级循环加固** | LiteLlm 工具参数规范化 + ADK Plugin 分发前短路/异常喂回，以及上下文超长截断重试、计划续推、force-summary、消息预算 |
 | **混合召回 RAG** | 向量 + BM25 双路召回 → RRF 互惠排名融合 → 低价值过滤；查询改写 |
 | **知识问答 + 引用** | agent→arag 微服务调用（超时降级）；正文 `[n]` → 末尾引用块；无命中不编造 |
-| **技能调用（skill-center）** | agent→skill-center 第 3 个微服务；启动拉技能目录(快照)→技能包装成工具；NDJSON `SkillResultDTO` 采用数据帧 `eof=false` + 独立空 EOF，缺 EOF/坏帧按协议错误处理；展示帧经 UI 队列合并为 `skill_event` |
+| **技能调用（skill-center）** | agent→skill-center 第 3 个微服务；NDJSON `SkillResultDTO` 采用数据帧 + 独立 EOF，缺 EOF/坏帧按稳定错误码处理；任意失败帧使整体失败并保留首个根因，错误码透传到 function response 和结构化日志；展示帧合并为 `skill_event` |
 | **SKILL 沙箱执行** | `agent/claude_skill/` 中的技能包（SKILL.md）作为**子代理在沙箱中执行**；沙箱 provider 抽象（LocalSandbox 可跑 / AgentBay 云桩）+ file/shell/code 服务；独立 Runner 同样带工具参数分发前 guard |
 | **A2A 远程子代理** | ADK 原生 A2A（`a2a-sdk` + `RemoteA2aAgent` 客户端 + `to_a2a` 服务端）；远程调用是无父对话历史的新会话，因此工具声明要求 request 展开指代并携带完整上下文 |
 | **多模态** | 图片输入（ADK artifact + 视觉模型）；文档图片 caption 入库可检索 |

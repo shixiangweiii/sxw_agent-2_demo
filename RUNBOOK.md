@@ -192,6 +192,7 @@ ENGINE=plan_execute "$PY" -m uvicorn agent.main:app --port 8000
 
 ### 6.7 技能流与 A2A 调用约束
 - skill-center 的 NDJSON 流必须以若干 `eof=false` 数据帧加一个 `eof=true, data=null` 独立结束帧收口；缺失 EOF、损坏帧或 `data+eof` 合帧会返回结构化协议错误，部分文本/卡片不会覆盖终止错误。
+- 技能错误采用 failure-sticky：首个失败帧的 `errorCode/errorMsg` 保留到模型可见的 function response，后续成功或失败帧不覆盖。框架错误码包括 `SKILL_HTTP_ERROR`、`SKILL_TRANSPORT_ERROR`、`SKILL_STREAM_EMPTY`、`SKILL_STREAM_INCOMPLETE`、`SKILL_PROTOCOL_ERROR`；上游失败未给错误码时使用 `SKILL_EXECUTION_ERROR`，相同错误码写入 `[SkillInvoke]` 结构化日志。
 - Claude SKILL 使用独立 `InMemoryRunner`，其沙箱工具也启用轻量 ToolArgsGuard。
 - A2A `AgentTool` 每次调用都会为远端创建新会话，不继承当前父对话；委派 request 必须展开“它/上面的内容”等指代，并包含目标、范围、约束、输入和必要上下文。
 

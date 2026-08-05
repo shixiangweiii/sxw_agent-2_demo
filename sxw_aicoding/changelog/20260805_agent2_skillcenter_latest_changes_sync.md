@@ -72,10 +72,13 @@
 - 在共享 `SkillResultDTO` 契约中禁止 `eof=true` 与非空 `data` 同帧出现。
 - 客户端收到合法 EOF 后立即结束，不再处理 EOF 后面的内容。
 - 将异常终止分类为：
+  - `SKILL_HTTP_ERROR`：skill-center 返回非 200。
+  - `SKILL_TRANSPORT_ERROR`：收到有效帧前发生连接、超时或读取异常。
   - `SKILL_STREAM_EMPTY`：HTTP 200，但没有任何有效数据帧和 EOF。
   - `SKILL_STREAM_INCOMPLETE`：已经收到数据帧，但连接结束或异常中断时没有 EOF。
   - `SKILL_PROTOCOL_ERROR`：NDJSON 无法解析或 DTO 违反协议。
-- EOF 错误帧必须先解析错误信息；最终错误优先于此前收到的卡片、文本和 `skipSummarization`。
+  - `SKILL_EXECUTION_ERROR`：上游明确失败但未提供错误码。
+- 任意显式失败帧都会使整体调用失败；首个错误码和错误信息保持 sticky，后续成功或失败帧均不覆盖。最终错误优先于此前收到的卡片、文本和 `skipSummarization`。
 - 不改变对外 HTTP 路由、Agent SSE 事件类型和已有 skill-center 正常生产者的数据内容。
 
 ### 3.4 文档与验证
@@ -136,15 +139,15 @@
   - 增加 Pydantic `model_validator`，拒绝 `eof=true,data!=null`。
 - `agent/skills/client.py`
   - EOF 成为必须的成功终止信号。
-  - 增加空流、截断流和协议错误的稳定错误码。
+  - 增加 HTTP、传输、空流、截断流、协议错误和无上游错误码兜底的稳定分类。
   - 合法 EOF 到达后立即返回，忽略尾随帧。
-  - 日志只记录异常类型，不记录原始坏帧。
+  - 结构化日志记录稳定错误码和安全诊断字段，不记录响应正文或原始坏帧。
 - `agent/skills/result_parser.py`
   - 增加统一错误提取；EOF 错误帧不再被提前忽略。
   - 错误帧不参与 UI 展示和正文聚合。
 - `agent/skills/selected_skill_tool.py`
-  - 最终错误优先级高于 `skipSummarization`、卡片和聚合文本。
-  - 异常终止时显式返回 `isError=true`，避免把部分结果包装为成功。
+  - 按首个失败 sticky 聚合 `errorCode/errorMsg`，后续帧不覆盖根因。
+  - 最终错误优先级高于 `skipSummarization`、卡片和聚合文本，并返回 `isError=true,errorCode`。
 
 最终流协议：
 
@@ -177,7 +180,8 @@
 | A2A request 必须自包含 | 已通过 `SelfContainedA2AAgentTool` 增强工具声明 |
 | EOF 与数据帧分离 | 已在共享 DTO 层强校验 |
 | 缺 EOF、坏帧不能伪装成功 | 已分类为稳定协议错误，且错误优先返回 |
-| 外部接口保持不变 | 工具名称、HTTP 路由和 Agent SSE 类型均未调整 |
+| 技能错误码端到端可观测 | 首个失败的错误码保留到 function response，并写入结构化日志 |
+| 外部传输接口保持不变 | 工具名称、HTTP 路由和 Agent SSE 类型未调整；错误 function response 新增 `errorCode` |
 | 文档同步 | 四份项目主文档已更新 |
 
 ## 6. 验证结果与边界

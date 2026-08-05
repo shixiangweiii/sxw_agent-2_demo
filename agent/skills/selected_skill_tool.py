@@ -13,7 +13,7 @@ from google.adk.tools._gemini_schema_util import _to_gemini_schema
 from google.genai.types import FunctionDeclaration
 
 from agent.skills.args_coercion import coerce_args_by_schema
-from agent.skills.client import SkillCenterClient, SkillQuotaError
+from agent.skills.client import SKILL_EXECUTION_ERROR, SkillCenterClient, SkillQuotaError
 from agent.skills.request_context import get_request_context
 from agent.skills.result_parser import extract_error, extract_text, to_skill_event
 from agent.skills.ui_event_queue import emit_skill_event
@@ -75,11 +75,14 @@ class SelectedSkillTool(BaseTool):
         card: Any = None
         skip_summarization = False
         error_msg: Optional[str] = None
+        error_code: Optional[str] = None
         try:
             async for result in self._client.execute_tool_by_sse(request, user):
                 frame_error = extract_error(result)
-                if frame_error:
+                if frame_error and error_msg is None:
+                    # failure-sticky：首个失败最接近根因，后续成功/失败帧均不覆盖。
                     error_msg = frame_error
+                    error_code = result.error_code or SKILL_EXECUTION_ERROR
                 event = to_skill_event(self._tool_name, result)
                 if event is not None:
                     await emit_skill_event(event)
@@ -98,6 +101,7 @@ class SelectedSkillTool(BaseTool):
             # 终止错误优先于此前已收到的卡片/文本，避免截断流被误判为成功。
             out["skipSummarization"] = False
             out["isError"] = True
+            out["errorCode"] = error_code
             out["content"] = error_msg
         elif skip_summarization:
             # 单技能直呈语义：结果已通过 skill_event 卡片直接展示给用户，
@@ -114,5 +118,6 @@ class SelectedSkillTool(BaseTool):
         else:
             out["content"] = "技能执行完成。"
         log_kv(logger, logging.INFO, "SkillInvoke", "done",
-               skill=self._skill_id, answer_len=len(aggregated), error=bool(error_msg))
+               skill=self._skill_id, answer_len=len(aggregated), error=bool(error_msg),
+               error_code=error_code)
         return out

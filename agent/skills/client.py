@@ -2,7 +2,7 @@
 
 复刻 albert-agent-2 `AlbertSkillClient.execute_tool` / `execute_tool_by_sse`：
 构造 header（base64 用户 + trace）+ DTO → 调技能中心 → NDJSON 流解析 SkillResultDTO，
-处理 eof / 算粒 errorCode / 空结果兜底。
+处理 eof / 算粒 errorCode / 稳定错误分类 / 空结果兜底。
 """
 from __future__ import annotations
 
@@ -24,6 +24,13 @@ from common.skill_contract import (
 )
 
 logger = get_logger("agent.skill")
+
+SKILL_HTTP_ERROR = "SKILL_HTTP_ERROR"
+SKILL_TRANSPORT_ERROR = "SKILL_TRANSPORT_ERROR"
+SKILL_STREAM_EMPTY = "SKILL_STREAM_EMPTY"
+SKILL_STREAM_INCOMPLETE = "SKILL_STREAM_INCOMPLETE"
+SKILL_PROTOCOL_ERROR = "SKILL_PROTOCOL_ERROR"
+SKILL_EXECUTION_ERROR = "SKILL_EXECUTION_ERROR"
 
 
 class SkillQuotaError(Exception):
@@ -63,7 +70,7 @@ class SkillCenterClient:
             return SkillResultDTO(**json.loads(line))
         except Exception as exc:  # noqa: BLE001 - 统一转为不含原始数据的协议错误
             log_kv(logger, logging.WARNING, "SkillInvoke", "bad stream frame",
-                   error=type(exc).__name__)
+                   error=type(exc).__name__, error_code=SKILL_PROTOCOL_ERROR)
             raise SkillStreamProtocolError("技能流包含非法帧") from exc
 
     @staticmethod
@@ -110,7 +117,10 @@ class SkillCenterClient:
                     headers=self._headers(request.tenant_id, user),
                 ) as resp:
                     if resp.status_code != 200:
-                        yield SkillResultDTO(success=False, errorMsg="技能执行异常", eof=True, isPartial=False)
+                        log_kv(logger, logging.WARNING, "SkillInvoke", "http error",
+                               skill=request.skill_id, status=resp.status_code,
+                               error_code=SKILL_HTTP_ERROR)
+                        yield self._stream_error(SKILL_HTTP_ERROR, "技能执行异常")
                         return
                     async for chunk in resp.aiter_bytes(256):
                         for line in processor.process_chunk(chunk):
@@ -135,23 +145,26 @@ class SkillCenterClient:
                         yield result
                     if not seen_frame:
                         log_kv(logger, logging.WARNING, "SkillInvoke", "empty stream, no result",
-                               skill=request.skill_id)
-                        yield self._stream_error("SKILL_STREAM_EMPTY", "工具执行无结果")
+                               skill=request.skill_id, error_code=SKILL_STREAM_EMPTY)
+                        yield self._stream_error(SKILL_STREAM_EMPTY, "工具执行无结果")
                     else:
                         log_kv(logger, logging.WARNING, "SkillInvoke", "stream ended without eof",
-                               skill=request.skill_id)
-                        yield self._stream_error("SKILL_STREAM_INCOMPLETE", "技能流未正常结束")
+                               skill=request.skill_id, error_code=SKILL_STREAM_INCOMPLETE)
+                        yield self._stream_error(SKILL_STREAM_INCOMPLETE, "技能流未正常结束")
         except SkillQuotaError:
             raise
         except SkillStreamProtocolError:
-            yield self._stream_error("SKILL_PROTOCOL_ERROR", "技能流协议错误")
+            log_kv(logger, logging.WARNING, "SkillInvoke", "protocol error",
+                   skill=request.skill_id, error_code=SKILL_PROTOCOL_ERROR)
+            yield self._stream_error(SKILL_PROTOCOL_ERROR, "技能流协议错误")
         except Exception as exc:  # noqa: BLE001 - 流异常降级为单帧错误，不中断 turn
+            error_code = SKILL_STREAM_INCOMPLETE if seen_frame else SKILL_TRANSPORT_ERROR
             log_kv(logger, logging.WARNING, "SkillInvoke", "stream failed",
-                   skill=request.skill_id, error=type(exc).__name__)
+                   skill=request.skill_id, error=type(exc).__name__, error_code=error_code)
             if seen_frame:
-                yield self._stream_error("SKILL_STREAM_INCOMPLETE", "技能流未正常结束")
+                yield self._stream_error(error_code, "技能流未正常结束")
             else:
-                yield SkillResultDTO(success=False, errorMsg="技能执行异常", eof=True, isPartial=False)
+                yield self._stream_error(error_code, "技能执行异常")
 
     @staticmethod
     def _raise_if_quota(request: SkillToolExecuteRequestDTO, result: SkillResultDTO) -> None:

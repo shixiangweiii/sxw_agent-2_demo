@@ -112,7 +112,7 @@ agent 还内置浏览器 Web Chat：`web/` 中的静态资源由 `agent/main.py`
 > ⚠️ 诚实声明：PromptCache 显式缓存断点为 Anthropic 专属，本 demo 默认 provider（DashScope/Qwen）下为 no-op。
 
 ### 三种「扩展智能体」机制（不要混淆）
-- **skill-center 技能**（`agent/skills/` → `skillcenter/`）：远程 MCP 风格执行网关；NDJSON 契约为数据帧 `eof=false` + 独立 `eof=true,data=null`，缺 EOF/坏帧按协议错误处理；展示帧经 UI 队列合并为 `skill_event`。
+- **skill-center 技能**（`agent/skills/` → `skillcenter/`）：远程 MCP 风格执行网关；NDJSON 契约为数据帧 `eof=false` + 独立 `eof=true,data=null`；缺 EOF/坏帧按稳定错误码处理，首个失败 sticky 保留到 function response 与 `[SkillInvoke]` 日志；展示帧经 UI 队列合并为 `skill_event`。
 - **SKILL 沙箱**（代码目录 `agent/claude_skill/`）：技能包 `SKILL.md` 作为**子代理在沙箱中执行**；独立 Runner 带轻量 ToolArgsGuard；沙箱 provider 抽象（`LocalSandbox` 可跑 / `AgentBay` 云桩）。纯本地能力，不依赖任何下游。
 - **A2A 远程子代理**（`agent/a2a/loader.py` + `a2a_service/`）：ADK 原生 A2A，经 agent-card 发现 + JSON-RPC 委派；每次远程调用是无父历史的新会话，request 必须自包含；skill-center 作注册表。
 
