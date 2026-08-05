@@ -6,13 +6,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import suppress
 from typing import Any, AsyncIterator, Callable
 
+from agent.asyncio_utils import await_with_deferred_cancellation
 from agent.skills.ui_event_queue import reset_ui_queue, set_ui_queue
 from agent.stream.event_converters import StreamEvent
 
 _SENTINEL: object = object()
+logger = logging.getLogger(__name__)
 
 
 async def merge_runner_events(
@@ -36,21 +39,46 @@ async def merge_runner_events(
             queue.put_nowait(_SENTINEL)
 
     task = asyncio.create_task(pump())
+    primary_failed = False
     try:
         while True:
             item = await queue.get()
             if item is _SENTINEL:
                 break
             yield item
+    except BaseException:
+        primary_failed = True
+        raise
     finally:
-        if not task.done():
-            task.cancel()
-        # pump 取消会把 CancelledError 传到这里；它是关闭协议的一部分，不生成 error 事件。
-        try:
+        async def close_sources() -> None:
+            if not task.done():
+                task.cancel()
+            # pump 取消是关闭协议的一部分，不生成 error 事件。
             with suppress(asyncio.CancelledError):
                 await task
             close = getattr(runner_events, "aclose", None)
             if close is not None:
                 await close()
+
+        def log_close_error(exc: BaseException) -> None:
+            logger.warning(
+                "runner stream cleanup failed after cancellation: %s",
+                type(exc).__name__,
+            )
+
+        try:
+            await await_with_deferred_cancellation(
+                close_sources(),
+                on_error_after_cancel=log_close_error,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 已有主异常优先于关闭异常
+            if not primary_failed:
+                raise
+            logger.warning(
+                "runner stream cleanup failed while preserving primary error: %s",
+                type(exc).__name__,
+            )
         finally:
             reset_ui_queue(token)

@@ -7,6 +7,8 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Awaitable, Iterable
 
+from agent.asyncio_utils import await_with_deferred_cancellation
+
 logger = logging.getLogger(__name__)
 
 
@@ -106,14 +108,17 @@ class SkillExecutionCoordinator:
         *,
         suppress_errors: bool,
     ) -> None:
-        task = asyncio.ensure_future(awaitable)
+        """等待租约完整释放，并保持既有主异常或取消优先。"""
+
+        def log_release_error(exc: BaseException) -> None:
+            logger.warning("skill lease cleanup failed: %s", type(exc).__name__)
+
         try:
-            await asyncio.shield(task)
+            await await_with_deferred_cancellation(
+                awaitable,
+                on_error_after_cancel=log_release_error,
+            )
         except asyncio.CancelledError:
-            try:
-                await asyncio.shield(task)
-            except Exception as exc:  # noqa: BLE001 - 保留原始取消语义
-                logger.warning("skill lease cleanup failed: %s", type(exc).__name__)
             raise
         except Exception as exc:
             if not suppress_errors:

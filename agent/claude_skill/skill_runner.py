@@ -12,6 +12,7 @@ from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.runners import InMemoryRunner
 from google.genai import types
 
+from agent.asyncio_utils import await_with_deferred_cancellation
 from agent.claude_skill.catalog import ClaudeSkill
 from agent.claude_skill.contracts import (
     SkillCallContext,
@@ -50,20 +51,22 @@ async def _await_cleanup(
     suppress_errors: bool,
 ) -> None:
     """等待 Runner 清理；既有异常（尤其取消）不被清理失败覆盖。"""
-    task = asyncio.ensure_future(awaitable)
+
+    def log_cleanup_error(exc: BaseException) -> None:
+        log_kv(
+            logger,
+            logging.WARNING,
+            "ClaudeSkill",
+            f"{label} failed after cancellation",
+            error=type(exc).__name__,
+        )
+
     try:
-        await asyncio.shield(task)
+        await await_with_deferred_cancellation(
+            awaitable,
+            on_error_after_cancel=log_cleanup_error,
+        )
     except asyncio.CancelledError:
-        try:
-            await asyncio.shield(task)
-        except Exception as exc:  # noqa: BLE001 - 保留原始取消语义
-            log_kv(
-                logger,
-                logging.WARNING,
-                "ClaudeSkill",
-                f"{label} failed after cancellation",
-                error=type(exc).__name__,
-            )
         raise
     except Exception as exc:
         if not suppress_errors:

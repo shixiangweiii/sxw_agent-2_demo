@@ -42,14 +42,20 @@ def _parse_skill_md(path: Path) -> dict[str, Any]:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         raise SkillPackageInvalidError(f"无法读取 {path}: {type(exc).__name__}") from exc
-    normalized = text.lstrip("\ufeff")
-    if not normalized.startswith("---"):
+    normalized = text.removeprefix("\ufeff")
+    lines = normalized.splitlines()
+    if not lines or lines[0] != "---":
         raise SkillPackageInvalidError(f"{path}: 缺少 YAML frontmatter")
-    parts = normalized.split("---", 2)
-    if len(parts) != 3 or not parts[2].strip():
+    try:
+        closing_index = lines.index("---", 1)
+    except ValueError as exc:
+        raise SkillPackageInvalidError(f"{path}: frontmatter 或指令正文不完整") from exc
+    frontmatter = "\n".join(lines[1:closing_index])
+    body = "\n".join(lines[closing_index + 1:])
+    if not frontmatter.strip() or not body.strip():
         raise SkillPackageInvalidError(f"{path}: frontmatter 或指令正文不完整")
     try:
-        meta = yaml.safe_load(parts[1])
+        meta = yaml.safe_load(frontmatter)
     except yaml.YAMLError as exc:
         raise SkillPackageInvalidError(f"{path}: frontmatter YAML 非法") from exc
     if not isinstance(meta, dict):

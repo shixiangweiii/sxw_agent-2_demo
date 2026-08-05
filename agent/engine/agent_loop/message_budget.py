@@ -110,11 +110,10 @@ class MessageBudget:
         retained_start = units[first_unit][0]
         total = sum(_content_chars(content) for content in contents[retained_start:])
         while total > self._max_chars and first_unit < len(units) - 1:
-            _, drop_end = units[first_unit]
+            drop_start, drop_end = units[first_unit]
             remaining_count = len(contents) - drop_end - 1
             if remaining_count < 2:
                 break
-            drop_start, drop_end = units[first_unit]
             total -= sum(_content_chars(content) for content in contents[drop_start:drop_end + 1])
             first_unit += 1
             retained_start = units[first_unit][0]

@@ -15,8 +15,9 @@ import tempfile
 import uuid
 from asyncio.subprocess import PIPE
 from pathlib import Path
-from typing import Callable, Optional, TypeVar
+from typing import Awaitable, Callable, Optional, TypeVar
 
+from agent.asyncio_utils import await_with_deferred_cancellation
 from agent.claude_skill.sandbox.base import (
     BaseSandbox,
     CodeResult,
@@ -38,15 +39,14 @@ async def _to_thread_cancel_safe(
     *args: object,
 ) -> _T:
     """取消时等待不可中断的本地 I/O 收口，且不让清理异常覆盖取消。"""
-    task = asyncio.create_task(asyncio.to_thread(func, *args))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        try:
-            await asyncio.shield(task)
-        except Exception as exc:  # noqa: BLE001 - 保留原始取消语义
-            logger.warning("%s cleanup failed after cancellation: %s", label, type(exc).__name__)
-        raise
+
+    def log_io_error(exc: BaseException) -> None:
+        logger.warning("%s cleanup failed after cancellation: %s", label, type(exc).__name__)
+
+    return await await_with_deferred_cancellation(
+        asyncio.to_thread(func, *args),
+        on_error_after_cancel=log_io_error,
+    )
 
 
 def _safe_path(workdir: Path, path: str) -> Path:
@@ -62,35 +62,48 @@ def _safe_path(workdir: Path, path: str) -> Path:
 
 
 async def _run(args: list[str], cwd: Path, timeout: float) -> tuple[int, str, str]:
-    create_task = asyncio.create_task(asyncio.create_subprocess_exec(
+    spawn_task = asyncio.create_task(asyncio.create_subprocess_exec(
         *args, cwd=str(cwd), stdout=PIPE, stderr=PIPE, start_new_session=True,
     ))
     try:
-        proc = await asyncio.shield(create_task)
+        proc = await asyncio.shield(spawn_task)
     except asyncio.CancelledError:
-        try:
-            proc = await asyncio.shield(create_task)
-            terminate_task = asyncio.create_task(_terminate_process_group(proc))
-            await asyncio.shield(terminate_task)
-        except Exception as exc:  # noqa: BLE001 - 保留原始取消语义
-            logger.warning("process cleanup failed after cancellation: %s", type(exc).__name__)
+        await _finish_process_cleanup(_terminate_after_spawn(spawn_task))
         raise
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
-        try:
-            await _terminate_process_group(proc)
-        except Exception as exc:  # noqa: BLE001 - timeout 是对外主错误
-            logger.warning("process cleanup failed after timeout: %s", type(exc).__name__)
+        await _finish_process_cleanup(_terminate_process_group(proc))
         raise SandboxError(f"sandbox command timeout after {timeout}s")
     except asyncio.CancelledError:
-        try:
-            terminate_task = asyncio.create_task(_terminate_process_group(proc))
-            await asyncio.shield(terminate_task)
-        except Exception as exc:  # noqa: BLE001 - 保留原始取消语义
-            logger.warning("process cleanup failed after cancellation: %s", type(exc).__name__)
+        await _finish_process_cleanup(_terminate_process_group(proc))
         raise
     return proc.returncode or 0, out.decode("utf-8", "ignore"), err.decode("utf-8", "ignore")
+
+
+async def _terminate_after_spawn(
+    spawn_task: asyncio.Task[asyncio.subprocess.Process],
+) -> None:
+    """spawn 已被 shield 时，即使调用方取消也取得进程对象并清理进程组。"""
+    proc = await spawn_task
+    await _terminate_process_group(proc)
+
+
+async def _finish_process_cleanup(awaitable: Awaitable[None]) -> None:
+    """进程清理失败只旁路记录；重复取消仍在清理完成后向上传播。"""
+
+    def log_cleanup_error(exc: BaseException) -> None:
+        logger.warning("process cleanup failed after cancellation: %s", type(exc).__name__)
+
+    try:
+        await await_with_deferred_cancellation(
+            awaitable,
+            on_error_after_cancel=log_cleanup_error,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - timeout/取消是对外主错误
+        logger.warning("process cleanup failed: %s", type(exc).__name__)
 
 
 async def _terminate_process_group(proc: asyncio.subprocess.Process) -> None:

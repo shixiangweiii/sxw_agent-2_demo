@@ -9,6 +9,7 @@ from google.adk.tools import BaseTool, ToolContext
 from google.adk.tools._gemini_schema_util import _to_gemini_schema
 from google.genai.types import FunctionDeclaration
 
+from agent.asyncio_utils import await_with_deferred_cancellation
 from agent.claude_skill.catalog import ClaudeSkill
 from agent.claude_skill.contracts import (
     SKILL_EXECUTION_FAILED,
@@ -38,20 +39,22 @@ logger = get_logger("agent.claude_skill")
 
 async def _close_sandbox(sandbox: BaseSandbox) -> None:
     """清理不受调用总超时影响；新取消到达时也先等清理任务收口。"""
-    close_task = asyncio.create_task(sandbox.close())
+
+    def log_close_error(exc: BaseException) -> None:
+        log_kv(
+            logger,
+            logging.WARNING,
+            "ClaudeSkill",
+            "sandbox close failed after cancellation",
+            error=type(exc).__name__,
+        )
+
     try:
-        await asyncio.shield(close_task)
+        await await_with_deferred_cancellation(
+            sandbox.close(),
+            on_error_after_cancel=log_close_error,
+        )
     except asyncio.CancelledError:
-        try:
-            await asyncio.shield(close_task)
-        except Exception as exc:  # noqa: BLE001 - 保留原始取消语义
-            log_kv(
-                logger,
-                logging.WARNING,
-                "ClaudeSkill",
-                "sandbox close failed after cancellation",
-                error=type(exc).__name__,
-            )
         raise
     except Exception as exc:  # noqa: BLE001 - 清理失败不覆盖已有 ToolResult
         log_kv(
@@ -100,6 +103,7 @@ class ClaudeSkillTool(BaseTool):
         )
 
     def _detect_error_in_response(self, response: Any) -> Optional[str]:
+        # ADK 2.3 在 function flow 中通过 getattr 动态调用，用于设置 telemetry error_type。
         if isinstance(response, dict) and response.get("isError"):
             error = response.get("error")
             if isinstance(error, dict) and isinstance(error.get("code"), str):
