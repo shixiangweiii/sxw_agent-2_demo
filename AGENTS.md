@@ -103,18 +103,18 @@ agent 还内置浏览器 Web Chat：`web/` 中的静态资源由 `agent/main.py`
 - **`plan_execute`**（Gen1）：`decision_planner` 出计划 → `execution_planner` 逐步执行。前置规划、可控可解释。
 - **`agent_loop`**（Gen2，默认）：ReAct 单循环，模型迭代调工具直到产出。带计划续推、force-summary、动态工具发现、子代理委派。
 
-**两引擎共享**同一套工具/检索/技能/citation 下游、ToolErrorFeedback 插件、LiteLlm 加固；切换只改「如何编排」。**但工具面不对称**：`translate`/`text_stats`/`tool_search`/`update_task_plan`/`researcher` 是 `agent_loop` 专属（见 `agent/engine/agent_loop/`），`plan_execute` 只用 `ctx.tools`。改动涉及工具集时务必意识到这点（评测也只在共享子集上对比两引擎）。
+**两引擎共享**同一套工具/检索/技能/citation 下游、ToolErrorFeedback 插件、非对象工具参数规范化和 LiteLlm 加固；切换只改「如何编排」。**但工具面不对称**：`translate`/`text_stats`/`tool_search`/`update_task_plan`/`researcher` 是 `agent_loop` 专属（见 `agent/engine/agent_loop/`），`plan_execute` 只用 `ctx.tools`。改动涉及工具集时务必意识到这点（评测也只在共享子集上对比两引擎）。
 
 ### 生产级加固落在两个 ADK 扩展点（面试主线）
-1. **ADK Plugin** `agent/plugins/agent_invocation_plugin.py`：`on_tool_error_callback` 把框架级工具异常封装成 `function_response` 喂回模型、**不中断 turn**；`before_model_callback` 做计划续推 / 消息预算 / force-summary。
-2. **LiteLlm 子类** `agent/llm/hardened_litellm.py`：上下文超长截断重试、异常分类、PromptCache 缓存断点（provider-aware）。
+1. **ADK Plugin** `agent/plugins/agent_invocation_plugin.py`：`before_tool_callback` 短路工具参数解析 sentinel；`on_tool_error_callback` 把框架级异常封装成 `function_response` 喂回模型、**不中断 turn**；`before_model_callback` 做计划续推 / 消息预算 / force-summary。
+2. **LiteLlm 子类/适配层** `agent/llm/`：在 ADK 构造 FunctionCall 前把非对象参数规范化为 sentinel（计划顶层数组可无歧义恢复），并提供上下文超长截断重试、异常分类、PromptCache 缓存断点（provider-aware）。
 
 > ⚠️ 诚实声明：PromptCache 显式缓存断点为 Anthropic 专属，本 demo 默认 provider（DashScope/Qwen）下为 no-op。
 
 ### 三种「扩展智能体」机制（不要混淆）
-- **skill-center 技能**（`agent/skills/` → `skillcenter/`）：远程 MCP 风格执行网关；启动拉技能目录(快照)包装成工具；NDJSON `SkillResultDTO` 流经 UI 队列合并为 `skill_event`。
-- **SKILL 沙箱**（代码目录 `agent/claude_skill/`）：技能包 `SKILL.md` 作为**子代理在沙箱中执行**；沙箱 provider 抽象（`LocalSandbox` 可跑 / `AgentBay` 云桩）。纯本地能力，不依赖任何下游。
-- **A2A 远程子代理**（`agent/a2a/loader.py` + `a2a_service/`）：ADK 原生 A2A，经 agent-card 发现 + JSON-RPC 委派；skill-center 作注册表。
+- **skill-center 技能**（`agent/skills/` → `skillcenter/`）：远程 MCP 风格执行网关；NDJSON 契约为数据帧 `eof=false` + 独立 `eof=true,data=null`，缺 EOF/坏帧按协议错误处理；展示帧经 UI 队列合并为 `skill_event`。
+- **SKILL 沙箱**（代码目录 `agent/claude_skill/`）：技能包 `SKILL.md` 作为**子代理在沙箱中执行**；独立 Runner 带轻量 ToolArgsGuard；沙箱 provider 抽象（`LocalSandbox` 可跑 / `AgentBay` 云桩）。纯本地能力，不依赖任何下游。
+- **A2A 远程子代理**（`agent/a2a/loader.py` + `a2a_service/`）：ADK 原生 A2A，经 agent-card 发现 + JSON-RPC 委派；每次远程调用是无父历史的新会话，request 必须自包含；skill-center 作注册表。
 
 ### RAG（arag）
 `query → rewrite → 向量(numpy 余弦)+全文(BM25/jieba) 双路 → RRF 互惠排名融合 → 低价值过滤`。入库链路 `parse → image caption(视觉) → chunk → embed → store`。存储是**端口-适配器**设计（`arag/store/`：VectorStore / FullTextIndex / GraphStore）。当前 `local` 向量库会把 embedding 与 chunk 元数据持久化到 `local_storage/embedding/`，arag 重启后自动加载并用 chunks 重建 BM25；GraphStore 仍是内存端口占位。
@@ -127,6 +127,7 @@ agent 还内置浏览器 Web Chat：`web/` 中的静态资源由 `agent/main.py`
 - **配置**：每个服务用 `pydantic-settings` 读取**同目录 `.env`**（字段名大写即环境变量名，真实环境变量优先）。改 `.env` 后须**重启对应服务**才生效。密钥 `DASHSCOPE_API_KEY` 切勿提交。
 - **换模型/换厂商**只改 `LLM_MODEL` / `LLM_BASE_URL` / `DASHSCOPE_API_KEY`（内部用 `openai/<LLM_MODEL>` 走 litellm 的 openai 兼容 provider）。
 - **`a2a-sdk` 必须 pin 0.3.x**（`>=0.3.4,<0.4`，与 google-adk 2.3.0 对齐）；**1.x 不兼容**。ADK 的 A2A 仍标 EXPERIMENTAL，导入有 `UserWarning` 属正常。
+- **工具参数 shim 依赖 ADK 私有转换切面**：仓库精确 pin `google-adk==2.3.0`；升级 ADK 时必须重新审查 `agent/llm/tool_args_normalizer.py`，私有符号不匹配应启动失败而非静默降级。
 - **熔断**：`MAX_LOOP_ITERS`（默认 8）是 agent-loop 软收尾轮次；框架硬熔断 = 该值 + 2（`RunConfig.max_llm_calls`），plan_execute 执行相也用同值作硬熔断。
 - **沙箱**：`SANDBOX_PROVIDER=local` 才真实可跑（子进程，**非生产隔离**）；`agentbay` 是云桩，调用即 `SandboxUnavailableError`。
 

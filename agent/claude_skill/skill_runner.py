@@ -17,6 +17,7 @@ from google.genai import types
 from agent.claude_skill.catalog import ClaudeSkill
 from agent.claude_skill.sandbox.base import BaseSandbox
 from agent.claude_skill.toolset import build_sandbox_tools
+from agent.plugins.tool_args_guard_plugin import ToolArgsGuardPlugin
 from agent.stream.event_converters import StreamEvent, adk_event_to_stream_events
 from common.obs import get_logger, log_kv
 
@@ -39,7 +40,7 @@ async def run_skill(
         instruction=skill.instruction,
         tools=build_sandbox_tools(sandbox),
     )
-    runner = InMemoryRunner(agent=agent, app_name=_APP)
+    runner = InMemoryRunner(agent=agent, app_name=_APP, plugins=[ToolArgsGuardPlugin()])
     session = await runner.session_service.create_session(app_name=_APP, user_id="skill")
     message = types.Content(role="user", parts=[types.Part(text=query)])
 

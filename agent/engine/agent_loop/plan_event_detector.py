@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from agent.stream.event_converters import StreamEvent
+from agent.tool_args_contract import TaskPlanArgumentsError, normalize_task_plan_args
 
 PLAN_TOOL = "update_task_plan"
 
@@ -21,9 +22,12 @@ def plan_events_from(event: Any) -> Optional[list[StreamEvent]]:
     for part in parts:
         fc = getattr(part, "function_call", None)
         if fc is not None and getattr(fc, "name", "") == PLAN_TOOL:
-            args = dict(getattr(fc, "args", None) or {})
-            steps = args.get("steps") or []
-            current = int(args.get("current_step", 1))
+            try:
+                normalized = normalize_task_plan_args(getattr(fc, "args", None))
+            except (TaskPlanArgumentsError, TypeError, ValueError):
+                return None
+            steps = normalized["steps"]
+            current = normalized["current_step"]
             events: list[StreamEvent] = []
             for i, step in enumerate(steps):
                 n = i + 1

@@ -3,6 +3,7 @@
 对应原项目 `qwen_lite_llm.py` + `llm_exception_handler.py`：
 - M0（当前）：基础接通 DashScope（OpenAI 兼容端点，litellm `openai/` provider）。
 - M3 填充：ContextOverflow 反应式截断重试、PromptCache(provider-aware)、异常分类。
+- ADK 2.3 适配：FunctionCall 构造前规范化非对象工具参数，交由 Plugin 安全反馈。
 
 为何用 LiteLlm 子类：模型调用层是做「上下文超长 / 限流 / 缓存断点」等生产加固的唯一切面，
 ADK 把每次模型调用收敛到 `generate_content_async`，子类覆写即可全局生效。
@@ -18,6 +19,7 @@ from google.adk.models.llm_response import LlmResponse
 
 from agent.config import AgentSettings
 from agent.llm.exceptions import CONTEXT_OVERFLOW, classify_llm_error
+from agent.llm.tool_args_normalizer import install_adk_tool_args_normalizer
 from common.obs import get_logger, log_kv
 
 logger = get_logger("agent.llm")
@@ -78,6 +80,7 @@ def build_llm(settings: AgentSettings) -> HardenedLiteLlm:
     litellm 通过 `openai/<model>` + `api_base` + `api_key` 接任意 OpenAI 兼容端点；
     这里指向 DashScope compatible-mode。
     """
+    install_adk_tool_args_normalizer()
     model = f"openai/{settings.llm_model}"
     log_kv(logger, logging.INFO, "LLM", "build litellm",
            model=settings.llm_model, base_url=settings.llm_base_url)

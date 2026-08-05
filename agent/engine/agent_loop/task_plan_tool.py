@@ -5,6 +5,8 @@ from typing import Any
 
 from google.adk.tools.tool_context import ToolContext
 
+from agent.tool_args_contract import normalize_task_plan_args
+
 TASK_PLAN_KEY = "task_plan"
 
 
@@ -15,7 +17,8 @@ def update_task_plan(steps: list[str], current_step: int, tool_context: ToolCont
         steps: 计划的步骤标题列表（按顺序执行）。
         current_step: 当前正在执行的步骤序号（从 1 开始）；全部完成时传 len(steps)+1。
     """
-    plan = {"steps": list(steps), "current": int(current_step)}
+    normalized = normalize_task_plan_args({"steps": steps, "current_step": current_step})
+    plan = {"steps": normalized["steps"], "current": normalized["current_step"]}
     tool_context.state[TASK_PLAN_KEY] = plan
     all_done = plan["current"] > len(plan["steps"])
     return {
@@ -28,4 +31,11 @@ def update_task_plan(steps: list[str], current_step: int, tool_context: ToolCont
 
 def has_open_steps(plan: dict[str, Any]) -> bool:
     steps = plan.get("steps") or []
-    return int(plan.get("current", 1)) <= len(steps)
+    current = plan.get("current", 1)
+    return (
+        isinstance(steps, list)
+        and bool(steps)
+        and isinstance(current, int)
+        and not isinstance(current, bool)
+        and 1 <= current <= len(steps)
+    )

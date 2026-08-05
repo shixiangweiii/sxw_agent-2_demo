@@ -35,6 +35,10 @@ class SkillQuotaError(Exception):
         super().__init__(f"{error_code}: {error_message}")
 
 
+class SkillStreamProtocolError(ValueError):
+    """skill-center 返回了无法解析或违反 DTO 契约的帧。"""
+
+
 class SkillCenterClient:
     def __init__(self, settings: AgentSettings) -> None:
         self._base_url = settings.skill_center_base_url.rstrip("/")
@@ -57,9 +61,20 @@ class SkillCenterClient:
             return None
         try:
             return SkillResultDTO(**json.loads(line))
-        except Exception:  # noqa: BLE001 - 单行解析失败跳过，不中断整流
-            log_kv(logger, logging.WARNING, "SkillInvoke", "bad stream line", line=line[:120])
-            return None
+        except Exception as exc:  # noqa: BLE001 - 统一转为不含原始数据的协议错误
+            log_kv(logger, logging.WARNING, "SkillInvoke", "bad stream frame",
+                   error=type(exc).__name__)
+            raise SkillStreamProtocolError("技能流包含非法帧") from exc
+
+    @staticmethod
+    def _stream_error(error_code: str, error_message: str) -> SkillResultDTO:
+        return SkillResultDTO(
+            success=False,
+            errorCode=error_code,
+            errorMsg=error_message,
+            eof=True,
+            isPartial=False,
+        )
 
     async def execute_tool(
         self, request: SkillToolExecuteRequestDTO, user: dict[str, Any],
@@ -87,6 +102,7 @@ class SkillCenterClient:
         url = f"{self._base_url}/api/v1/skills/runtime/execute-streaming"
         processor = SSEStreamProcessor()
         timeout = httpx.Timeout(self._stream_timeout, connect=10.0)
+        seen_frame = False
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 async with client.stream(
@@ -96,34 +112,46 @@ class SkillCenterClient:
                     if resp.status_code != 200:
                         yield SkillResultDTO(success=False, errorMsg="技能执行异常", eof=True, isPartial=False)
                         return
-                    seen_result = False
                     async for chunk in resp.aiter_bytes(256):
                         for line in processor.process_chunk(chunk):
                             result = self._parse_line(line)
                             if result is None:
                                 continue
-                            seen_result = True
                             self._raise_if_quota(request, result)
+                            if result.eof:
+                                yield result
+                                return
+                            seen_frame = True
                             yield result
                     for line in processor.finalize():
                         result = self._parse_line(line)
                         if result is None:
                             continue
-                        seen_result = True
                         self._raise_if_quota(request, result)
+                        if result.eof:
+                            yield result
+                            return
+                        seen_frame = True
                         yield result
-                    if not seen_result:
-                        # 200 但全程无有效帧：兜底成错误帧，避免上层把空流误判为"执行完成"
+                    if not seen_frame:
                         log_kv(logger, logging.WARNING, "SkillInvoke", "empty stream, no result",
                                skill=request.skill_id)
-                        yield SkillResultDTO(
-                            success=False, errorMsg="工具执行无结果", eof=True, isPartial=False)
+                        yield self._stream_error("SKILL_STREAM_EMPTY", "工具执行无结果")
+                    else:
+                        log_kv(logger, logging.WARNING, "SkillInvoke", "stream ended without eof",
+                               skill=request.skill_id)
+                        yield self._stream_error("SKILL_STREAM_INCOMPLETE", "技能流未正常结束")
         except SkillQuotaError:
             raise
+        except SkillStreamProtocolError:
+            yield self._stream_error("SKILL_PROTOCOL_ERROR", "技能流协议错误")
         except Exception as exc:  # noqa: BLE001 - 流异常降级为单帧错误，不中断 turn
             log_kv(logger, logging.WARNING, "SkillInvoke", "stream failed",
                    skill=request.skill_id, error=type(exc).__name__)
-            yield SkillResultDTO(success=False, errorMsg="技能执行异常", eof=True, isPartial=False)
+            if seen_frame:
+                yield self._stream_error("SKILL_STREAM_INCOMPLETE", "技能流未正常结束")
+            else:
+                yield SkillResultDTO(success=False, errorMsg="技能执行异常", eof=True, isPartial=False)
 
     @staticmethod
     def _raise_if_quota(request: SkillToolExecuteRequestDTO, result: SkillResultDTO) -> None:

@@ -1,6 +1,7 @@
 """AgentInvocationPlugin：ADK BasePlugin。
 
-聚合三件生产加固（对应原项目 agent_invocation_plugin）：
+聚合四件生产加固（对应原项目 agent_invocation_plugin）：
+- before_tool_callback → ToolArgsGuard：解析 sentinel 在真实工具分发前短路；
 - on_tool_error_callback → ToolErrorFeedback：工具异常封装为 function_response 喂回，不中断 turn；
 - before_model_callback → 委托 LoopController 做续推 / 预算 / force-summary；
 - before/after_tool_callback → 工具调用可观测。
@@ -13,6 +14,7 @@ from typing import Any, Optional
 from google.adk.plugins.base_plugin import BasePlugin
 
 from agent.engine.agent_loop.loop_processor import LoopController
+from agent.plugins.tool_args_guard_plugin import build_tool_args_parse_error_response
 from common.obs import get_logger, log_kv
 
 logger = get_logger("agent.plugin")
@@ -33,6 +35,9 @@ class AgentInvocationPlugin(BasePlugin):
     async def before_tool_callback(
         self, *, tool: Any, tool_args: dict[str, Any], tool_context: Any,
     ) -> Optional[dict[str, Any]]:
+        parse_error = build_tool_args_parse_error_response(tool, tool_args)
+        if parse_error is not None:
+            return parse_error
         log_kv(logger, logging.INFO, "ToolCall", "invoke", tool=getattr(tool, "name", "?"))
         return None
 

@@ -6,9 +6,9 @@ JSON 字段用 camelCase alias，与真实技能中心一致。
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # 算粒不足类错误码（命中即视为配额超限）
 QUOTA_ERROR_CODES = {"BENEFIT_NOT_ENOUGH", "BENEFIT_EXCEED", "USER_NOT_PERMISSION", "ABILITY_AI_CREDITS_LIMIT"}
@@ -108,6 +108,13 @@ class SkillResultDTO(BaseModel):
     skip_summarization: Optional[bool] = Field(default=False, alias="skipSummarization")
     is_append_session: Optional[bool] = Field(default=True, alias="isAppendSession")
     custom_metadata: Optional[dict[str, Any]] = Field(default=None, alias="customMetadata")
+
+    @model_validator(mode="after")
+    def validate_eof_frame(self) -> Self:
+        """EOF 是独立控制帧，不得同时承载业务数据。"""
+        if self.eof is True and self.data is not None:
+            raise ValueError("SkillResultDTO eof=true 时 data 必须为空")
+        return self
 
 
 # ---------- 技能目录 ----------

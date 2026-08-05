@@ -15,7 +15,7 @@ from google.genai.types import FunctionDeclaration
 from agent.skills.args_coercion import coerce_args_by_schema
 from agent.skills.client import SkillCenterClient, SkillQuotaError
 from agent.skills.request_context import get_request_context
-from agent.skills.result_parser import extract_text, to_skill_event
+from agent.skills.result_parser import extract_error, extract_text, to_skill_event
 from agent.skills.ui_event_queue import emit_skill_event
 from common.obs import get_logger, log_kv
 from common.skill_contract import (
@@ -77,6 +77,9 @@ class SelectedSkillTool(BaseTool):
         error_msg: Optional[str] = None
         try:
             async for result in self._client.execute_tool_by_sse(request, user):
+                frame_error = extract_error(result)
+                if frame_error:
+                    error_msg = frame_error
                 event = to_skill_event(self._tool_name, result)
                 if event is not None:
                     await emit_skill_event(event)
@@ -85,15 +88,18 @@ class SelectedSkillTool(BaseTool):
                     skip_summarization = True
                 if result.data_type == SkillResultDataType.CARD:
                     card = result.data
-                if result.success is False and result.error_message:
-                    error_msg = result.error_message
         except SkillQuotaError as exc:
             return {"isError": True, "errorCode": exc.error_code,
                     "content": "技能算粒余额不足，请联系管理员。"}
 
         aggregated = "".join(text_parts).strip()
         out: dict[str, Any] = {"skill": self._tool_name, "skipSummarization": skip_summarization}
-        if skip_summarization:
+        if error_msg:
+            # 终止错误优先于此前已收到的卡片/文本，避免截断流被误判为成功。
+            out["skipSummarization"] = False
+            out["isError"] = True
+            out["content"] = error_msg
+        elif skip_summarization:
             # 单技能直呈语义：结果已通过 skill_event 卡片直接展示给用户，
             # function_response 显式抑制父 LLM 二次总结（软控制，不依赖引擎层硬收口）。
             out["content"] = (
@@ -105,10 +111,6 @@ class SelectedSkillTool(BaseTool):
             out["content"] = aggregated or "已生成卡片并直接展示给用户。"
         elif aggregated:
             out["content"] = aggregated
-        elif error_msg:
-            # 空内容但流里带了错误帧（如空流兜底"工具执行无结果"）：上抛错误而非伪装成"执行完成"
-            out["isError"] = True
-            out["content"] = error_msg
         else:
             out["content"] = "技能执行完成。"
         log_kv(logger, logging.INFO, "SkillInvoke", "done",

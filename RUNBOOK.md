@@ -169,6 +169,7 @@ ENGINE=plan_execute "$PY" -m uvicorn agent.main:app --port 8000
 - 运行时基于 **Google ADK**（`Runner` + `LlmAgent`）；模型经 ADK **LiteLlm** 适配 → 任意 **OpenAI 兼容**端点。
 - 默认走 DashScope `qwen3.7-plus`。**换模型/换厂商**只改三项：`LLM_MODEL` / `LLM_BASE_URL` / `DASHSCOPE_API_KEY`（agent 内部用 `openai/<LLM_MODEL>` 让 litellm 走 openai 兼容 provider）。
 - 推理模型的"思考过程"已通过 `extra_body={"enable_thinking": false}` 关闭，避免污染流式输出（代码内置，无需配）。
+- 模型返回顶层数组、标量或损坏的工具参数时，LiteLlm 适配层会转换为安全 sentinel，Plugin 在真实工具分发前返回 `ToolArgumentsParseError`；正常对象参数仍走 ADK 原路径。该适配依赖精确锁定的 `google-adk==2.3.0`。
 
 ### 6.3 SKILL 沙箱 provider —— `SANDBOX_PROVIDER`
 - `SANDBOX_PROVIDER=local`（默认）：本地沙箱，真实跑 `run_python`/`run_shell`（子进程 + 超时 + 工作目录限制）。
@@ -188,6 +189,11 @@ ENGINE=plan_execute "$PY" -m uvicorn agent.main:app --port 8000
 - 不起 `skill-center` → skill-center 技能 + A2A 发现跳过（`[SkillCatalog]/[A2ALoad] load failed, skip`）。
 - 不起 `a2a_service` → A2A 工具在调用时报错喂回（不影响其它）。
 - SKILL 沙箱是**本地**能力，不依赖任何下游（代码目录为 `agent/claude_skill/`）。
+
+### 6.7 技能流与 A2A 调用约束
+- skill-center 的 NDJSON 流必须以若干 `eof=false` 数据帧加一个 `eof=true, data=null` 独立结束帧收口；缺失 EOF、损坏帧或 `data+eof` 合帧会返回结构化协议错误，部分文本/卡片不会覆盖终止错误。
+- Claude SKILL 使用独立 `InMemoryRunner`，其沙箱工具也启用轻量 ToolArgsGuard。
+- A2A `AgentTool` 每次调用都会为远端创建新会话，不继承当前父对话；委派 request 必须展开“它/上面的内容”等指代，并包含目标、范围、约束、输入和必要上下文。
 
 ---
 

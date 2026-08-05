@@ -37,6 +37,7 @@
 │  ReasoningEngine（ENGINE 可切换）                                  │
 │    ├─ Gen1 Plan-Execute：decision planner → execution planner      │
 │    └─ Gen2 Agent-Loop：ReAct 单循环 + 插件加固                     │
+│         · ToolArgsGuard（非对象参数→反馈，不分发真实工具）          │
 │         · ToolErrorFeedback（异常→function_response，不中断）       │
 │         · ContextOverflow（超长截断重试）· PromptCache(provider-aware)│
 │         · TaskPlan 续推 · force-summary · message budget            │
@@ -58,12 +59,12 @@
 | 能力 | 实现 |
 |---|---|
 | **两代可切换推理引擎** | Plan-Execute（先规划后执行）/ Agent-Loop（ReAct 单循环），统一 `ReasoningEngine` 端口，`ENGINE` 配置切换 |
-| **生产级循环加固** | ADK Plugin：工具异常喂回、上下文超长截断重试、计划续推、force-summary、消息预算 |
+| **生产级循环加固** | LiteLlm 工具参数规范化 + ADK Plugin 分发前短路/异常喂回，以及上下文超长截断重试、计划续推、force-summary、消息预算 |
 | **混合召回 RAG** | 向量 + BM25 双路召回 → RRF 互惠排名融合 → 低价值过滤；查询改写 |
 | **知识问答 + 引用** | agent→arag 微服务调用（超时降级）；正文 `[n]` → 末尾引用块；无命中不编造 |
-| **技能调用（skill-center）** | agent→skill-center 第 3 个微服务；启动拉技能目录(快照)→技能包装成工具；NDJSON `SkillResultDTO` 流（思考/卡片/增量/算粒错误）经 UI 队列合并为 `skill_event` 实时流出 |
-| **SKILL 沙箱执行** | `agent/claude_skill/` 中的技能包（SKILL.md）作为**子代理在沙箱中执行**；沙箱 provider 抽象（LocalSandbox 可跑 / AgentBay 云桩）+ file/shell/code 服务；两契约（output→LLM / 事件→UI） |
-| **A2A 远程子代理** | ADK 原生 A2A（`a2a-sdk` + `RemoteA2aAgent` 客户端 + `to_a2a` 服务端）；`a2a_service`(:8300) 暴露 agent-card + JSON-RPC，skill-center 作注册表，agent 经 agent-card 发现 + 远程委派 |
+| **技能调用（skill-center）** | agent→skill-center 第 3 个微服务；启动拉技能目录(快照)→技能包装成工具；NDJSON `SkillResultDTO` 采用数据帧 `eof=false` + 独立空 EOF，缺 EOF/坏帧按协议错误处理；展示帧经 UI 队列合并为 `skill_event` |
+| **SKILL 沙箱执行** | `agent/claude_skill/` 中的技能包（SKILL.md）作为**子代理在沙箱中执行**；沙箱 provider 抽象（LocalSandbox 可跑 / AgentBay 云桩）+ file/shell/code 服务；独立 Runner 同样带工具参数分发前 guard |
+| **A2A 远程子代理** | ADK 原生 A2A（`a2a-sdk` + `RemoteA2aAgent` 客户端 + `to_a2a` 服务端）；远程调用是无父对话历史的新会话，因此工具声明要求 request 展开指代并携带完整上下文 |
 | **多模态** | 图片输入（ADK artifact + 视觉模型）；文档图片 caption 入库可检索 |
 | **流式 SSE** | `text / tool_call / tool_result / plan_step / citation / skill_event / done` 事件 |
 | **依赖倒置** | 存储中间件抽象成端口（local 向量持久化起步，可换 pgvector/ES/Neo4j） |
@@ -179,7 +180,7 @@ web/             内置浏览器 Chat UI（静态 HTML/JS/CSS）
 ## 面试脉络（talking points）
 
 1. **两代推理引擎的演进与取舍**：Plan-Execute（前置规划、可控可解释）vs Agent-Loop（动态 ReAct、强适应），统一端口、配置切换。
-2. **「用 ADK」不止调 Runner**：生产加固落在 ADK 的 **Plugin**（`before_model_callback` 续推/预算/force-summary、`on_tool_error_callback` 异常喂回）与 **LiteLlm 子类**（超长截断重试 / 异常分类 / 缓存断点 provider-aware）。
+2. **「用 ADK」不止调 Runner**：生产加固落在 ADK 的 **Plugin**（工具参数分发前短路、续推/预算/force-summary、异常喂回）与 **LiteLlm 子类/适配层**（非对象参数规范化、超长截断重试、异常分类、缓存断点 provider-aware）。
 3. **RAG 是混合召回 + RRF 融合的工程化**，不是单路 `similarity_search`；查询改写、低价值过滤、图片多模态入库。
 4. **依赖倒置**让存储中间件可演进（本地→pgvector/ES/Neo4j 零改业务）。
 5. **全链路流式与可观测**：SSE 增量、计划步骤/工具调用事件、trace_id 贯穿、结构化日志埋点；微服务边界含超时与降级。
@@ -198,4 +199,4 @@ web/             内置浏览器 Chat UI（静态 HTML/JS/CSS）
 
 准确定性是「**保留主链路形状 + 关键工程取舍**」，而非「完整保留所有生产逻辑」。判断是否新增或保留一项能力时，以它能否帮助理解 Agent Runtime、RAG、扩展机制、可靠性或评测为主要标准。
 
-> **两类工具失败模型**（面试可展开）：业务可预期失败由工具返回结构化错误（如 `calculator` / `knowledge_search` 降级）；框架级异常由 Plugin `on_tool_error_callback` 封装成 `function_response` 喂回模型、不中断 turn（可用 `simulate_unstable_operation(should_fail=true)` 现场演示）。
+> **工具失败模型**（面试可展开）：业务可预期失败由工具返回结构化错误；模型生成非对象参数时由 LiteLlm 适配层转换为 sentinel、Plugin 在分发前短路；框架级异常由 `on_tool_error_callback` 封装成 `function_response`。三类失败都反馈给模型续推，不直接中断 turn。
