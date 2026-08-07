@@ -54,4 +54,9 @@ def build_engine(ctx: "AgentContext") -> ReasoningEngine:
     if engine == "agent_loop":
         from agent.engine.agent_loop.agent_loop_engine import AgentLoopEngine
         return AgentLoopEngine(ctx)
+    if engine == "native_loop":
+        # Gen3：自研 Tool-Use 循环。与 agent_loop 的工具面、系统指令、SSE 契约完全一致，
+        # 区别只在"循环归谁驱动"——这里的 while 在我们自己手里，不经任何 Agent 框架。
+        from agent.engine.native_loop.engine import NativeLoopEngine
+        return NativeLoopEngine(ctx)
     raise ValueError(f"unknown ENGINE={engine}")

@@ -113,8 +113,15 @@ curl -X POST http://127.0.0.1:8100/v1/index/sample
 ### 5.2 agent（:8000）
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `ENGINE` | `agent_loop` | **推理引擎**：`agent_loop`（Tool-Use Agent Loop）\| `plan_execute`（先规划后执行） |
-| `MAX_LOOP_ITERS` | `8` | agent-loop 软收尾轮次（硬熔断 = 该值 + 2；同值 +2 也作 plan_execute 执行相硬熔断） |
+| `ENGINE` | `agent_loop` | **推理引擎**：`agent_loop`（ADK 驱动的 Tool-Use 循环）\| `plan_execute`（先规划后执行）\| `native_loop`（自研循环，不依赖 Agent 框架） |
+| `MAX_LOOP_ITERS` | `8` | loop 引擎软收尾轮次（硬熔断 = 该值 + 2；同值 +2 也作 plan_execute 执行相硬熔断） |
+| `SUB_AGENT_ENGINE` | `auto` | 子代理 / Claude SKILL 子 Runner 用哪一代循环：`auto`（跟随主引擎，`plan_execute` 视同 `adk`）\| `adk` \| `native`。**A2A 不受此项影响** |
+| `NATIVE_STREAMING_TOOL_EXEC` | `true` | native_loop：tool_call 一到就开跑。设 `false` 退化为「流完再统一跑工具」（排障安全阀） |
+| `NATIVE_MAX_TOOL_CONCURRENCY` | `10` | native_loop：单个并发批次内的最大并行工具数 |
+| `NATIVE_TOOL_RESULT_MAX_CHARS` | `8000` | native_loop：单条 tool_result 体积上限（超出就地截断，不丢消息） |
+| `CONTEXT_WINDOW_TOKENS` | `128000` | native_loop 压缩：有效上下文窗口（需与实际模型匹配） |
+| `COMPACT_BUFFER_TOKENS` | `13000` | native_loop 压缩：预留 buffer，阈值 = 窗口 − buffer |
+| `COMPACT_PRESERVE_UNITS` | `6` | native_loop 压缩：摘要后原样保留的尾部原子单元数 |
 | `AGENT_PORT` | `8000` | 端口 |
 | `AGENT_UUID` | `demo-agent` | 智能体标识（技能/A2A 调用上下文 tenantId） |
 | `ARAG_BASE_URL` | `http://127.0.0.1:8100` | arag 地址 |
@@ -158,11 +165,19 @@ curl -X POST http://127.0.0.1:8100/v1/index/sample
 ### 6.1 走哪种推理引擎 —— `ENGINE`
 - `ENGINE=agent_loop`（默认）：统一 **Tool-Use Agent Loop**，模型通过 `tool_use → tool_result` 迭代直到产出；带计划续推、工具异常喂回、force-summary、硬熔断、Agent-as-Tool/动态工具发现。
 - `ENGINE=plan_execute`：**先规划后执行**，decision planner 出计划 → execution planner 逐步执行；执行相同样带**工具异常喂回（ToolErrorFeedback）+ 框架硬熔断**，但**无**计划续推 / force-summary（那是 agent-loop 专属）。
+- `ENGINE=native_loop`：**自研 Tool-Use 循环**，以 Claude Code `query.ts:queryLoop()` 为蓝本，不依赖任何 Agent 框架 —— `while` 在 `agent/engine/native_loop/loop.py` 里。相比 `agent_loop` 多两件 ADK 插件面表达不了的能力：**按只读性分批的工具并发调度**、**流式工具执行**（tool_call 一到就开跑）；上下文治理是 CC 式的**阈值摘要压缩 + 413 反应式恢复**，而非硬裁头部。
 ```bash
 PY=.venv/bin/python
 ENGINE=plan_execute "$PY" -m uvicorn agent.main:app --port 8000
 ```
-> 两引擎共享同一套工具/检索/技能/citation 下游，以及 ToolErrorFeedback 插件与 LiteLlm 加固；切换只影响"如何编排"。
+```bash
+ENGINE=native_loop "$PY" -m uvicorn agent.main:app --port 8000
+```
+> 三引擎共享同一套工具面、系统指令、检索/技能/citation 下游与 SSE 契约；切换只影响"循环归谁驱动"。
+> `plan_execute` / `agent_loop` 的工具异常喂回与参数规范化走 ADK 插件 + LiteLlm 加固；
+> `native_loop` 自己拥有参数解析与异常喂回，因此**不需要** `tool_args_normalizer` 那套 ADK 私有符号补丁。
+
+> ⚠️ `native_loop` **尚未评测**。`eval/reports/` 下的所有数字来自 `agent_loop` / `plan_execute`，不得套用。
 
 ### 6.2 模型与 google-adk 接入 —— `LLM_*` / `DASHSCOPE_API_KEY`
 - 运行时基于 **Google ADK**（`Runner` + `LlmAgent`）；模型经 ADK **LiteLlm** 适配 → 任意 **OpenAI 兼容**端点。
@@ -189,6 +204,7 @@ Claude SKILL 作为主 Tool-Use Agent Loop 中的标准工具运行，不另设 
 ### 6.5 agent-loop 熔断 —— `MAX_LOOP_ITERS`
 - 软收尾在第 `MAX_LOOP_ITERS` 轮注入 force-summary；框架级硬熔断 = `MAX_LOOP_ITERS + 2`（`RunConfig.max_llm_calls`）。调小可观察熔断行为。
 - `plan_execute` 的执行相同样以 `MAX_LOOP_ITERS + 2` 作框架硬熔断（无 force-summary 软收尾）。
+- `native_loop` 用同一组数值：软收尾在第 `MAX_LOOP_ITERS` 轮注入 force-summary，硬熔断为 `MAX_LOOP_ITERS + 2`（循环自查，收口为 `error` 事件）。日志按 `[LoopControl]` 检索，每个续推点都带命名 transition（`next_turn` / `force_summary` / `reactive_compact_retry` / `hard_cap`）。
 
 ### 6.6 只跑部分能力（按需省服务）
 - 不起 `arag` → 知识问答自动降级纯对话（`[QaRetrieve] degraded`）。
@@ -256,7 +272,7 @@ curl -N -X POST $A -F 'query=用A2A数学专家精确计算 23*47' -F user_id=u1
 
 ### 目录速览
 ```
-agent/      引擎(engine/{plan_execute,agent_loop}) · 插件 · LLM · 工具(tools) · 引用(citation)
+agent/      引擎(engine/{plan_execute,agent_loop,native_loop,loop_tools}) · 插件 · LLM · 工具 · 引用
             技能链路(skills→skill-center) · 沙箱技能(claude_skill) · A2A(a2a) · 会话/多模态/可观测
 arag/       RAG：components/* + processor/* + store/*（存储端口）
 skillcenter/ 技能中心 + A2A 注册表

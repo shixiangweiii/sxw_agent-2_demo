@@ -85,6 +85,16 @@ class ClaudeSkillTool(BaseTool):
         self._coordinator = coordinator
         self._runtime_config = runtime_config
 
+    # 把技能包 frontmatter 的并发语义暴露成公开属性，供 native_loop 的工具分批调度读取
+    # （ADK 侧不看这两个属性，它的并发治理仍走 SkillExecutionCoordinator）。
+    @property
+    def concurrency_safe(self) -> bool:
+        return self._skill.parallel_safe
+
+    @property
+    def exclusive_resources(self) -> tuple[str, ...]:
+        return self._skill.exclusive_resources
+
     def _get_declaration(self) -> FunctionDeclaration:
         return FunctionDeclaration(
             name=self.name,

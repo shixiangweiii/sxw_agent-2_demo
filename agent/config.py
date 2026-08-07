@@ -18,8 +18,24 @@ class AgentSettings(BaseSettings):
     embedding_model: str = "text-embedding-v3"
 
     # --- Engine ---
-    engine: str = "agent_loop"            # plan_execute | agent_loop
+    engine: str = "agent_loop"            # plan_execute | agent_loop | native_loop
     max_loop_iters: int = 8
+    # 子代理 / 子 Runner（researcher、Claude SKILL 子 Runner）用哪一代循环。
+    # auto = 跟随主引擎（plan_execute 视同 adk）。A2A **不受本项影响**：
+    # 远端跑在 a2a_service 自己的 ADK 上，agent 侧开关改不了它。
+    sub_agent_engine: Literal["auto", "adk", "native"] = "auto"
+
+    # --- native_loop（自研 Tool-Use 循环，不依赖 Agent 框架）---
+    # 流式工具执行：tool_call 一到就开跑（CC 行为）。关掉即退化为"模型流结束后再统一跑工具"，
+    # 出问题时用它一键回退定位——两条路径共用同一套分批规则，只是投递时机不同。
+    native_streaming_tool_exec: bool = True
+    native_max_tool_concurrency: int = Field(default=10, gt=0)   # 对齐 CC 默认
+    native_tool_result_max_chars: int = Field(default=8000, gt=0)
+    # 上下文压缩（CC 式）：阈值 = 窗口 − buffer。buffer 取值对齐 CC 的 13k。
+    # 注意 context_window_tokens 需与实际所用模型匹配；估算逼近该值即触发摘要压缩。
+    context_window_tokens: int = Field(default=128000, gt=0)
+    compact_buffer_tokens: int = Field(default=13000, gt=0)
+    compact_preserve_units: int = Field(default=6, gt=0)          # 压缩后保留的尾部原子单元数
 
     # --- Services ---
     agent_port: int = 8000

@@ -1,4 +1,10 @@
-"""在独立 ADK 子 Runner 中执行一个完整 Claude SKILL 包。"""
+"""在独立子 Runner 中执行一个完整 Claude SKILL 包（策略外壳）。
+
+本文件只放**不该随引擎切换而复制**的策略：沙箱装载、两次 attempt 重试、
+instruction-first 合规判定、错误码分流、取消安全清理。
+"怎么驱动一轮子代理"被抽到 `skill_drivers.py`，由 ``SUB_AGENT_ENGINE`` 选择
+（adk = ADK InMemoryRunner / native = 自研循环），两个内核对外契约完全一致。
+"""
 from __future__ import annotations
 
 import asyncio
@@ -6,11 +12,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from google.adk.agents import LlmAgent
 from google.adk.agents.invocation_context import LlmCallsLimitExceededError
-from google.adk.agents.run_config import RunConfig, StreamingMode
-from google.adk.runners import InMemoryRunner
-from google.genai import types
 
 from agent.asyncio_utils import await_with_deferred_cancellation
 from agent.claude_skill.catalog import ClaudeSkill
@@ -28,9 +30,10 @@ from agent.claude_skill.sandbox.base import (
     SandboxError,
     SandboxUnavailableError,
 )
+from agent.claude_skill.skill_drivers import resolve_driver
 from agent.claude_skill.toolset import SkillToolsetState, build_sandbox_tools
-from agent.plugins.tool_args_guard_plugin import ToolArgsGuardPlugin
-from agent.stream.event_converters import StreamEvent, adk_event_to_stream_events
+from agent.config import get_settings
+from agent.stream.event_converters import StreamEvent
 from common.obs import get_logger, log_kv
 
 logger = get_logger("agent.claude_skill")
@@ -100,27 +103,6 @@ class SkillUiEmitter:
         await self.ui_emit(StreamEvent("skill_event", payload))
 
 
-def _terminal_text(event: Any, agent_name: str) -> str | None:
-    """只接受子 Agent 最后一轮、非 thought、无工具调用的聚合 model 文本。"""
-    content = getattr(event, "content", None)
-    if (
-        getattr(event, "author", None) != agent_name
-        or bool(getattr(event, "partial", False))
-        or content is None
-        or getattr(content, "role", None) != "model"
-        or not event.is_final_response()
-        or event.get_function_calls()
-        or event.get_function_responses()
-    ):
-        return None
-    text = "".join(
-        part.text
-        for part in (getattr(content, "parts", None) or [])
-        if getattr(part, "text", None) and not bool(getattr(part, "thought", False))
-    ).strip()
-    return text or None
-
-
 async def _run_attempt(
     *,
     skill: ClaudeSkill,
@@ -132,71 +114,24 @@ async def _run_attempt(
     emitter: SkillUiEmitter,
     state: SkillToolsetState,
 ) -> str | None:
+    """跑一次子代理。内核（ADK / 原生循环）由 SUB_AGENT_ENGINE 决定，策略不变。"""
+    settings = get_settings()
+    drive = resolve_driver(settings.sub_agent_engine, settings.engine)
     agent_name = f"skill_{skill.skill_id}".replace("-", "_")
-    agent = LlmAgent(
-        name=agent_name,
-        model=llm,
-        instruction=_SYSTEM_INSTRUCTION,
-        tools=build_sandbox_tools(sandbox, state),
-    )
-    message = types.Content(
-        role="user",
-        parts=[types.Part(text=(
+    return await drive(
+        agent_name=agent_name,
+        system_instruction=_SYSTEM_INSTRUCTION,
+        message_text=(
             f"技能根目录：skills/{skill.skill_id}\n"
             f"必须首先读取：{instruction_path}\n\n"
             f"待完成任务：\n{query}"
-        ))],
+        ),
+        tools=build_sandbox_tools(sandbox, state),
+        llm=llm,
+        max_llm_calls=config.max_llm_calls,
+        emit=emitter.emit,
+        close=_await_cleanup,
     )
-    final_text: str | None = None
-    runner = InMemoryRunner(
-        agent=agent,
-        app_name=_APP,
-        plugins=[ToolArgsGuardPlugin()],
-    )
-    runner_failed = False
-    try:
-        session = await runner.session_service.create_session(
-            app_name=_APP,
-            user_id="skill",
-        )
-        events = runner.run_async(
-            user_id="skill",
-            session_id=session.id,
-            new_message=message,
-            run_config=RunConfig(
-                streaming_mode=StreamingMode.SSE,
-                max_llm_calls=config.max_llm_calls,
-            ),
-        )
-        events_failed = False
-        try:
-            async for event in events:
-                candidate = _terminal_text(event, agent_name)
-                if candidate:
-                    final_text = candidate
-                for stream_event in adk_event_to_stream_events(event):
-                    # 子代理正文（含终局聚合文本）不进入 UI；主 Agent 是唯一最终答复者。
-                    if stream_event.event in {"tool_call", "tool_result"}:
-                        await emitter.emit(stream_event.event, stream_event.data)
-        except BaseException:
-            events_failed = True
-            raise
-        finally:
-            await _await_cleanup(
-                events.aclose(),
-                label="runner event stream close",
-                suppress_errors=events_failed,
-            )
-    except BaseException:
-        runner_failed = True
-        raise
-    finally:
-        await _await_cleanup(
-            runner.close(),
-            label="runner close",
-            suppress_errors=runner_failed,
-        )
-    return final_text
 
 
 async def run_skill(

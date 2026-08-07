@@ -12,7 +12,7 @@ from typing import Any, Optional
 from google.genai import types
 
 from agent.engine.agent_loop.message_budget import MessageBudget
-from agent.engine.agent_loop.task_plan_tool import TASK_PLAN_KEY, has_open_steps
+from agent.engine.loop_tools.task_plan_tool import TASK_PLAN_KEY, has_open_steps
 from common.obs import get_logger, log_kv
 
 logger = get_logger("agent.loop")

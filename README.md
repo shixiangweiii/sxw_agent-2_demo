@@ -127,7 +127,13 @@ curl -N -X POST http://127.0.0.1:8000/api/v1/chat/demo/stream \
   -F 'query=用A2A数学专家精确计算 23*47' -F user_id=u1 -F session_id=s1
 ```
 
-切换引擎：编辑 `.env` 的 `ENGINE=plan_execute|agent_loop`（默认 `agent_loop`）。
+切换引擎：编辑 `.env` 的 `ENGINE=plan_execute|agent_loop|native_loop`（默认 `agent_loop`）。
+
+三代引擎的对比轴是**循环归谁驱动**：`plan_execute` 前置规划、`agent_loop` 由 ADK 流程引擎驱动循环、
+`native_loop` 自己拥有那个 `while`（以 Claude Code `query.ts` 为蓝本，不依赖任何 Agent 框架）。
+三者共享同一套工具面、系统指令与 SSE 契约。
+
+> ⚠️ `native_loop` **尚未评测**：`eval/reports/` 下的数字全部来自 `agent_loop` / `plan_execute`，不可套用到它身上。
 
 ### Claude SKILL Agent-as-Tool
 
@@ -181,7 +187,9 @@ exclusive_resources: []
 
 ```
 agent/   ADK Agent 运行时
-  engine/{base, plan_execute/*, agent_loop/*}   两代引擎
+  engine/{base, plan_execute/*, agent_loop/*, native_loop/*}
+                                                三代引擎（native_loop 为自研循环）
+  engine/loop_tools/                            两代 loop 引擎共享的工具面与系统指令
   plugins/agent_invocation_plugin.py            循环加固插件
   llm/{hardened_litellm, chat, exceptions}      模型适配 + 加固
   tools/ citation/ stream/ session/ artifacts/  工具/引用/流/会话/多模态
