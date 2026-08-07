@@ -134,6 +134,11 @@ curl -X POST http://127.0.0.1:8100/v1/index/sample
 | `SKILL_MAX_LLM_CALLS` | `16` | 单个 Skill Agent 最大模型调用次数 |
 | `SKILL_MAX_PARALLEL_CALLS` | `2` | 进程内 Claude SKILL 最大并发调用数 |
 | `SKILL_RESULT_MAX_CHARS` | `8000` | 回灌主 Agent 的 Skill 结果最大字符数 |
+| `TRACE_ENABLED` | `true` | **结构化轨迹**总开关（关掉后埋点全部走空实现，零开销） |
+| `TRACE_PAYLOAD_LEVEL` | `full` | `none` \| `summary`（只留摘要 `{chars,sha1,head}`）\| `full`（完整模型输入）。**`full` 是本 demo 的调试取向默认值**，生产姿势应默认 `summary` |
+| `TRACE_DIR` | `local_storage/traces` | 轨迹落盘根目录（按日期分子目录，已被 gitignore） |
+| `TRACE_MAX_FIELD_CHARS` | `20000` | 单字段截断上限，防单条巨型工具结果撑爆轨迹 |
+| `TRACE_RETENTION_DAYS` | `7` | 启动时删除更早的日期目录；`0` = 不清理 |
 
 ### 5.3 arag（:8100）
 | 变量 | 默认 | 说明 |
@@ -206,13 +211,31 @@ Claude SKILL 作为主 Tool-Use Agent Loop 中的标准工具运行，不另设 
 - `plan_execute` 的执行相同样以 `MAX_LOOP_ITERS + 2` 作框架硬熔断（无 force-summary 软收尾）。
 - `native_loop` 用同一组数值：软收尾在第 `MAX_LOOP_ITERS` 轮注入 force-summary，硬熔断为 `MAX_LOOP_ITERS + 2`（循环自查，收口为 `error` 事件）。日志按 `[LoopControl]` 检索，每个续推点都带命名 transition（`next_turn` / `force_summary` / `reactive_compact_retry` / `hard_cap`）。
 
-### 6.6 只跑部分能力（按需省服务）
+### 6.6 结构化轨迹 —— `TRACE_*`
+
+一次请求 = 一棵 Span 树，回答日志回答不了的"**为什么**"：每轮模型真正看到的输入（含续推提醒 / force-summary / 压缩摘要）、token、耗时、工具参数与结果、检索质量（`rewrites` / `score` / `source`）。
+
+**落盘位置与命名**（凭文件名即可知何时执行）：
+
+```
+local_storage/traces/20260807/20260807-193951-0010-agent_loop-eval-kq-adk-01-r0.jsonl
+                     └日期目录  └日期──┘ └时分秒 └当日序号 └引擎  └trace_id
+```
+
+- span 关闭即追加一行，**进程被 kill 也留下可读的半截轨迹**；读侧靠 `parent_span_id` 重建树（root 在最后一行）。
+- 当日序号取自"启动时扫当日目录的最大值 + 1"，抗进程重启；多实例并跑时它是**本进程**计数，靠文件名里的引擎段与 trace_id 段保证不撞车。
+- 查询：`curl 'http://127.0.0.1:8000/api/v1/traces/<trace_id>?level=summary'`。评测经 `x-trace-id` 请求头指定可读 trace_id（`eval-<case>-r<rep>`），据此把 FAIL 记录接到具体轨迹上。
+
+> ⚠️ **`full` 级轨迹含用户原始提问与每轮模型完整输入**。`local_storage/` 已被 gitignore，但这些文件**不得随评测报告分发**；入库的只有 `eval/reports/<ts>/traces/` 下的 summary 级轨迹。
+> 图片/二进制在落盘前一律替换为占位摘要（不这么做的话，单条多模态轨迹会从 ~4 KB 涨到 ~2 MB）。
+
+### 6.7 只跑部分能力（按需省服务）
 - 不起 `arag` → 知识问答自动降级纯对话（`[QaRetrieve] degraded`）。
 - 不起 `skill-center` → skill-center 技能 + A2A 发现跳过（`[SkillCatalog]/[A2ALoad] load failed, skip`）。
 - 不起 `a2a_service` → A2A 工具在调用时报错喂回（不影响其它）。
 - SKILL 沙箱是**本地**能力，不依赖任何下游（代码目录为 `agent/claude_skill/`）。
 
-### 6.7 技能流与 A2A 调用约束
+### 6.8 技能流与 A2A 调用约束
 - skill-center 的 NDJSON 流必须以若干 `eof=false` 数据帧加一个 `eof=true, data=null` 独立结束帧收口；缺失 EOF、损坏帧或 `data+eof` 合帧会返回结构化协议错误，部分文本/卡片不会覆盖终止错误。
 - 技能错误采用 failure-sticky：首个失败帧的 `errorCode/errorMsg` 保留到模型可见的 function response，后续成功或失败帧不覆盖。框架错误码包括 `SKILL_HTTP_ERROR`、`SKILL_TRANSPORT_ERROR`、`SKILL_STREAM_EMPTY`、`SKILL_STREAM_INCOMPLETE`、`SKILL_PROTOCOL_ERROR`；上游失败未给错误码时使用 `SKILL_EXECUTION_ERROR`，相同错误码写入 `[SkillInvoke]` 结构化日志。
 - Claude SKILL 使用独立 `InMemoryRunner`，其沙箱工具也启用轻量 ToolArgsGuard；每次调用以标准、长度受限的 `tool_result` 回灌主 Agent，子 Agent 内部历史不进入父上下文。
@@ -258,6 +281,7 @@ curl -N -X POST $A -F 'query=用A2A数学专家精确计算 23*47' -F user_id=u1
 | agent | `POST /api/v1/chat/{agent_uuid}/stream` | SSE 对话入口 |
 | agent | `GET /chat-ui/` | 浏览器 Web Chat 界面 |
 | agent | `POST /api/v1/documents/index` | 文档入库代理（Web UI → agent → arag） |
+| agent | `GET /api/v1/traces/{trace_id}?level=summary\|full` | 结构化轨迹查询（先查内存，未命中读盘） |
 | agent | `GET /healthz` | 存活 + 当前 engine/model |
 | arag | `POST /v1/index/sample` · `POST /v1/index` | 入库样本 / 自定义文档 |
 | arag | `POST /v1/retrieve` · `POST /v1/rag` | 混合召回 / 端到端问答 |

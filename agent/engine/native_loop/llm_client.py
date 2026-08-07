@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+from asyncio import CancelledError
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Optional
 
@@ -24,6 +25,14 @@ from agent.config import AgentSettings
 from agent.engine.native_loop.messages import CHARS_PER_TOKEN, Msg, ToolCall, Usage, to_wire
 from agent.llm.exceptions import CONTEXT_OVERFLOW, classify_llm_error
 from common.obs import get_logger, log_kv
+from common.trace import (
+    KIND_LLM,
+    STATUS_CANCELLED,
+    STATUS_ERROR,
+    STATUS_OK,
+    close_span,
+    open_span,
+)
 
 logger = get_logger("agent.native")
 
@@ -206,32 +215,61 @@ class NativeLlmClient:
         # 关键词匹配可能漏判，此时用"请求体积是否已经逼近窗口"作为 provider 无关的旁证。
         request_chars = _payload_chars(payload)
 
-        emitted = False
+        # 轨迹埋点放在这一层而不是循环里：主循环、Claude SKILL 子 Runner、
+        # researcher 共用同一个客户端，埋在这里所有调用方一次性覆盖。
+        # 与 ADK 侧 `adk.llm` span 的字段刻意对齐（model / tokens / finish_reason /
+        # tool_calls），否则两代引擎的轨迹没法放在一张表里比。
+        #
+        # ★ 用 open_span 而不是 `with start_span`：后者会把 llm span 压进 contextvar，
+        #   而**流式工具执行**恰恰是在本流的迭代过程中 `asyncio.create_task` 投递的
+        #   （loop.py 的 ToolCallReady 分支），那些工具就会挂到 llm span 底下。
+        #   工具不是模型调用的一部分——它是本轮 turn 的一部分。不压 contextvar，
+        #   当前 span 就仍是 turn，工具因此挂在正确的位置，也与 ADK 侧的树形一致。
+        span = open_span(
+            "native.llm", KIND_LLM,
+            model=self._model, messages=len(messages),
+            tool_count=len(tools or []), request_chars=request_chars,
+        )
+        span.set_payload("messages", [m.to_wire() for m in messages])
+        status = STATUS_OK
         try:
-            async for item in self._consume(payload, allow_early_tool_dispatch):
-                emitted = True
-                yield item
-            return
-        except openai.BadRequestError as exc:
-            # 只有"上游不认 stream_options"这一种情况值得降级重试；
-            # 其余 400（比如消息结构非法）降级也救不回来，直接分类上抛。
-            # emitted 守卫：一旦已经吐过内容就绝不重试，否则会重复输出。
-            # stream_options 是在 create() 阶段被拒的，此时必然还没 emit 过。
-            if emitted or not (self._include_usage and _mentions_stream_options(exc)):
+            emitted = False
+            try:
+                async for item in self._consume(payload, allow_early_tool_dispatch):
+                    emitted = True
+                    yield _observe(span, item)
+                return
+            except openai.BadRequestError as exc:
+                # 只有"上游不认 stream_options"这一种情况值得降级重试；
+                # 其余 400（比如消息结构非法）降级也救不回来，直接分类上抛。
+                # emitted 守卫：一旦已经吐过内容就绝不重试，否则会重复输出。
+                # stream_options 是在 create() 阶段被拒的，此时必然还没 emit 过。
+                if emitted or not (self._include_usage and _mentions_stream_options(exc)):
+                    raise self._classify(exc, request_chars) from exc
+                self._include_usage = False
+                payload.pop("stream_options", None)
+                span.set(stream_options_downgraded=True)
+                log_kv(logger, logging.WARNING, "NativeLlm",
+                       "stream_options unsupported, retrying without usage")
+            except Exception as exc:  # noqa: BLE001 - 统一分类后上抛
                 raise self._classify(exc, request_chars) from exc
-            self._include_usage = False
-            payload.pop("stream_options", None)
-            log_kv(logger, logging.WARNING, "NativeLlm",
-                   "stream_options unsupported, retrying without usage")
-        except Exception as exc:  # noqa: BLE001 - 统一分类后上抛
-            raise self._classify(exc, request_chars) from exc
 
-        # 降级重试（不带 usage）。这次失败不再兜底。
-        try:
-            async for item in self._consume(payload, allow_early_tool_dispatch):
-                yield item
-        except Exception as exc:  # noqa: BLE001
-            raise self._classify(exc, request_chars) from exc
+            # 降级重试（不带 usage）。这次失败不再兜底。
+            try:
+                async for item in self._consume(payload, allow_early_tool_dispatch):
+                    yield _observe(span, item)
+            except Exception as exc:  # noqa: BLE001
+                raise self._classify(exc, request_chars) from exc
+        except GeneratorExit:
+            status = STATUS_CANCELLED
+            raise
+        except BaseException as exc:
+            status = STATUS_CANCELLED if isinstance(exc, CancelledError) else STATUS_ERROR
+            if status == STATUS_ERROR:
+                span.set(error_type=type(exc).__name__, error=str(exc)[:500])
+            raise
+        finally:
+            close_span(span, status)
 
     async def _consume(
         self, payload: dict[str, Any], allow_early: bool,
@@ -310,6 +348,25 @@ class NativeLlmClient:
         log_kv(logger, logging.ERROR, "NativeLlm", "model call failed",
                kind=kind, error=type(exc).__name__)
         return NativeLlmError(message, kind)
+
+
+def _observe(span: Any, item: StreamItem) -> StreamItem:
+    """把流经的项目记进 llm span，原样放行（不改变流的语义）。
+
+    正文只累计字符数：逐个 delta 记 event 会把 span 撑爆，而"这轮说了多少话"
+    才是和 tool_call 一起看的路由信号。
+    """
+    if isinstance(item, TextDelta):
+        span.incr("text_chars", len(item.text))
+    elif isinstance(item, ToolCallReady):
+        span.append("tool_calls", item.call.name)
+    elif isinstance(item, TurnEnd):
+        span.set(finish_reason=item.finish_reason)
+        if item.usage is not None:
+            span.set(prompt_tokens=item.usage.prompt_tokens,
+                     completion_tokens=item.usage.completion_tokens,
+                     total_tokens=item.usage.total_tokens)
+    return item
 
 
 def _to_usage(raw: Any) -> Usage:

@@ -23,10 +23,17 @@ class LoopController:
         self._max_iters = max(1, max_iters)
         self._budget = budget or MessageBudget()
         self._iter = 0
+        # 本轮注入了哪些循环控制提醒。插件在紧随其后开 turn span 时读走
+        # （见 plugins/agent_invocation_plugin.py）——force-summary / 计划续推
+        # 是三代引擎共有的循环控制信号，必须能进轨迹，评测才好归因"为什么收尾了"。
+        self.forced_summary = False
+        self.plan_continuation = False
 
     def before_model(self, callback_context: Any, llm_request: Any) -> None:
         # 本方法 = "每转一圈循环执行一次"。ADK 的 while 每步开头都会经过这里。
         self._iter += 1
+        self.forced_summary = False
+        self.plan_continuation = False
         # 1) 消息预算：主动裁掉过长历史，防止上下文随工具轮次膨胀。
         #    与 HardenedLiteLlm 里的"超长后截断重试"互补——一个预防，一个救火。
         self._budget.trim(llm_request)
@@ -42,12 +49,14 @@ class LoopController:
         # 有未完成步骤就提醒继续推进。`_iter > 1` 是为了避开第一轮——那时计划刚登记，
         # 立刻提醒"继续推进"没有意义反而干扰。
         if plan and has_open_steps(plan) and self._iter > 1:
+            self.plan_continuation = True
             self._inject(llm_request, "[系统提醒] 你有未完成的计划步骤，请继续推进；不要重复已完成步骤。")
 
         # 3) force-summary 软收尾：达到业务轮次上限，用一条系统消息"劝停"模型。
         #    这是软控制——模型仍需要至少再调用一次才能把最终答案写出来，
         #    所以框架硬熔断（max_llm_calls）要比这个值高 2，留出生效窗口。
         if self._iter >= self._max_iters:
+            self.forced_summary = True
             log_kv(logger, logging.WARNING, "LoopControl", "max iters reached, force summary",
                    iter=self._iter, max=self._max_iters)
             self._inject(llm_request,

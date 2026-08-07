@@ -69,6 +69,7 @@
 | **流式 SSE** | `text / tool_call / tool_result / plan_step / citation / skill_event / done` 事件 |
 | **依赖倒置** | 存储中间件抽象成端口（local 向量持久化起步，可换 pgvector/ES/Neo4j） |
 | **可观测性** | trace_id 全链路 + 结构化 JSON 日志 + `[Tag]` 埋点 |
+| **结构化轨迹** | 一次请求 = 一棵 Span 树（模型每轮真实输入 / token / 工具 / 检索质量），三代引擎同构；评测据此自动归因失败模式 |
 
 ---
 
@@ -204,7 +205,7 @@ arag/    混合召回 RAG 服务
   store/{vector_store,fulltext_index,graph_store,factory}   存储端口
 skillcenter/   技能中心（MCP 风格执行网关 + A2A 注册表）：{skills,api,a2a_api,main,config}
 a2a_service/   A2A 运行时（ADK to_a2a 暴露 math_expert 子代理）：{agents,main,config}
-common/{obs.py, skill_contract.py}    通用可观测性 + 技能线协议契约
+common/{obs.py, trace.py, skill_contract.py}   日志/trace_id · 结构化轨迹 · 技能线协议契约
 eval/            真实 LLM 黑盒评测、数据集、评分器与历史报告
 web/             内置浏览器 Chat UI（静态 HTML/JS/CSS）
 ```
@@ -218,7 +219,8 @@ web/             内置浏览器 Chat UI（静态 HTML/JS/CSS）
 3. **RAG 是混合召回 + RRF 融合的工程化**，不是单路 `similarity_search`；查询改写、低价值过滤、图片多模态入库。
 4. **依赖倒置**让存储中间件可演进（本地→pgvector/ES/Neo4j 零改业务）。
 5. **全链路流式与可观测**：SSE 增量、计划步骤/工具调用事件、trace_id 贯穿、结构化日志埋点；微服务边界含超时与降级。
-6. **Agent-as-Tool 而非额外编排器**：一个 Skill Agent 执行一个完整 SKILL 包；多 Skill 串并行仍由主 Tool-Use Agent Loop 动态决定，Runtime 只治理身份、并发、超时、取消和沙箱隔离。
+6. **可观测性要能驱动迭代**：日志说"发生了什么"，**结构化轨迹**（`common/trace.py`）说"为什么"——记录每轮模型真正看到的输入、token、工具与检索质量，让评测的 FAIL 直接接到证据上、按规则自动归因。三代引擎的 span 树刻意做成同构，避免"谁埋点更深"变成引擎对比里的假优势。
+7. **Agent-as-Tool 而非额外编排器**：一个 Skill Agent 执行一个完整 SKILL 包；多 Skill 串并行仍由主 Tool-Use Agent Loop 动态决定，Runtime 只治理身份、并发、超时、取消和沙箱隔离。
 
 > ⚠️ 诚实声明：PromptCache 的显式缓存断点为 Anthropic 专属，本 demo 默认 provider（DashScope/Qwen）下为 no-op。
 

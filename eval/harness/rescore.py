@@ -13,6 +13,18 @@ from typing import Any
 from eval.harness.runner import _passed, load_cases
 from eval.harness.scorers import routing_scorer, rule_scorer
 from eval.harness.sse_client import CollectedRun
+from eval.harness.trace_signals import label, summarize
+
+
+def _load_trace(out_dir: Path, stem: str) -> Any:
+    """读回与该 run 同名的 summary 轨迹；不存在则返回 None（老报告没有 traces/）。"""
+    path = out_dir / "traces" / f"{stem}.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def rescore(out_dir: Path, dataset: Path) -> None:
@@ -32,7 +44,7 @@ def rescore(out_dir: Path, dataset: Path) -> None:
         rule = rule_scorer.score(case, cr)
         judge = judge_by_key.get((cr.case_id, cr.engine), {})
         passed = _passed(routing, rule)
-        new_records.append({
+        rec = {
             "id": cr.case_id, "engine": cr.engine, "suite": case.get("suite"), "status": "scored",
             "query": case["query"], "answer": cr.text,
             "tool_calls": routing["all_tool_calls"], "capability_calls": routing["capability_calls"],
@@ -40,7 +52,14 @@ def rescore(out_dir: Path, dataset: Path) -> None:
             "had_error": cr.had_error, "finished": cr.finished, "transport_error": cr.transport_error,
             "routing": routing, "rule": rule, "judge": judge,
             "hard_gate_violations": rule["hard_gate_violations"], "passed": passed,
-        })
+        }
+        # 轨迹从已落盘的 traces/ 重读（与 runs/ 同名），不回连 agent——
+        # rescore 的契约就是"不产生任何网络调用"。
+        trace = _load_trace(out_dir, run_file.stem)
+        rec["trace_id"] = cr.trace_id
+        rec["trace"] = summarize(trace)
+        rec["failure_labels"] = label(case, rec, trace)
+        new_records.append(rec)
 
     with results_path.open("w", encoding="utf-8") as f:
         for r in new_records + na_records:

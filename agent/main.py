@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from agent.api.chat import router as chat_router
 from agent.api.documents import router as documents_router
+from agent.api.traces import router as traces_router
 from agent.config import get_settings
 from agent.context import (
     attach_a2a_agents,
@@ -23,9 +24,20 @@ from agent.context import (
     build_agent_context,
 )
 from common.obs import TraceMiddleware, get_logger, log_kv, setup_logging
+from common.trace import configure_tracing
 
 settings = get_settings()
 setup_logging(settings.log_level)
+# trace 与日志同为进程级基建，在这里一次性装好（形状对齐 setup_logging：
+# common/ 不反向依赖 agent.config，配置由入口注入）。engine 会进轨迹文件名。
+configure_tracing(
+    enabled=settings.trace_enabled,
+    payload_level=settings.trace_payload_level,
+    trace_dir=settings.trace_dir,
+    max_field_chars=settings.trace_max_field_chars,
+    retention_days=settings.trace_retention_days,
+    engine=settings.engine,
+)
 logger = get_logger("agent.main")
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -58,6 +70,7 @@ app = FastAPI(title="sxw-agent-runtime", version="0.1.0", lifespan=lifespan)
 app.add_middleware(TraceMiddleware, service="agent")
 app.include_router(chat_router)          # 主链路入口：POST /api/v1/chat/{uuid}/stream
 app.include_router(documents_router)     # Web UI 文档入库代理 → 转发给 arag /v1/index
+app.include_router(traces_router)        # 轨迹查询：评测据此把 FAIL 记录接到具体轨迹上
 app.mount("/chat-ui", StaticFiles(directory=WEB_DIR, html=True), name="chat-ui")
 
 

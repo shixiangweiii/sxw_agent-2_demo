@@ -17,7 +17,8 @@ from typing import Any
 from eval.harness.config import EvalConfig
 from eval.harness.preflight import preconditions_met, preflight
 from eval.harness.scorers import judge_scorer, routing_scorer, rule_scorer
-from eval.harness.sse_client import chat
+from eval.harness.sse_client import chat, fetch_trace
+from eval.harness.trace_signals import label, summarize
 
 _DATASET = Path("eval/dataset/cases.jsonl")
 
@@ -40,6 +41,9 @@ def run(cfg: EvalConfig, out_dir: Path, suite: str = "", only_arag_down: bool = 
         use_judge: bool = True, dataset: Path = _DATASET, repeat: int = 1) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "runs").mkdir(exist_ok=True)
+    # 入库的是 summary 级轨迹（骨架 + payload 摘要）；完整输入留在 agent 本机的
+    # local_storage/traces/（已 gitignore），由记录里的 trace_file 指过去。
+    (out_dir / "traces").mkdir(exist_ok=True)
     caps = preflight(cfg)
     (out_dir / "preflight.json").write_text(
         json.dumps(caps, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -84,6 +88,9 @@ def run(cfg: EvalConfig, out_dir: Path, suite: str = "", only_arag_down: bool = 
                 suffix = f".r{rep}" if repeat > 1 else ""
                 (out_dir / "runs" / f"{cid}.{cfg.engine}{suffix}.json").write_text(
                     json.dumps(asdict(cr), ensure_ascii=False, indent=2), encoding="utf-8")
+
+                # 捞轨迹并归因。失败返回 None（fetch_trace 内部吞掉异常）——
+                # 取不到轨迹绝不能影响评测结论，只是失去归因能力，由 no_trace 标签如实标注。
                 rec = {
                     "id": cid, "engine": cfg.engine, "suite": case.get("suite"), "rep": rep,
                     "status": "scored", "query": case["query"], "answer": cr.text,
@@ -94,10 +101,20 @@ def run(cfg: EvalConfig, out_dir: Path, suite: str = "", only_arag_down: bool = 
                     "routing": routing, "rule": rule, "judge": judge,
                     "hard_gate_violations": rule["hard_gate_violations"], "passed": passed,
                 }
+                trace = fetch_trace(cfg, cr.trace_id)
+                if trace is not None:
+                    (out_dir / "traces" / f"{cid}.{cfg.engine}{suffix}.json").write_text(
+                        json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
+                rec["trace_id"] = cr.trace_id
+                rec["trace"] = summarize(trace)
+                rec["failure_labels"] = label(case, rec, trace)
+
                 out.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 out.flush()
                 flag = "PASS" if passed else "FAIL"
                 extra = "" if passed else f"  gates={rule['hard_gate_violations']} miss={routing['must_missing']} unexp={routing['unexpected_tools']} af={rule['assert_fails']}"
+                labels = rec["failure_labels"]
+                extra += f"  labels={labels}" if labels and not passed else ""
                 rtag = f" r{rep}" if repeat > 1 else ""
                 print(f"  - {cid:22s}{rtag} {flag}  tools={routing['capability_calls']}{extra}")
 

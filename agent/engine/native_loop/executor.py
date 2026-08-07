@@ -31,6 +31,7 @@ from agent.engine.native_loop.tools import (
     call_tool,
 )
 from common.obs import get_logger, log_kv
+from common.trace import KIND_TOOL, start_span
 
 logger = get_logger("agent.native")
 
@@ -117,40 +118,52 @@ async def execute_one(
     state: dict[str, Any],
 ) -> ToolOutcome:
     """执行单个工具调用。**本函数永不抛异常**（CancelledError 除外，由上层处理）。"""
-    spec = registry.get(call.name)
-    if spec is None:
-        log_kv(logger, logging.WARNING, "ToolCall", "no such tool", tool=call.name)
-        return _error_outcome(
-            call,
-            f"NoSuchTool: 不存在名为 {call.name} 的工具。",
-            "请从可用工具列表中重新选择；不要中断对话。",
+    # span 字段与 ADK 侧 `tool.<name>` 逐个对齐（tool / failure / error_type），
+    # 否则评测的失败归因规则得为两代引擎各写一套。
+    with start_span(f"tool.{call.name}", KIND_TOOL,
+                    tool=call.name, call_id=call.id or None) as span:
+        spec = registry.get(call.name)
+        if spec is None:
+            log_kv(logger, logging.WARNING, "ToolCall", "no such tool", tool=call.name)
+            span.set(failure="no_such_tool").set_status("error")
+            return _error_outcome(
+                call,
+                f"NoSuchTool: 不存在名为 {call.name} 的工具。",
+                "请从可用工具列表中重新选择；不要中断对话。",
+            )
+
+        args, parse_error = parse_arguments(call)
+        if args is None:
+            log_kv(logger, logging.WARNING, "ToolArgumentsParseError",
+                   "invalid arguments blocked before dispatch",
+                   tool=call.name, error=parse_error)
+            span.set(failure="args_parse_error", error_type=parse_error).set_status("error")
+            span.set_payload("raw_arguments", call.arguments)
+            return _error_outcome(call, _ARGS_ERROR, _ARGS_ERROR_HINT)
+
+        span.set(concurrency_safe=spec.concurrency_safe)
+        span.set_payload("args", args)
+        ctx = NativeToolContext(
+            function_call_id=call.id or f"call_{uuid.uuid4().hex}",
+            invocation_id=invocation_id,
+            state=state,
         )
+        log_kv(logger, logging.INFO, "ToolCall", "invoke", tool=call.name, call_id=call.id)
+        try:
+            response = await call_tool(spec, args, ctx)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 这正是"工具异常喂回、不中断 turn"的落点
+            log_kv(logger, logging.WARNING, "ToolErrorFeedback", "tool raised, feeding back",
+                   tool=call.name, error=type(exc).__name__)
+            span.set(failure="tool_raised", error_type=type(exc).__name__,
+                     error=str(exc)[:500]).set_status("error")
+            return _error_outcome(call, f"{type(exc).__name__}: {exc}", _TOOL_ERROR_HINT)
 
-    args, parse_error = parse_arguments(call)
-    if args is None:
-        log_kv(logger, logging.WARNING, "ToolArgumentsParseError",
-               "invalid arguments blocked before dispatch",
-               tool=call.name, error=parse_error)
-        return _error_outcome(call, _ARGS_ERROR, _ARGS_ERROR_HINT)
-
-    ctx = NativeToolContext(
-        function_call_id=call.id or f"call_{uuid.uuid4().hex}",
-        invocation_id=invocation_id,
-        state=state,
-    )
-    log_kv(logger, logging.INFO, "ToolCall", "invoke", tool=call.name, call_id=call.id)
-    try:
-        response = await call_tool(spec, args, ctx)
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - 这正是"工具异常喂回、不中断 turn"的落点
-        log_kv(logger, logging.WARNING, "ToolErrorFeedback", "tool raised, feeding back",
-               tool=call.name, error=type(exc).__name__)
-        return _error_outcome(call, f"{type(exc).__name__}: {exc}", _TOOL_ERROR_HINT)
-
-    log_kv(logger, logging.INFO, "ToolCall", "done", tool=call.name, call_id=call.id)
-    return ToolOutcome(call=call, message=_result_message(call, response, ok=True),
-                       response=response, ok=True)
+        log_kv(logger, logging.INFO, "ToolCall", "done", tool=call.name, call_id=call.id)
+        span.set_payload("result", response)
+        return ToolOutcome(call=call, message=_result_message(call, response, ok=True),
+                           response=response, ok=True)
 
 
 def cancelled_outcome(call: ToolCall) -> ToolOutcome:

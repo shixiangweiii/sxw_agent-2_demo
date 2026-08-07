@@ -22,7 +22,9 @@ from agent.skills.request_context import (
     set_request_context,
 )
 from agent.stream.event_converters import StreamEvent, sse_format
+from agent.stream.trace_tap import with_trace_tap
 from common.obs import get_logger, log_kv
+from common.trace import KIND_REQUEST, start_span
 
 router = APIRouter(prefix="/api/v1", tags=["chat"])
 logger = get_logger("agent.chat")
@@ -87,12 +89,25 @@ async def chat_stream(
             text=query, user={"userId": user_id},
         ))
         try:
-            # 这一行是整条主链路的中枢，从里往外读：
-            #   engine.run_stream(run_ctx) → 驱动 ADK Runner 做推理，吐出统一 StreamEvent
-            #   with_citations(...)        → 途中记录检索命中、扫描正文 [n]，在 done 前补 citation 事件
-            #   sse_format(se)             → StreamEvent → "event: xxx\ndata: {...}\n\n" 文本帧
-            async for se in with_citations(engine.run_stream(run_ctx)):
-                yield sse_format(se)
+            # ★ root span 必须在这里进入——即在 merge_runner_events 起 pump task 之前。
+            #   span 父子关系走 contextvar，而 asyncio.create_task 是在**创建那一刻**复制
+            #   context 的；晚一步进入，引擎内部所有 span 就会挂在 root 之外（甚至无父）。
+            with start_span(
+                "chat.request", KIND_REQUEST,
+                agent=agent_uuid, engine=ctx.settings.engine,
+                user_id=user_id, session_id=session_id,
+                has_image=image is not None,
+            ) as root_span:
+                root_span.set_payload("query", query)
+                # 这一行是整条主链路的中枢，从里往外读：
+                #   engine.run_stream(run_ctx) → 驱动推理，吐出统一 StreamEvent
+                #   with_citations(...)        → 途中记录检索命中、扫描正文 [n]，在 done 前补 citation 事件
+                #   with_trace_tap(...)        → 记进轨迹并给 done 补 trace_id；包在最外层才看得见 citation
+                #   sse_format(se)             → StreamEvent → "event: xxx\ndata: {...}\n\n" 文本帧
+                async for se in with_trace_tap(
+                    with_citations(engine.run_stream(run_ctx)), root_span,
+                ):
+                    yield sse_format(se)
         except Exception as exc:  # noqa: BLE001 - 兜底为 error 事件，保证流可收口
             # 走到这里说明推理链路抛了未被下层接住的异常（如硬熔断 LlmCallsLimitExceededError）。
             # HTTP 200 已经发出去了，改不了状态码，所以只能以 error 事件形式告知客户端并正常收流。

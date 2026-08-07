@@ -132,12 +132,21 @@ Claude SKILL 采用 **Agent-as-Tool**：一个 Skill Agent 只执行一个 SKILL
 ### 流式与可观测
 统一 SSE 事件：`text · tool_call · tool_result · plan_step · citation · skill_event · done · error`。`common/obs.py` 提供 `trace_id` 全链路透传 + 结构化 JSON 日志；日志按 `[Tag]` 前缀检索（`[QaRetrieve]` `[SkillInvoke]` `[ClaudeSkill]` `[A2ALoad]` `[LoopControl]` …）。`common/skill_contract.py` 是技能线协议契约。
 
+**结构化轨迹（`common/trace.py`）**：日志回答"发生了什么"，轨迹回答"**为什么**"。一次请求 = 一棵 Span 树（`request / plan / turn / llm / tool / retrieval / compact`），记录每轮模型**真正看到的输入**（含续推提醒、force-summary、压缩摘要）、token、耗时、工具参数与结果、检索质量信号。落盘为 `local_storage/traces/<YYYYMMDD>/<日期>-<时分秒>-<当日序号>-<引擎>-<trace_id>.jsonl`（span 关闭即追加一行，进程被 kill 也留下可读的半截轨迹）。查询走 `GET /api/v1/traces/{trace_id}?level=summary|full`。
+
+- **埋点分布**：`chat.py` 的 root span + SSE 旁路（引擎无关，一处覆盖三代）；`AgentInvocationPlugin`（**同时覆盖 agent_loop 与 plan_execute**）；`native_loop` 的 loop/llm_client/executor。三代引擎的 span 树**同构**——`plan_execute` 仅多一个 `plan.decision`。
+- ⚠️ **诚实边界**：ADK 的插件回调是离散点，`adk.turn` 的边界靠"下一次 before_model / run 结束"**推断**，duration 略失真；`native.turn` 是循环体内真实的一圈。比较两代耗时时须知道这个差别。
+- ⚠️ `after_model_callback` 在 ADK 流式循环**内部**触发（每个增量块一次），必须按 `partial` 过滤，否则一轮会产出几十个 llm span。
+- 图片/二进制在落盘前一律替换为占位摘要（约定同 `native_loop/compact.py::_render_content`）；不做这件事的话，单条多模态轨迹会从 ~4 KB 涨到 ~2 MB。
+- `trace_id` 是**客户端可控**的（`TraceMiddleware` 采纳 `x-trace-id`），进文件名前必须走白名单净化——这是评测建立联查键的同一条路径。
+
 ## 项目特定约定与坑
 
 - **配置**：每个服务用 `pydantic-settings` 读取**同目录 `.env`**（字段名大写即环境变量名，真实环境变量优先）。改 `.env` 后须**重启对应服务**才生效。密钥 `DASHSCOPE_API_KEY` 切勿提交。
 - **换模型/换厂商**只改 `LLM_MODEL` / `LLM_BASE_URL` / `DASHSCOPE_API_KEY`（内部用 `openai/<LLM_MODEL>` 走 litellm 的 openai 兼容 provider）。
 - **A2A 依赖精确锁定**：`google-adk[a2a]==2.6.2`、`a2a-sdk==1.1.2`。ADK 的 A2A 仍标 EXPERIMENTAL，导入有 `UserWarning` 属正常。
 - **ADK 私有契约须随版本审计**：工具参数 shim 依赖 LiteLlm 私有转换切面，`ClaudeSkillTool._detect_error_in_response` 依赖 function flow 的动态 telemetry hook。仓库精确 pin `google-adk==2.6.2`；私有符号不匹配应启动失败而非静默降级。
+- **trace 落盘含用户原始提问与每轮模型完整输入**（`TRACE_PAYLOAD_LEVEL=full` 为本 demo 的调试取向默认值）。`local_storage/` 已被 gitignore，但这些文件**不得随评测报告分发**；入库的只有 `eval/reports/<ts>/traces/` 下的 summary 级轨迹。
 - **熔断**：`MAX_LOOP_ITERS`（默认 8）是 loop 引擎软收尾轮次；硬熔断 = 该值 + 2。`agent_loop`/`plan_execute` 靠 `RunConfig.max_llm_calls`（抛 `LlmCallsLimitExceededError`），`native_loop` 是循环自查后收口为 `error` 事件。
 - **子引擎切换**：`SUB_AGENT_ENGINE=auto|adk|native` 决定 researcher 与 **Claude SKILL 子 Runner** 用哪一代循环（`auto` 跟随主引擎，`plan_execute` 视同 `adk`）。**A2A 不受此项影响**——远端跑在 `a2a_service` 自己的 ADK 上，agent 侧开关改不了它。
 - **ADK `AgentTool` 在 native_loop 下必须走桥接**：`AgentTool.run_async` 硬依赖 `tool_context._invocation_context`（取 user_id / credential_service / plugin_manager），鸭子类型 shim 满足不了。`build_registry` 会自动识别并改走 `agent/engine/native_loop/adk_bridge.py`（自建子 Runner）。新增 ADK 原生工具时注意这条，否则表现为「该工具永远失败」。

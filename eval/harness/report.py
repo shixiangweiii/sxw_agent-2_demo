@@ -101,6 +101,28 @@ def aggregate(out_dir: Path) -> dict[str, Any]:
     metrics["hard_gate_violations"] = hard_violations
     metrics["manual_spot_check"] = spot_check
 
+    # 轨迹归因：把"哪条 FAIL"接到"为什么 FAIL"。
+    # 标签分布对**全部**记录统计（PASS 的用例也可能带 retrieval_degraded 这类风险标签），
+    # 逐条清单只列 FAIL —— 那才是要动手改的。
+    label_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    failure_detail: list[dict[str, Any]] = []
+    for r in scored:
+        labels = r.get("failure_labels") or []
+        for lb in labels:
+            label_counts[r["engine"]][lb] += 1
+        if not r.get("passed"):
+            tr = r.get("trace") or {}
+            failure_detail.append({
+                "id": r["id"], "engine": r["engine"], "suite": r.get("suite"),
+                "rep": r.get("rep", 0), "labels": labels,
+                "turns": tr.get("turns"), "tools": tr.get("tool_calls"),
+                "finish_reason": tr.get("finish_reason"),
+                "total_tokens": tr.get("total_tokens"),
+                "trace_id": r.get("trace_id"), "trace_file": tr.get("trace_file"),
+            })
+    metrics["failure_labels"] = {e: dict(c) for e, c in label_counts.items()}
+    metrics["failure_detail"] = failure_detail
+
     # 稳定性（reps>1 才有意义）：按 (engine,id) 看各 rep 间 pass 与路由是否一致
     grp: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for r in scored:
@@ -175,6 +197,33 @@ def write_summary(out_dir: Path, metrics: dict[str, Any]) -> None:
                 lines.append(f"- `{s['id']}` [{s['engine']}] pass {s['pass_k']}/{s['reps']} · 路由分布={s['distinct_routes']}")
         else:
             lines.append("- ✅ 所有用例在各 rep 间一致（pass 与路由均稳定）")
+        lines.append("")
+    lines.append("## 失败归因（来自服务端轨迹，规则判定）")
+    lines.append("")
+    if metrics.get("failure_detail"):
+        lines.append("| 用例 | 引擎 | 标签 | 轮次 | 工具序列 | 收口 | tokens | 轨迹 |")
+        lines.append("|---|---|---|--:|---|---|--:|---|")
+        for f in metrics["failure_detail"]:
+            tools = " → ".join(f.get("tools") or []) or "-"
+            labels = " · ".join(f.get("labels") or []) or "-"
+            trace_ref = f.get("trace_file") or f.get("trace_id") or "-"
+            lines.append(
+                f"| `{f['id']}` | {f['engine']} | **{labels}** | {f.get('turns') or '-'} | "
+                f"{tools} | {f.get('finish_reason') or '-'} | {f.get('total_tokens') or '-'} | "
+                f"`{trace_ref}` |")
+    else:
+        lines.append("- ✅ 无失败用例")
+    lines.append("")
+    if metrics.get("failure_labels"):
+        lines.append("标签分布（含 PASS 用例的风险标签）：")
+        lines.append("")
+        for engine, counts in metrics["failure_labels"].items():
+            parts = " · ".join(f"{k}×{v}" for k, v in sorted(counts.items()))
+            lines.append(f"- **{engine}**：{parts or '（无）'}")
+        lines.append("")
+        lines.append("> 标签只用三代引擎都会产出的轨迹字段判定（turn / tool / retrieval span "
+                     "与 root 的 finish_reason）；`context_compacted` 为 native_loop 专属，"
+                     "仅作补充说明，不参与引擎对比。`no_trace` = 轨迹未取到，此时无归因能力。")
         lines.append("")
     lines.append("## 人工抽检清单（裁判自报风险点，需人工确认）")
     lines.append("")

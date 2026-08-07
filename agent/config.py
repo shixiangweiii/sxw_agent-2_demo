@@ -57,6 +57,16 @@ class AgentSettings(BaseSettings):
     skill_max_parallel_calls: int = Field(default=2, gt=0)
     skill_result_max_chars: int = Field(default=8000, gt=0)
 
+    # --- trace 可观测（结构化轨迹，供评测结合轨迹定位失败原因）---
+    # payload_level=full 会把每轮模型的完整输入落盘，是**本 demo 的调试取向默认值**；
+    # 生产姿势应默认 summary + 采样。图片/二进制在落盘前一律替换为占位摘要
+    # （见 common/trace.py::redact），否则单条多模态轨迹会冲到数 MB。
+    trace_enabled: bool = True
+    trace_payload_level: Literal["none", "summary", "full"] = "full"
+    trace_dir: str = "local_storage/traces"
+    trace_max_field_chars: int = Field(default=20000, gt=0)   # 单字段截断，防巨型工具结果
+    trace_retention_days: int = Field(default=7, ge=0)        # 0 = 不清理
+
     log_level: str = "INFO"
 
 

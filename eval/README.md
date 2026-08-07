@@ -184,8 +184,9 @@ eval/
 ├── harness/                   # 【执行阶段实现】
 │   ├── config.py              # 端点/引擎/裁判模型；Key 仅读 env
 │   ├── preflight.py           # 能力预检：探活 arag/skill-center/a2a → 标 case N/A
-│   ├── sse_client.py          # 发请求 + 解析 SSE → CollectedRun
+│   ├── sse_client.py          # 发请求 + 解析 SSE → CollectedRun；按 trace_id 回捞轨迹
 │   ├── signals.py             # 从事件抽取路由/引用/答案/时延信号
+│   ├── trace_signals.py       # 从服务端轨迹抽取失败模式标签（§8.2）
 │   ├── scorers/
 │   │   ├── routing_scorer.py  # D1
 │   │   ├── rule_scorer.py     # D2 规则 + D3 引用 + 硬门
@@ -193,7 +194,7 @@ eval/
 │   ├── runner.py              # 编排：cases × engine → 跑 → 评分 → 落盘
 │   └── report.py              # 聚合 → summary.md / metrics.json / results.jsonl
 ├── run_eval.sh                # 【执行阶段】两引擎两 pass + 鲁棒性 pass
-└── reports/<timestamp>/       # 输出
+└── reports/<timestamp>/       # 输出（含 runs/ 黑盒事件流 + traces/ 白盒轨迹）
 ```
 
 **`CollectedRun`（sse_client 产物，每次请求一份）**
@@ -292,10 +293,37 @@ harness `--engine agent_loop|plan_execute` 选对应端口，只跑 `engines` �
 
 `reports/<timestamp>/`：
 
-- `summary.md` —— 人读总表：各 suite × 引擎的 D1–D7 指标 + 硬门违规清单 + 引擎 delta + 人工抽检清单（judge 自报风险点）。
-- `metrics.json` —— 机读聚合（便于趋势追踪/回归对比）。
-- `results.jsonl` —— 每条 case 一行：`{id, engine, status, tool_calls, citations, answer, scores{...}, passed, hard_gate_violations[]}`。
-- `runs/<case_id>.<engine>.json` —— 原始事件流（复盘用）。
+- `summary.md` —— 人读总表：各 suite × 引擎的 D1–D7 指标 + 硬门违规清单 + 引擎 delta + **失败归因表** + 人工抽检清单（judge 自报风险点）。
+- `metrics.json` —— 机读聚合（便于趋势追踪/回归对比），含 `failure_labels` / `failure_detail`。
+- `results.jsonl` —— 每条 case 一行：`{id, engine, status, tool_calls, citations, answer, scores{...}, passed, hard_gate_violations[], trace_id, trace{...}, failure_labels[]}`。
+- `runs/<case_id>.<engine>.json` —— 原始 SSE 事件流（黑盒复盘用）。
+- `traces/<case_id>.<engine>.json` —— **summary 级服务端轨迹**（白盒复盘用）。
+
+### 8.1 轨迹联查（把「哪条 FAIL」变成「为什么 FAIL」）
+
+黑盒 SSE 看不到模型输入，所以首版报告里两条失败的归因只能靠人肉读事件流（见 `reports/20260629-090605/ANALYSIS.md` §4）。现在 harness 主动指定 `x-trace-id` 请求头，服务端据此产出结构化轨迹：
+
+- **联查键是 `(engine, trace_id)` 复合键**。trace_id 形如 `eval-<case_id>-r<rep>`，同一条 case 会分别发给两个引擎实例，单靠 trace_id **不唯一**；`results.jsonl` 里 `engine` 是独立字段，天然成立。
+- `results.jsonl` 的 `trace.trace_file` 指向 agent 本机的 **full 级**轨迹（含每轮模型完整输入），不做二次拷贝——前提是 harness 与 agent 同机（本项目本来就是本地跑）。
+- 取轨迹失败**绝不影响评测结论**，只是失去归因能力，由 `no_trace` 标签如实标注。
+
+### 8.2 失败模式标签（规则判定，无需 LLM）
+
+| 标签 | 含义 |
+|---|---|
+| `under_routing` | 知识型题目（有黄金引用）整轮没发起过检索 —— 首版 `kq-rag-01` 就是这个模式 |
+| `retrieval_degraded` / `retrieval_empty` | arag 不可用 / 检索到 0 条 |
+| `retrieval_low_score` | 最好的命中在任一路召回里都排到 10 名开外（阈值按 RRF 量纲 `1/(60+rank)` 推导） |
+| `tool_error_recovered` / `tool_error_fatal` | 工具报错后喂回恢复 / 整轮真的塌了 |
+| `args_parse_error` | 模型生成的工具参数不是合法对象，被 sentinel 拦下 |
+| `sub_agent_failed` | researcher / Claude SKILL / A2A 委派失败 |
+| `force_summary_hit` · `hard_cap_hit` · `model_error` · `stream_unfinished` | 循环控制与收口异常 |
+| `context_compacted` | 触发过上下文压缩（**native_loop 专属，仅作补充说明，不参与引擎对比**） |
+| `no_trace` | 轨迹未取到，此时无归因能力 |
+
+> **纪律**：判定只用三代引擎都会产出的轨迹字段（`turn` / `tool` / `retrieval` span 与 root 的 `finish_reason`）。否则"谁埋点更深"会变成引擎对比里的假优势——与 §10 的"引擎工具面不对称"是同一类有效性威胁。
+>
+> **已知缺口**：模型"绕过业务限制换条路"（如 `rb-quota-01` 在算粒不足后改用 deferred `translate`）目前**没有专门标签**——工具没抛错，只是返回了业务错误。该模式由路由评分器的 `unexpected_tools` 捕获，失败归因表里也能从工具序列看出来。
 
 `summary.md` 模板骨架：
 
@@ -365,6 +393,7 @@ open eval/reports/<timestamp>/summary.md
 | 数据集（24 case / 6 suite，接地真实工具名与知识库） | `eval/dataset/cases.jsonl` | ✅ 已就绪 |
 | LLM 裁判提示词（faithfulness/relevance/honesty） | `eval/rubric/judge-prompts.md` | ✅ 已就绪 |
 | 评测框架 harness（含 scorers/runner/report/rescore） | `eval/harness/*` | ✅ 已实现 |
+| 轨迹联查与失败自动归因（§8.1 / §8.2） | `eval/harness/trace_signals.py` + `common/trace.py` | ✅ 已实现；**首版报告产出于该能力之前，其 `reports/` 下没有 `traces/`** |
 | 一键执行脚本 | `eval/run_eval.sh` | ✅ 已实现 |
 | 评测报告 | `eval/reports/20260629-090605/` | ✅ **首版已产出** |
 

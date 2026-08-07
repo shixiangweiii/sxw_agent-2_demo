@@ -47,6 +47,7 @@ from agent.llm.chat import AgentChatClient
 from agent.stream.event_converters import StreamEvent
 from agent.tool_args_contract import TaskPlanArgumentsError, normalize_task_plan_args
 from common.obs import get_logger, log_kv
+from common.trace import KIND_COMPACT, KIND_TURN, current_span, start_span
 
 logger = get_logger("agent.native")
 
@@ -151,123 +152,145 @@ class NativeLoop:
                     yield ev
                 return
 
-            # ── 主动压缩：估算逼近窗口上限就先摘要，别等真的 413 ─────────
-            await self._maybe_proactive_compact(state)
+            # ★ 一轮 = 一个 turn span。必须用 `with` 而不是手动 open/close：
+            #   span 父子关系走 contextvar，而流式提前投递的工具是在本作用域里
+            #   `asyncio.create_task` 出去的（context 在创建那一刻复制）——
+            #   只有本轮 turn 正躺在 contextvar 里，那些工具 span 才会挂到正确的轮次下。
+            #   这也是 native_loop 的 turn 边界**真实**、而 ADK 侧只能靠回调推断的原因。
+            with start_span("native.turn", KIND_TURN, iter=state.iters) as turn_span:
+                # ── 主动压缩：估算逼近窗口上限就先摘要，别等真的 413 ─────────
+                await self._maybe_proactive_compact(state)
 
-            request_messages = self._build_request(state)
+                request_messages = self._build_request(state)
+                turn_span.set(request_messages=len(request_messages))
 
-            # ── 调模型：边流边产 text，同时累积 tool_call ────────────────
-            text_parts: list[str] = []
-            ready_calls: list[ToolCall] = []
-            early_tasks: list[tuple[ToolCall, asyncio.Task[executor.ToolOutcome]]] = []
-            deferred_calls: list[ToolCall] = []
-            early_allowed = cfg.streaming_tool_exec
-            finish_reason: Optional[str] = None
+                # ── 调模型：边流边产 text，同时累积 tool_call ────────────────
+                text_parts: list[str] = []
+                ready_calls: list[ToolCall] = []
+                early_tasks: list[tuple[ToolCall, asyncio.Task[executor.ToolOutcome]]] = []
+                deferred_calls: list[ToolCall] = []
+                early_allowed = cfg.streaming_tool_exec
+                finish_reason: Optional[str] = None
 
-            try:
-                async for item in self._client.stream(
-                    messages=request_messages,
-                    tools=self._registry.wire_declarations() or None,
-                    allow_early_tool_dispatch=cfg.streaming_tool_exec,
-                ):
-                    if isinstance(item, TextDelta):
-                        text_parts.append(item.text)
-                        yield StreamEvent("text", {"delta": item.text})
-                    elif isinstance(item, ToolCallReady):
-                        ready_calls.append(item.call)
-                        for ev in self._call_events(item.call):
+                try:
+                    async for item in self._client.stream(
+                        messages=request_messages,
+                        tools=self._registry.wire_declarations() or None,
+                        allow_early_tool_dispatch=cfg.streaming_tool_exec,
+                    ):
+                        if isinstance(item, TextDelta):
+                            text_parts.append(item.text)
+                            yield StreamEvent("text", {"delta": item.text})
+                        elif isinstance(item, ToolCallReady):
+                            ready_calls.append(item.call)
+                            for ev in self._call_events(item.call):
+                                yield ev
+                            # 流式工具执行：只要目前为止的调用全是并发安全的，就立刻开跑。
+                            # 一旦出现非安全工具，之后的一律推迟到流结束后按批次串行执行——
+                            # 这样恰好保住 CC `partitionToolCalls` 的"并发前缀 + 顺序其余"语义。
+                            if early_allowed and self._is_concurrency_safe(item.call):
+                                turn_span.incr("early_dispatched")
+                                early_tasks.append((item.call, asyncio.create_task(
+                                    self._execute(item.call, state),
+                                )))
+                            else:
+                                early_allowed = False
+                                deferred_calls.append(item.call)
+                        elif isinstance(item, TurnEnd):
+                            finish_reason = item.finish_reason
+                            if item.usage is not None:
+                                state.last_usage = item.usage
+                except ContextOverflowError as exc:
+                    # ★ 恢复优先于失败：上下文超长不是终止条件，而是"压缩后重来一轮"。
+                    await self._cancel_tasks(early_tasks)
+                    recovered = await self._reactive_compact(
+                        state, already_emitted=bool(text_parts))
+                    if recovered:
+                        state.iters -= 1    # 这一轮没真正跑成，不计入软收尾预算
+                        state.transition = T_REACTIVE_COMPACT
+                        turn_span.set(transition=T_REACTIVE_COMPACT, recovered=True)
+                        continue
+                    log_kv(logger, logging.ERROR, "LoopControl",
+                           "context overflow, unrecoverable",
+                           iter=state.iters, transition=T_MODEL_ERROR)
+                    turn_span.set(transition=T_MODEL_ERROR, failure="context_overflow")
+                    for ev in self._fail(state, T_MODEL_ERROR, str(exc)):
+                        yield ev
+                    return
+                except NativeLlmError as exc:
+                    await self._cancel_tasks(early_tasks)
+                    log_kv(logger, logging.ERROR, "LoopControl", "model error",
+                           iter=state.iters, kind=exc.kind, transition=T_MODEL_ERROR)
+                    turn_span.set(transition=T_MODEL_ERROR, failure="model_error",
+                                  error_kind=exc.kind)
+                    for ev in self._fail(state, T_MODEL_ERROR, str(exc)):
+                        yield ev
+                    return
+                except BaseException:
+                    # 取消 / GeneratorExit 兜底，必须排在具体异常之后。用 BaseException
+                    # 是因为消费方 `aclose()` 抛来的 GeneratorExit 既不是 Exception
+                    # 也不是 CancelledError，窄捕获会漏掉，让已提前投递的工具变成游离 task。
+                    await self._cancel_tasks(early_tasks)
+                    raise
+
+                turn_span.set(text_chars=sum(len(t) for t in text_parts),
+                              tool_calls=[c.name for c in ready_calls] or None,
+                              finish_reason=finish_reason)
+
+                # 模型本轮产出固化进历史：正文 + 工具调用同属一条 assistant 消息。
+                state.messages.append(Msg(
+                    role="assistant",
+                    content="".join(text_parts) or None,
+                    tool_calls=list(ready_calls) or None,
+                ))
+
+                # ── 唯一的退出判定 ──────────────────────────────────────────
+                # 依据是"本轮有没有发起工具调用"，不看 finish_reason：
+                # 后者在多数 OpenAI 兼容实现上并不可靠（CC 源码同注）。
+                if not ready_calls:
+                    log_kv(logger, logging.INFO, "LoopControl", "no tool calls, turn complete",
+                           iter=state.iters, finish_reason=finish_reason,
+                           transition=T_COMPLETED)
+                    turn_span.set(transition=T_COMPLETED)
+                    for ev in self._complete(state, finish_reason):
+                        yield ev
+                    return
+
+                # ── 收集工具结果：先回收已提前开跑的，再按批次跑其余 ─────────
+                try:
+                    for call, task in early_tasks:
+                        outcome = await task
+                        for ev in self._result_events(outcome):
                             yield ev
-                        # 流式工具执行：只要目前为止的调用全是并发安全的，就立刻开跑。
-                        # 一旦出现非安全工具，之后的一律推迟到流结束后按批次串行执行——
-                        # 这样恰好保住 CC `partitionToolCalls` 的"并发前缀 + 顺序其余"语义。
-                        if early_allowed and self._is_concurrency_safe(item.call):
-                            early_tasks.append((item.call, asyncio.create_task(
-                                self._execute(item.call, state),
-                            )))
-                        else:
-                            early_allowed = False
-                            deferred_calls.append(item.call)
-                    elif isinstance(item, TurnEnd):
-                        finish_reason = item.finish_reason
-                        if item.usage is not None:
-                            state.last_usage = item.usage
-            except ContextOverflowError as exc:
-                # ★ 恢复优先于失败：上下文超长不是终止条件，而是"压缩后重来一轮"。
-                await self._cancel_tasks(early_tasks)
-                recovered = await self._reactive_compact(state, already_emitted=bool(text_parts))
-                if recovered:
-                    state.iters -= 1        # 这一轮没真正跑成，不计入软收尾预算
-                    state.transition = T_REACTIVE_COMPACT
-                    continue
-                log_kv(logger, logging.ERROR, "LoopControl", "context overflow, unrecoverable",
-                       iter=state.iters, transition=T_MODEL_ERROR)
-                for ev in self._fail(state, T_MODEL_ERROR, str(exc)):
-                    yield ev
-                return
-            except NativeLlmError as exc:
-                await self._cancel_tasks(early_tasks)
-                log_kv(logger, logging.ERROR, "LoopControl", "model error",
-                       iter=state.iters, kind=exc.kind, transition=T_MODEL_ERROR)
-                for ev in self._fail(state, T_MODEL_ERROR, str(exc)):
-                    yield ev
-                return
-            except BaseException:
-                # 取消 / GeneratorExit 兜底，必须排在具体异常之后。用 BaseException
-                # 是因为消费方 `aclose()` 抛来的 GeneratorExit 既不是 Exception
-                # 也不是 CancelledError，窄捕获会漏掉，让已提前投递的工具变成游离 task。
-                await self._cancel_tasks(early_tasks)
-                raise
+                        state.messages.append(outcome.message)
 
-            # 模型本轮产出固化进历史：正文 + 工具调用同属一条 assistant 消息。
-            state.messages.append(Msg(
-                role="assistant",
-                content="".join(text_parts) or None,
-                tool_calls=list(ready_calls) or None,
-            ))
+                    async for outcome in executor.run_calls(
+                        deferred_calls,
+                        self._registry,
+                        invocation_id=self._invocation_id,
+                        state=state.tool_state,
+                        max_concurrency=cfg.max_tool_concurrency,
+                    ):
+                        for ev in self._result_events(outcome):
+                            yield ev
+                        state.messages.append(outcome.message)
+                except BaseException:
+                    # 用 BaseException 而不是 CancelledError：消费方若走 `aclose()`，
+                    # 生成器在 yield 处收到的是 GeneratorExit（它不是 Exception 的子类，
+                    # 也不是 CancelledError），窄捕获会让提前投递的工具任务变成游离 task
+                    # 继续跑——那可能是技能沙箱子进程或 skill-center 的 HTTP 调用。
+                    # 取消时也必须补齐 tool_result 配对，否则这段历史下次进模型会被判 400。
+                    await self._cancel_tasks(early_tasks)
+                    self._fill_missing_results(state, ready_calls)
+                    log_kv(logger, logging.WARNING, "LoopControl", "cancelled during tools",
+                           iter=state.iters, transition=T_ABORTED)
+                    turn_span.set(transition=T_ABORTED)
+                    raise
 
-            # ── 唯一的退出判定 ──────────────────────────────────────────
-            # 依据是"本轮有没有发起工具调用"，不看 finish_reason：
-            # 后者在多数 OpenAI 兼容实现上并不可靠（CC 源码同注）。
-            if not ready_calls:
-                log_kv(logger, logging.INFO, "LoopControl", "no tool calls, turn complete",
-                       iter=state.iters, finish_reason=finish_reason, transition=T_COMPLETED)
-                for ev in self._complete(state, finish_reason):
-                    yield ev
-                return
-
-            # ── 收集工具结果：先回收已提前开跑的，再按批次跑其余 ─────────
-            try:
-                for call, task in early_tasks:
-                    outcome = await task
-                    for ev in self._result_events(outcome):
-                        yield ev
-                    state.messages.append(outcome.message)
-
-                async for outcome in executor.run_calls(
-                    deferred_calls,
-                    self._registry,
-                    invocation_id=self._invocation_id,
-                    state=state.tool_state,
-                    max_concurrency=cfg.max_tool_concurrency,
-                ):
-                    for ev in self._result_events(outcome):
-                        yield ev
-                    state.messages.append(outcome.message)
-            except BaseException:
-                # 用 BaseException 而不是 CancelledError：消费方若走 `aclose()`，
-                # 生成器在 yield 处收到的是 GeneratorExit（它不是 Exception 的子类，
-                # 也不是 CancelledError），窄捕获会让提前投递的工具任务变成游离 task
-                # 继续跑——那可能是技能沙箱子进程或 skill-center 的 HTTP 调用。
-                # 取消时也必须补齐 tool_result 配对，否则这段历史下次进模型会被判 400。
-                await self._cancel_tasks(early_tasks)
-                self._fill_missing_results(state, ready_calls)
-                log_kv(logger, logging.WARNING, "LoopControl", "cancelled during tools",
-                       iter=state.iters, transition=T_ABORTED)
-                raise
-
-            state.transition = T_NEXT_TURN
-            log_kv(logger, logging.INFO, "LoopControl", "next turn",
-                   iter=state.iters, tool_calls=len(ready_calls), transition=T_NEXT_TURN)
+                state.transition = T_NEXT_TURN
+                turn_span.set(transition=T_NEXT_TURN)
+                log_kv(logger, logging.INFO, "LoopControl", "next turn",
+                       iter=state.iters, tool_calls=len(ready_calls), transition=T_NEXT_TURN)
 
     # ── 收口 ───────────────────────────────────────────────────────────────
     # 所有出口都必须经过这两个方法。SSE 契约要求 **每一条流都以 done 收尾**——
@@ -316,15 +339,21 @@ class NativeLoop:
                tokens=decision.tokens, threshold=decision.threshold,
                # 如实标注：上游不返回 usage 时这是字符估算值，不是精确 token 计数。
                estimated=decision.estimated, trigger="proactive")
-        compacted = await compact.compact(
-            state.messages, self._chat,
-            preserve_units=self._config.compact_preserve_units,
-            trigger="proactive",
-        )
-        if compacted is None:
-            self._enter_compact_cooldown(state, "proactive")
-            return
-        self._adopt_compacted(state, compacted)
+        with start_span("native.compact", KIND_COMPACT, trigger="proactive",
+                        tokens=decision.tokens, threshold=decision.threshold,
+                        estimated=decision.estimated,
+                        messages_before=len(state.messages)) as span:
+            compacted = await compact.compact(
+                state.messages, self._chat,
+                preserve_units=self._config.compact_preserve_units,
+                trigger="proactive",
+            )
+            if compacted is None:
+                span.set(ok=False).set_status("error")
+                self._enter_compact_cooldown(state, "proactive")
+                return
+            span.set(ok=True, messages_after=len(compacted))
+            self._adopt_compacted(state, compacted)
 
     async def _reactive_compact(self, state: LoopState, *, already_emitted: bool) -> bool:
         """模型报上下文超长后的恢复：压缩历史并让调用方重来一轮。
@@ -340,15 +369,20 @@ class NativeLoop:
                    attempts=state.attempted_reactive_compact)
             return False
         state.attempted_reactive_compact += 1
-        compacted = await compact.compact(
-            state.messages, self._chat,
-            preserve_units=self._config.compact_preserve_units,
-            trigger="reactive",
-        )
-        if compacted is None:
-            self._enter_compact_cooldown(state, "reactive")
-            return False
-        self._adopt_compacted(state, compacted)
+        with start_span("native.compact", KIND_COMPACT, trigger="reactive",
+                        attempt=state.attempted_reactive_compact,
+                        messages_before=len(state.messages)) as span:
+            compacted = await compact.compact(
+                state.messages, self._chat,
+                preserve_units=self._config.compact_preserve_units,
+                trigger="reactive",
+            )
+            if compacted is None:
+                span.set(ok=False).set_status("error")
+                self._enter_compact_cooldown(state, "reactive")
+                return False
+            span.set(ok=True, messages_after=len(compacted))
+            self._adopt_compacted(state, compacted)
         log_kv(logger, logging.WARNING, "LoopControl", "recovered from context overflow, retrying",
                attempt=state.attempted_reactive_compact, transition=T_REACTIVE_COMPACT)
         return True
@@ -392,14 +426,21 @@ class NativeLoop:
 
         # 计划续推：模型上一轮登记的计划若还有未完成步骤，提醒它继续推进。
         # `iters > 1` 是为了避开刚登记计划的那一轮——那时提醒"继续推进"没有意义。
+        # current_span() 此刻就是本轮的 turn span（_build_request 在 with 块内被调用）。
+        # 字段名与 ADK 侧 LoopController 透出的那两个一致，归因规则才能三代通用。
+        turn_span = current_span()
         plan = state.tool_state.get(TASK_PLAN_KEY)
         if state.iters > 1 and has_open_steps(plan):
+            if turn_span is not None:
+                turn_span.set(plan_continuation=True)
             request.append(Msg(role="user", content=PLAN_CONTINUATION_REMINDER))
 
         # force-summary 软收尾：到达业务轮次上限，用一条系统消息劝停。
         # 这是软控制——模型还需要至少再转一轮才能把最终答案写出来，
         # 所以硬熔断必须留出余量（见 LoopConfig.hard_cap）。
         if state.iters >= self._config.max_iters:
+            if turn_span is not None:
+                turn_span.set(forced_summary=True)
             log_kv(logger, logging.WARNING, "LoopControl", "max iters reached, force summary",
                    iter=state.iters, max=self._config.max_iters, transition=T_FORCE_SUMMARY)
             request.append(Msg(role="user", content=FORCE_SUMMARY_REMINDER))
