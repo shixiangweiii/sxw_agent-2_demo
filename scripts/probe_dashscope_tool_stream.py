@@ -9,7 +9,14 @@
     export DASHSCOPE_API_KEY=sk-***
     .venv/bin/python scripts/probe_dashscope_tool_stream.py
 
-模型 / base_url 复用项目配置（AgentSettings），可用 LLM_MODEL / LLM_BASE_URL 覆盖。
+模型 / base_url 复用项目配置（AgentSettings），可用 LLM_MODEL / LLM_BASE_URL 覆盖，
+因此本探针能打**任意 OpenAI 兼容端点**（DashScope / DeepSeek / …）。换 provider 时：
+
+    DASHSCOPE_API_KEY=sk-*** LLM_BASE_URL=https://api.deepseek.com LLM_MODEL=deepseek-chat \
+        .venv/bin/python scripts/probe_dashscope_tool_stream.py
+
+⚠ 结论只对**实际打到的那个 provider** 成立。尤其是 context_overflow case——
+它的目的是拿到该 provider 超长时的确切报文，用别的 provider 跑不能替代。
 本脚本是一次性诊断工具，不参与服务运行。
 """
 from __future__ import annotations
@@ -241,6 +248,7 @@ async def main() -> int:
         return 1
 
     print(f"model={settings.llm_model}  base_url={settings.llm_base_url}")
+    print("⚠ 以下所有结论只对上面这个 provider 成立；换 provider 需重跑。\n")
     client = openai.AsyncOpenAI(
         api_key=settings.dashscope_api_key,
         base_url=settings.llm_base_url,
@@ -259,12 +267,52 @@ async def main() -> int:
     for case in _CASES[1:]:
         await _probe_case(client, settings.llm_model, *case, include_usage=include_usage)
 
+    await _probe_overflow(client, settings)
+
     print(f"\n{'=' * 78}\n探针完成。累积器实现依据：")
     print("  1) arguments 是否需要跨 chunk 拼接（fragments > 1）")
     print("  2) id/name 是否只在首片出现（→ 取首次非空值）")
     print("  3) 并行调用是否靠 index 区分")
     print("  4) usage 是否随流返回（→ compact 阈值用真实 token 还是字符估算）")
+    print("  5) 超长报文的确切措辞（→ classify_llm_error 的关键词是否覆盖）")
     return 0
+
+
+async def _probe_overflow(client: openai.AsyncOpenAI, settings: AgentSettings) -> None:
+    """故意发一段超长 prompt，把上游 400 的**原始报文**打出来。
+
+    这是本探针最关键的一个 case：`native_loop` 的「超长 → 压缩 → 重来一轮」恢复链路
+    依赖 `agent/llm/exceptions.py` 把异常判定为 ``context_overflow``。而该函数的
+    isinstance 分支只对 litellm 异常成立（native 路径抛的是 openai.*Error），
+    判定完全落在关键词匹配上。关键词漏掉 DashScope 的实际措辞 = 整条恢复链路是死代码。
+    """
+    print(f"\n{'=' * 78}\n[case] context_overflow  故意超长")
+    print(f"[provider] {settings.llm_base_url}  ← 报文措辞因 provider 而异，结论仅对它成立")
+    # 造一段远超窗口的输入。用中文字符，贴近真实语料的 token 密度。
+    oversized = "测试" * (settings.context_window_tokens * 2)
+    print(f"[prompt] 长度 {len(oversized)} 字符（窗口配置 {settings.context_window_tokens} tokens）")
+    try:
+        stream = await client.chat.completions.create(
+            model=settings.llm_model,
+            messages=[{"role": "user", "content": oversized}],
+            stream=True,
+            extra_body={"enable_thinking": False},
+        )
+        async for _ in stream:
+            pass
+        print("  ⚠ 未报错——窗口可能比配置的更大，请调大 oversized 后重试")
+    except Exception as exc:  # noqa: BLE001 - 探针就是要看未经处理的原始异常
+        from agent.llm.exceptions import classify_llm_error
+
+        print(f"  异常类型: {type(exc).__module__}.{type(exc).__name__}")
+        print(f"  原始报文: {exc}")
+        verdict = classify_llm_error(exc)
+        ok = "✅ 恢复链路可触发" if verdict == "context_overflow" else "❌ 会被归为 other，恢复链路不会触发"
+        print(f"  classify_llm_error → {verdict}   {ok}")
+        if verdict != "context_overflow":
+            print("  → 请把上面报文里的特征词加进 agent/llm/exceptions.py 的 _OVERFLOW_KEYS")
+        print("  注：即使关键词漏判，native 侧还有体积兜底判据"
+              "（llm_client._classify：400 + 请求体积逼近窗口 → 按超长处理）")
 
 
 if __name__ == "__main__":

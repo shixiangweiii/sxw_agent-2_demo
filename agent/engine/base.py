@@ -1,7 +1,10 @@
 """ReasoningEngine 统一端口 + 选型工厂。
 
-两代实现：plan_execute（Gen1 先规划再执行）/ agent_loop（Gen2 ReAct 单循环，M3）。
-经 ENGINE 配置切换（替代原项目灰度门 gray_gate）。
+三代实现，经 ENGINE 配置切换（替代原项目灰度门 gray_gate）：
+- plan_execute（Gen1）：先规划再执行；
+- agent_loop（Gen2）：Tool-Use 循环，但 while 在 ADK BaseLlmFlow 内部；
+- native_loop（Gen3）：自研循环，while 在 agent/engine/native_loop/loop.py 里。
+对比轴是「循环归谁驱动」——三者共享同一套工具面、系统指令与 SSE 契约。
 """
 from __future__ import annotations
 
@@ -29,7 +32,7 @@ class RunContext:
 
 
 class ReasoningEngine(ABC):
-    # 两代引擎唯一的公共契约：喂进一个 RunContext，吐出统一的 StreamEvent 序列。
+    # 三代引擎唯一的公共契约：喂进一个 RunContext，吐出统一的 StreamEvent 序列。
     # 正因为端口收得这么窄，上游（chat.py / citation / SSE 格式化）完全不知道
     # 背后是"先规划再执行"还是"ReAct 单循环"——换引擎不需要改上游任何一行。
     @abstractmethod
@@ -45,8 +48,9 @@ def extract_text(content: types.Content) -> str:
 
 def build_engine(ctx: "AgentContext") -> ReasoningEngine:
     # 每次请求都新建引擎实例（引擎本身无状态，真正的共享状态都在 ctx 里）。
-    # 延迟 import 是为了避免两代引擎的模块在启动时互相牵连，只加载实际选中的那一代。
-    # 注意：ENGINE 是启动期配置，不能按请求切换——评测因此需要起两个 agent 实例（8000/8001）。
+    # 延迟 import 是为了避免三代引擎的模块在启动时互相牵连，只加载实际选中的那一代。
+    # 注意：ENGINE 是启动期配置，不能按请求切换——评测因此需要按引擎各起一个 agent 实例
+    # （8000=agent_loop / 8001=plan_execute / 8002=native_loop）。
     engine = ctx.settings.engine
     if engine == "plan_execute":
         from agent.engine.plan_execute.plan_execute_engine import PlanExecuteEngine

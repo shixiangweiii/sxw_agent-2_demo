@@ -26,8 +26,9 @@ from agent.tools.knowledge_search import build_knowledge_search_tool
 class AgentContext:
     settings: AgentSettings
     llm: HardenedLiteLlm                        # ADK 循环里"调模型"最终落到它
-    chat: AgentChatClient                       # 轻量单轮补全，仅供 plan_execute 规划相使用
-    tools: list[Callable[..., Any]]             # ★ 两代引擎共享的工具集，启动期组装、请求期只读
+    chat: AgentChatClient                       # 轻量单轮补全：plan_execute 规划相 +
+                                                # native_loop 的压缩摘要与原生 researcher
+    tools: list[Callable[..., Any]]             # ★ 三代引擎共享的工具集，启动期组装、请求期只读
     session_manager: SessionManager             # 多轮对话历史（ADK session）
     artifact_service: InMemoryArtifactService   # 多模态图片等制品
     skill_coordinator: SkillExecutionCoordinator  # Claude SKILL 并发/独占资源治理（进程级单例）
@@ -47,13 +48,13 @@ def build_agent_context(settings: AgentSettings) -> AgentContext:
 
 
 async def attach_skill_tools(ctx: AgentContext) -> None:
-    """从 skill-center 拉技能目录并加入 ctx.tools（两代引擎共享）。skill-center 不可用则跳过。"""
+    """从 skill-center 拉技能目录并加入 ctx.tools（三代引擎共享）。skill-center 不可用则跳过。"""
     skill_tools = await load_skill_tools(ctx.settings, agent_uuid=ctx.settings.agent_uuid)
     ctx.tools.extend(skill_tools)
 
 
 def attach_claude_skill_tools(ctx: AgentContext) -> None:
-    """加载本地 claude-skill 包 → ClaudeSkillTool 注入 ctx.tools（沙箱执行，两代引擎共享）。"""
+    """加载本地 claude-skill 包 → ClaudeSkillTool 注入 ctx.tools（沙箱执行，三代引擎共享）。"""
     skills = load_claude_skills()
     runtime_config = SkillRuntimeConfig(
         call_timeout_seconds=ctx.settings.skill_call_timeout_seconds,

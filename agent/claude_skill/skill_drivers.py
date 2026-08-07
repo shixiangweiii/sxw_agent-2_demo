@@ -126,7 +126,7 @@ async def drive_native(
     """
     # 延迟 import：ENGINE=agent_loop 且 SUB_AGENT_ENGINE=adk 时不必加载原生循环。
     from agent.config import get_settings
-    from agent.engine.native_loop.llm_client import NativeLlmClient
+    from agent.engine.native_loop.llm_client import get_shared_client
     from agent.engine.native_loop.loop import T_HARD_CAP, LoopConfig, NativeLoop
     from agent.engine.native_loop.messages import Msg
     from agent.engine.native_loop.tools import build_registry
@@ -134,7 +134,8 @@ async def drive_native(
     settings = get_settings()
     registry = build_registry(list(tools))
     loop = NativeLoop(
-        client=NativeLlmClient(settings),
+        # 复用进程级客户端：每次技能调用新建一个 AsyncOpenAI 会持续泄漏 httpx 连接池。
+        client=get_shared_client(settings),
         registry=registry,
         system_instruction=system_instruction,
         # 技能子代理不做上下文压缩：它是有界的一次性任务，且额外的摘要调用

@@ -107,7 +107,7 @@ agent 还内置浏览器 Web Chat：`web/` 中的静态资源由 `agent/main.py`
 
 **`native_loop` 相对 `agent_loop` 多出的能力**（都是 ADK 插件面表达不了的）：
 1. 按只读性分批的**工具并发调度**（连续 `concurrency_safe` 并发、其余串行、批次间保序；Claude SKILL 的 `parallel_safe`/`exclusive_resources` frontmatter 在这里真正驱动主循环调度）；
-2. **流式工具执行**——tool_call 一到就开跑，不等模型流结束（安全阀 `NATIVE_STREAMING_TOOL_EXEC=false` 可退化为流完再跑）；
+2. **流式工具执行**——**一轮内除最后一个之外的 tool_call 可提前开跑**，不必等模型流结束（完整性信号是「出现了更高 index」，故末个调用必然等到流末；单工具调用轮因此无收益）。安全阀 `NATIVE_STREAMING_TOOL_EXEC=false` 可退化为流完再跑；
 3. CC 式**上下文压缩**：阈值触发摘要 + compact boundary + preserved tail + 413 反应式恢复（`agent_loop` 是 `MessageBudget` 硬裁头部，两者行为不同，是有意保留的对比素材）；
 4. 自己拥有工具参数解析，因此**不需要** `tool_args_normalizer` 那套 ADK 私有符号 monkeypatch。
 

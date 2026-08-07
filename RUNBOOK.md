@@ -116,7 +116,7 @@ curl -X POST http://127.0.0.1:8100/v1/index/sample
 | `ENGINE` | `agent_loop` | **推理引擎**：`agent_loop`（ADK 驱动的 Tool-Use 循环）\| `plan_execute`（先规划后执行）\| `native_loop`（自研循环，不依赖 Agent 框架） |
 | `MAX_LOOP_ITERS` | `8` | loop 引擎软收尾轮次（硬熔断 = 该值 + 2；同值 +2 也作 plan_execute 执行相硬熔断） |
 | `SUB_AGENT_ENGINE` | `auto` | 子代理 / Claude SKILL 子 Runner 用哪一代循环：`auto`（跟随主引擎，`plan_execute` 视同 `adk`）\| `adk` \| `native`。**A2A 不受此项影响** |
-| `NATIVE_STREAMING_TOOL_EXEC` | `true` | native_loop：tool_call 一到就开跑。设 `false` 退化为「流完再统一跑工具」（排障安全阀） |
+| `NATIVE_STREAMING_TOOL_EXEC` | `true` | native_loop：一轮内除最后一个之外的 tool_call 提前开跑（末个必等流末）。设 `false` 退化为「流完再统一跑工具」（排障安全阀） |
 | `NATIVE_MAX_TOOL_CONCURRENCY` | `10` | native_loop：单个并发批次内的最大并行工具数 |
 | `NATIVE_TOOL_RESULT_MAX_CHARS` | `8000` | native_loop：单条 tool_result 体积上限（超出就地截断，不丢消息） |
 | `CONTEXT_WINDOW_TOKENS` | `128000` | native_loop 压缩：有效上下文窗口（需与实际模型匹配） |
@@ -165,7 +165,7 @@ curl -X POST http://127.0.0.1:8100/v1/index/sample
 ### 6.1 走哪种推理引擎 —— `ENGINE`
 - `ENGINE=agent_loop`（默认）：统一 **Tool-Use Agent Loop**，模型通过 `tool_use → tool_result` 迭代直到产出；带计划续推、工具异常喂回、force-summary、硬熔断、Agent-as-Tool/动态工具发现。
 - `ENGINE=plan_execute`：**先规划后执行**，decision planner 出计划 → execution planner 逐步执行；执行相同样带**工具异常喂回（ToolErrorFeedback）+ 框架硬熔断**，但**无**计划续推 / force-summary（那是 agent-loop 专属）。
-- `ENGINE=native_loop`：**自研 Tool-Use 循环**，以 Claude Code `query.ts:queryLoop()` 为蓝本，不依赖任何 Agent 框架 —— `while` 在 `agent/engine/native_loop/loop.py` 里。相比 `agent_loop` 多两件 ADK 插件面表达不了的能力：**按只读性分批的工具并发调度**、**流式工具执行**（tool_call 一到就开跑）；上下文治理是 CC 式的**阈值摘要压缩 + 413 反应式恢复**，而非硬裁头部。
+- `ENGINE=native_loop`：**自研 Tool-Use 循环**，以 Claude Code `query.ts:queryLoop()` 为蓝本，不依赖任何 Agent 框架 —— `while` 在 `agent/engine/native_loop/loop.py` 里。相比 `agent_loop` 多两件 ADK 插件面表达不了的能力：**按只读性分批的工具并发调度**、**流式工具执行**（一轮内除最后一个之外的 tool_call 可提前开跑，末个必等流末）；上下文治理是 CC 式的**阈值摘要压缩 + 413 反应式恢复**，而非硬裁头部。
 ```bash
 PY=.venv/bin/python
 ENGINE=plan_execute "$PY" -m uvicorn agent.main:app --port 8000

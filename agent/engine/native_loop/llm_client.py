@@ -6,7 +6,7 @@
    后续片只追加 arguments 字符串；部分厂商一次性吐完整 tool_call）。累积器按
    ``index`` 聚合、``id``/``name`` 取首次非空值、``arguments`` 字符串累加，两种形态收敛到同一结果。
    实测形状见 ``scripts/probe_dashscope_tool_stream.py``。
-2. **就绪信号**——为支持"tool_call 一到就开跑"（CC 的 streaming tool execution），
+2. **就绪信号**——为支持流式工具执行（CC 的 streaming tool execution），
    在更高 index 出现且已累积参数能解析成合法 JSON 时提前判定该调用就绪；
    否则一律等流结束再判定。JSON 可解析是这里的安全闸：半截参数解析不过，不会被误判就绪。
 3. **异常分类**——上下文超长单独成类型，交给循环层触发压缩后重来（恢复优先于失败）。
@@ -21,11 +21,15 @@ from typing import Any, AsyncIterator, Optional
 import openai
 
 from agent.config import AgentSettings
-from agent.engine.native_loop.messages import Msg, ToolCall, Usage, to_wire
+from agent.engine.native_loop.messages import CHARS_PER_TOKEN, Msg, ToolCall, Usage, to_wire
 from agent.llm.exceptions import CONTEXT_OVERFLOW, classify_llm_error
 from common.obs import get_logger, log_kv
 
 logger = get_logger("agent.native")
+
+# 体积兜底判据的触发比例：请求字符数 ≥ 窗口 × 该比例时，把不认识的 400 当作超长。
+# 取 0.9 而不是 1.0，是因为字符→token 估算本身有误差，留一点余量。
+_OVERFLOW_SIZE_RATIO = 0.9
 
 
 class NativeLlmError(RuntimeError):
@@ -165,6 +169,11 @@ class NativeLlmClient:
         # include_usage 不被上游支持时置 False 并整进程记住，避免每轮都试错一次。
         # 影响：compact 阈值只能回落到字符估算（见 compact.py，日志会标 estimated=true）。
         self._include_usage = True
+        # 超长兜底判据用（见 _classify）：请求体积超过窗口的这个比例时，
+        # 即使报文措辞不认识也按超长处理。
+        self._overflow_chars_threshold = int(
+            settings.context_window_tokens * CHARS_PER_TOKEN * _OVERFLOW_SIZE_RATIO,
+        )
 
     @property
     def model(self) -> str:
@@ -193,6 +202,10 @@ class NativeLlmClient:
         if self._include_usage:
             payload["stream_options"] = {"include_usage": True}
 
+        # M4 兜底判据用：本次请求的字符规模。上游超长报文的措辞因 provider 而异，
+        # 关键词匹配可能漏判，此时用"请求体积是否已经逼近窗口"作为 provider 无关的旁证。
+        request_chars = _payload_chars(payload)
+
         emitted = False
         try:
             async for item in self._consume(payload, allow_early_tool_dispatch):
@@ -205,20 +218,20 @@ class NativeLlmClient:
             # emitted 守卫：一旦已经吐过内容就绝不重试，否则会重复输出。
             # stream_options 是在 create() 阶段被拒的，此时必然还没 emit 过。
             if emitted or not (self._include_usage and _mentions_stream_options(exc)):
-                raise _classify(exc) from exc
+                raise self._classify(exc, request_chars) from exc
             self._include_usage = False
             payload.pop("stream_options", None)
             log_kv(logger, logging.WARNING, "NativeLlm",
                    "stream_options unsupported, retrying without usage")
         except Exception as exc:  # noqa: BLE001 - 统一分类后上抛
-            raise _classify(exc) from exc
+            raise self._classify(exc, request_chars) from exc
 
         # 降级重试（不带 usage）。这次失败不再兜底。
         try:
             async for item in self._consume(payload, allow_early_tool_dispatch):
                 yield item
         except Exception as exc:  # noqa: BLE001
-            raise _classify(exc) from exc
+            raise self._classify(exc, request_chars) from exc
 
     async def _consume(
         self, payload: dict[str, Any], allow_early: bool,
@@ -227,43 +240,76 @@ class NativeLlmClient:
         finish_reason: Optional[str] = None
         usage: Optional[Usage] = None
 
-        stream = await self._client.chat.completions.create(**payload)
-        async for chunk in stream:
-            chunk_usage = getattr(chunk, "usage", None)
-            if chunk_usage is not None:
-                usage = _to_usage(chunk_usage)
+        # AsyncStream 实测**没有 __del__**：客户端断开导致 CancelledError 穿过这里时，
+        # 不显式关闭底层 HTTP 响应就不会归还给连接池。async with 保证任何退出路径都关。
+        async with await self._client.chat.completions.create(**payload) as stream:
+            async for chunk in stream:
+                chunk_usage = getattr(chunk, "usage", None)
+                if chunk_usage is not None:
+                    usage = _to_usage(chunk_usage)
 
-            choices = getattr(chunk, "choices", None) or []
-            if not choices:
-                continue
-            choice = choices[0]
-            reason = getattr(choice, "finish_reason", None)
-            if reason:
-                finish_reason = reason
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    continue
+                choice = choices[0]
+                reason = getattr(choice, "finish_reason", None)
+                if reason:
+                    finish_reason = reason
 
-            delta = getattr(choice, "delta", None)
-            if delta is None:
-                continue
+                delta = getattr(choice, "delta", None)
+                if delta is None:
+                    continue
 
-            content = getattr(delta, "content", None)
-            if content:
-                yield TextDelta(content)
+                content = getattr(delta, "content", None)
+                if content:
+                    yield TextDelta(content)
 
-            for raw in getattr(delta, "tool_calls", None) or []:
-                index = getattr(raw, "index", None)
-                function = getattr(raw, "function", None)
-                accumulator.add(
-                    0 if index is None else int(index),
-                    getattr(raw, "id", None),
-                    getattr(function, "name", None) if function else None,
-                    getattr(function, "arguments", None) if function else None,
-                )
-            for call in accumulator.take_ready(allow_early=allow_early):
-                yield ToolCallReady(call)
+                for raw in getattr(delta, "tool_calls", None) or []:
+                    index = getattr(raw, "index", None)
+                    function = getattr(raw, "function", None)
+                    accumulator.add(
+                        0 if index is None else int(index),
+                        getattr(raw, "id", None),
+                        getattr(function, "name", None) if function else None,
+                        getattr(function, "arguments", None) if function else None,
+                    )
+                for call in accumulator.take_ready(allow_early=allow_early):
+                    yield ToolCallReady(call)
 
         for call in accumulator.take_remaining():
             yield ToolCallReady(call)
         yield TurnEnd(finish_reason=finish_reason, usage=usage)
+
+    def _classify(self, exc: Exception, request_chars: int = 0) -> NativeLlmError:
+        """异常分类。先用共享判据，再用 provider 无关的体积兜底。
+
+        为什么需要兜底：``agent/llm/exceptions.py`` 的前两个分支是
+        ``isinstance(exc, litellm.*)``，而本客户端直接用 openai SDK
+        （litellm 的异常类继承自 openai 的，反向不成立），这两个分支恒为假，
+        判定完全落在关键词上。关键词漏掉某个 provider 的措辞，整条
+        "超长 → 压缩 → 重来一轮"的恢复链路就一次都不会触发。
+
+        兜底判据：请求是 400（BadRequestError）**且**本次请求体积已经逼近上下文窗口——
+        这种组合几乎只可能是超长。误判的代价是多做一次压缩后重试（有单次守卫），
+        远小于漏判导致恢复能力完全失效。
+        """
+        kind = classify_llm_error(exc)
+        message = f"{type(exc).__name__}: {exc}"
+        if kind == CONTEXT_OVERFLOW:
+            return ContextOverflowError(message)
+
+        if (
+            isinstance(exc, openai.BadRequestError)
+            and request_chars >= self._overflow_chars_threshold > 0
+        ):
+            log_kv(logger, logging.WARNING, "NativeLlm",
+                   "unrecognized 400 with oversized request, treating as context overflow",
+                   request_chars=request_chars, threshold=self._overflow_chars_threshold)
+            return ContextOverflowError(message)
+
+        log_kv(logger, logging.ERROR, "NativeLlm", "model call failed",
+               kind=kind, error=type(exc).__name__)
+        return NativeLlmError(message, kind)
 
 
 def _to_usage(raw: Any) -> Usage:
@@ -278,19 +324,32 @@ def _mentions_stream_options(exc: Exception) -> bool:
     return "stream_options" in str(exc).lower()
 
 
-def _classify(exc: Exception) -> NativeLlmError:
-    """复用既有异常分类（agent/llm/exceptions.py），保持两代引擎判定一致。"""
-    kind = classify_llm_error(exc)
-    message = f"{type(exc).__name__}: {exc}"
-    if kind == CONTEXT_OVERFLOW:
-        return ContextOverflowError(message)
-    log_kv(logger, logging.ERROR, "NativeLlm", "model call failed",
-           kind=kind, error=type(exc).__name__)
-    return NativeLlmError(message, kind)
+# 进程级共享客户端。``openai.AsyncOpenAI`` 内含 httpx 连接池且**没有 __del__**，
+# 每次调用新建一个就等于每次泄漏一个连接池。主引擎、Claude SKILL 子 Runner、
+# researcher 子代理共用同一个实例（客户端本身无请求级状态）。
+_shared_client: Optional["NativeLlmClient"] = None
+
+
+def get_shared_client(settings: AgentSettings) -> "NativeLlmClient":
+    global _shared_client  # noqa: PLW0603 - 进程级单例的既定写法
+    if _shared_client is None:
+        _shared_client = NativeLlmClient(settings)
+    return _shared_client
+
+
+def _payload_chars(payload: dict[str, Any]) -> int:
+    """本次请求进入模型的字符规模（消息 + 工具声明）。"""
+    try:
+        return len(json.dumps(payload.get("messages") or [], ensure_ascii=False)) + len(
+            json.dumps(payload.get("tools") or [], ensure_ascii=False),
+        )
+    except (TypeError, ValueError):
+        return 0
 
 
 __all__ = [
     "ContextOverflowError",
+    "get_shared_client",
     "NativeLlmClient",
     "NativeLlmError",
     "StreamItem",

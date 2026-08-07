@@ -26,7 +26,9 @@ class AgentSettings(BaseSettings):
     sub_agent_engine: Literal["auto", "adk", "native"] = "auto"
 
     # --- native_loop（自研 Tool-Use 循环，不依赖 Agent 框架）---
-    # 流式工具执行：tool_call 一到就开跑（CC 行为）。关掉即退化为"模型流结束后再统一跑工具"，
+    # 流式工具执行（CC 行为）：一轮内除最后一个之外的 tool_call 可提前开跑——完整性信号是
+    # "出现了更高 index"，所以末个调用必然等到流结束，单工具调用轮没有提速收益。
+    # 关掉即退化为"模型流结束后再统一跑工具"，
     # 出问题时用它一键回退定位——两条路径共用同一套分批规则，只是投递时机不同。
     native_streaming_tool_exec: bool = True
     native_max_tool_concurrency: int = Field(default=10, gt=0)   # 对齐 CC 默认

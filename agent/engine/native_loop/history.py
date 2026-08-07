@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from agent.engine.native_loop.messages import Msg, clone
+from agent.engine.native_loop.messages import Msg, clone, unit_aligned_start
 from common.obs import get_logger, log_kv
 
 logger = get_logger("agent.native")
@@ -38,11 +38,14 @@ class HistoryStore:
         key = self._key(user_id, session_id)
         stored = clone(messages)
         if len(stored) > self._max_messages:
-            dropped = len(stored) - self._max_messages
-            stored = stored[dropped:]
-            log_kv(logger, logging.WARNING, "History", "session truncated to cap",
-                   user=user_id, session=session_id, dropped=dropped,
-                   cap=self._max_messages)
+            # 切分点必须对齐原子单元：裸按条数切片会把 call/response 区间从中间切开，
+            # 留下孤立 tool 消息，该会话之后每一轮请求都会被上游判 400（永久损坏）。
+            start = unit_aligned_start(stored, len(stored) - self._max_messages)
+            if start > 0:
+                stored = stored[start:]
+                log_kv(logger, logging.WARNING, "History", "session truncated to cap",
+                       user=user_id, session=session_id, dropped=start,
+                       kept=len(stored), cap=self._max_messages)
         self._sessions[key] = stored
 
     def clear(self, user_id: str, session_id: str) -> None:

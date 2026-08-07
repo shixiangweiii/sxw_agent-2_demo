@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from agent.engine.native_loop.messages import (
+    CHARS_PER_TOKEN,
     KIND_COMPACT_SUMMARY,
     Msg,
     Unit,
@@ -36,7 +37,7 @@ logger = get_logger("agent.native")
 _SUMMARY_MAX_TOKENS = 4096
 # 中文为主的语料，1 token ≈ 1.5 字符。刻意取偏小的除数 → 偏大的 token 估计 →
 # 宁可早压一点，也不要因低估而撞上真正的 413。
-_CHARS_PER_TOKEN = 1.5
+_CHARS_PER_TOKEN = CHARS_PER_TOKEN
 # 喂给摘要模型的历史文本上限，防止"为了压缩而先撑爆摘要请求"。
 _HISTORY_RENDER_MAX_CHARS = 60_000
 _PER_MESSAGE_RENDER_MAX_CHARS = 2_000
@@ -67,23 +68,37 @@ class CompactDecision:
     estimated: bool
 
 
-def estimate_tokens(messages: list[Msg], last_usage: Optional[Usage]) -> tuple[int, bool]:
+def estimate_tokens(
+    messages: list[Msg],
+    last_usage: Optional[Usage],
+    *,
+    fixed_overhead_chars: int = 0,
+) -> tuple[int, bool]:
     """估算当前上下文大小。优先用上游返回的真实 usage，否则按字符估算。
 
-    返回 (tokens, estimated)。``estimated=True`` 表示这是估算值，
+    ``fixed_overhead_chars`` 是每轮都会进请求、但不在 ``messages`` 里的部分
+    （system 指令 + 全部工具的 JSON Schema）。不计它会系统性低估——当前工具面
+    下这块就有约 1.8k token。
+
+    返回 (tokens, estimated)。``estimated=True`` 表示纯字符估算，
     调用方在日志里如实标注——不要让人误以为是精确 token 计数。
+
+    已知偏差（两个方向都存在，13k buffer 用于吸收）：
+    - **偏高**：``apply_tool_result_budget`` 只作用于每轮请求的副本，
+      历史里存的仍是全长 tool_result，这里按全长计；
+    - **偏低**：字符→token 比按中文取值，英文占比高时实际 token 更少。
     """
+    char_estimate = _char_tokens(messages, fixed_overhead_chars)
     if last_usage is not None and last_usage.prompt_tokens:
         # prompt_tokens 是"上一次请求"的输入规模；本轮又追加了 assistant + tool 消息，
-        # 所以在它基础上加上新增部分的字符估算才接近真实值。这里取保守做法：
-        # 直接用整段字符估算与 usage 取较大者。
-        char_estimate = _char_tokens(messages)
+        # 取二者较大者作为保守估计。注意压缩成功后调用方必须置空 last_usage
+        # （见 NativeLoop._adopt_compacted），否则旧值会把估算顶回压缩前的水平。
         return max(int(last_usage.prompt_tokens), char_estimate), False
-    return _char_tokens(messages), True
+    return char_estimate, True
 
 
-def _char_tokens(messages: list[Msg]) -> int:
-    total = 0
+def _char_tokens(messages: list[Msg], fixed_overhead_chars: int = 0) -> int:
+    total = fixed_overhead_chars
     for msg in messages:
         total += len(_render_content(msg.content))
         for call in msg.tool_calls or []:
@@ -97,8 +112,11 @@ def decide(
     *,
     context_window_tokens: int,
     buffer_tokens: int,
+    fixed_overhead_chars: int = 0,
 ) -> CompactDecision:
-    tokens, estimated = estimate_tokens(messages, last_usage)
+    tokens, estimated = estimate_tokens(
+        messages, last_usage, fixed_overhead_chars=fixed_overhead_chars,
+    )
     threshold = max(1, context_window_tokens - buffer_tokens)
     return CompactDecision(
         should=tokens >= threshold, tokens=tokens, threshold=threshold, estimated=estimated,

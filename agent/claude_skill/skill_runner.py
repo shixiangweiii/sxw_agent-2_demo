@@ -38,7 +38,6 @@ from common.obs import get_logger, log_kv
 
 logger = get_logger("agent.claude_skill")
 
-_APP = "claude-skill"
 _SYSTEM_INSTRUCTION = """你是单技能执行代理。一个完整 SKILL 包已经放入本次独立沙箱。
 必须把用户消息中指定的 SKILL.md 作为第一个工具读取动作；成功读取前不得调用其他工具。
 完整遵循 SKILL.md，并按需读取包内 scripts、references 和资源文件。所有路径均相对沙箱工作目录。

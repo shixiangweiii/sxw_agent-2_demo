@@ -138,6 +138,12 @@ def extract_text(content: Any) -> str:
 # 扁平列表上这件事比 ADK 的 Content 结构简单得多：一条带 tool_calls 的 assistant，
 # 加上紧随其后、引用了它任一 call id 的所有 tool 消息，构成一个不可拆分单元。
 
+# 字符 → token 的粗略换算比。按中文取值（中文约 1.5 字符/token，英文约 4）：
+# 偏保守 = 倾向高估上下文规模 = 更早触发压缩，这个方向的错更安全。
+# 上游返回真实 usage 时不会用到它（见 compact.estimate_tokens）。
+CHARS_PER_TOKEN = 1.5
+
+
 @dataclass
 class Unit:
     start: int          # 闭区间起点
@@ -177,9 +183,33 @@ def unit_index_for(units: list[Unit], message_index: int) -> int:
     return 0
 
 
+def unit_aligned_start(messages: list[Msg], desired_start: int) -> int:
+    """把「从哪里开始保留」对齐到原子单元边界。
+
+    任何按条数计算出来的切分点都必须先过这里。从 call/response 区间中间切开，
+    会留下没有前置 ``tool_calls`` 的孤立 tool 消息，请求被上游直接判 400——
+    而且历史一旦写回存储，该会话之后每一轮都会失败。
+
+    向后取第一个 ``start >= desired_start`` 的单元（宁可多丢一点也不切坏）；
+    若切分点落在最后一个单元内部，则退回该单元起点——**保留一个完整单元，
+    哪怕略微超出条数上限**，因为结构正确性优先于容量精确。
+    """
+    if desired_start <= 0:
+        return 0
+    units = atomic_units(messages)
+    if not units:
+        return 0
+    for unit in units:
+        if unit.start >= desired_start:
+            return unit.start
+    return units[-1].start
+
+
 # ── compact boundary ──────────────────────────────────────────────────────
-# 等价 CC 的 `getMessagesAfterCompactBoundary`：压缩摘要本身即边界，
-# 边界之前的原始历史不再进入模型请求（但保留在本地数组里，便于排障）。
+# 等价 CC 的 `getMessagesAfterCompactBoundary`：压缩摘要本身即边界。
+# 注意：`compact.compact()` 返回的是 `[摘要, *保留尾部]` —— 边界之前的原始历史
+# 会被**整体替换掉**（同 CC），不再可回溯。本函数因此在正常链路上总是返回全量；
+# 它的存在是为了让"边界"这个语义显式化，并兜住任何未来引入的追加式压缩实现。
 
 def messages_after_boundary(messages: list[Msg]) -> list[Msg]:
     for i in range(len(messages) - 1, -1, -1):

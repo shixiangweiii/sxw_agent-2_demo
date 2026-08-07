@@ -4,12 +4,14 @@
 系统指令，否则两者的差异就变成了"工具面之争 / prompt 之争"，而不是"循环归谁驱动"
 这条我们真正想对比的轴。所以共享部分一律收在本包，两边 import 同一份。
 
-本模块（包的 ``__init__``）只放纯文本常量，不引入任何框架依赖，两代引擎都能安全引用。
+本模块（包的 ``__init__``）只放常量与纯函数，不引入任何框架依赖，两代引擎都能安全引用。
 子模块按需依赖：``task_plan_tool`` / ``tool_search_tool`` 是普通函数工具（两代共用），
 ``sub_agent_tool`` 是 researcher 的 ADK AgentTool 包装（仅 `agent_loop` 使用，
 `native_loop` 有自己的等价实现，但对外暴露同名同描述的工具）。
 """
 from __future__ import annotations
+
+from typing import Any
 
 LOOP_INSTRUCTION = (
     "你是一个生产级智能体（Agent-Loop 模式）。在一个循环里思考、调用工具、观察结果，直到产出最终答案。\n"
@@ -45,9 +47,32 @@ def resolve_sub_agent_engine(sub_agent_engine: str, main_engine: str) -> str:
     return "native" if choice == "native" else "adk"
 
 
+# 计划状态的键与判定。定义在这里而不是 task_plan_tool.py：后者要 import ADK 的
+# ToolContext（为了让 ADK 把该参数排除出 schema），而 native_loop 的核心循环
+# 不该为了读一个字典键就把 ADK 拉进依赖链。两代引擎共用同一份判定。
+TASK_PLAN_KEY = "task_plan"
+
+
+def has_open_steps(plan: Any) -> bool:
+    """计划里是否还有未完成步骤（决定要不要注入续推提醒）。"""
+    if not isinstance(plan, dict):
+        return False
+    steps = plan.get("steps") or []
+    current = plan.get("current", 1)
+    return (
+        isinstance(steps, list)
+        and bool(steps)
+        and isinstance(current, int)
+        and not isinstance(current, bool)
+        and 1 <= current <= len(steps)
+    )
+
+
 __all__ = [
     "FORCE_SUMMARY_REMINDER",
     "LOOP_INSTRUCTION",
     "PLAN_CONTINUATION_REMINDER",
+    "TASK_PLAN_KEY",
+    "has_open_steps",
     "resolve_sub_agent_engine",
 ]

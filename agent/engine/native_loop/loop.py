@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -21,6 +22,8 @@ from typing import Any, AsyncIterator, Optional
 from agent.engine.loop_tools import (
     FORCE_SUMMARY_REMINDER,
     PLAN_CONTINUATION_REMINDER,
+    TASK_PLAN_KEY,
+    has_open_steps,
 )
 from agent.engine.native_loop import compact, executor
 from agent.engine.native_loop.llm_client import (
@@ -48,7 +51,6 @@ from common.obs import get_logger, log_kv
 logger = get_logger("agent.native")
 
 PLAN_TOOL = "update_task_plan"
-TASK_PLAN_KEY = "task_plan"
 
 # transition 名称：每个 continue / return 点都有一个，只为把"循环为什么又转了一圈"
 # 变成可检索的日志。对应 CC `State.transition`。
@@ -76,6 +78,11 @@ class LoopConfig:
     max_reactive_compacts: int = 1
 
 
+# 压缩失败后跳过多少轮再重试。用冷却而不是"永久关闭"：一次偶发失败
+# （比如摘要模型抖动）不该让长会话在剩余时间里彻底失去压缩能力。
+_COMPACT_COOLDOWN_TURNS = 3
+
+
 @dataclass
 class LoopState:
     """跨轮可变状态。每个 continue 点整体替换，避免散落的字段赋值。"""
@@ -83,9 +90,10 @@ class LoopState:
     messages: list[Msg]
     iters: int = 0
     transition: Optional[str] = None
-    # 上下文压缩守卫：反应式压缩次数上限 + 压缩连续失败熔断
+    # 上下文压缩守卫：反应式压缩次数上限 + 压缩失败后的冷却轮次
     attempted_reactive_compact: int = 0
-    compact_failures: int = 0
+    compact_failures: int = 0            # 仅用于可观测
+    compact_cooldown: int = 0            # >0 时跳过主动压缩，每轮递减
     last_usage: Optional[Usage] = None
     tool_state: dict[str, Any] = field(default_factory=dict)
 
@@ -114,6 +122,12 @@ class NativeLoop:
         # "正常收口" 与 "撞上熔断"，而不必去匹配错误文案。
         self.final_messages: list[Msg] = []
         self.stop_reason: str = ""
+        # 每轮请求都会带上、但不在 state.messages 里的固定开销：system 指令 +
+        # 全部工具的 JSON Schema。当前工具面下就有约 1.8k token，不计入会系统性低估
+        # 上下文规模，让压缩阈值形同虚设。工具面启动后不变，故只算一次。
+        self._fixed_overhead_chars = len(system_instruction) + len(
+            json.dumps(registry.wire_declarations(), ensure_ascii=False),
+        )
 
     async def run(self, messages: list[Msg]) -> AsyncIterator[StreamEvent]:
         """驱动循环，产出统一 StreamEvent 序列。结束时 ``final_messages`` 可取回完整历史。"""
@@ -130,10 +144,11 @@ class NativeLoop:
             if state.iters > cfg.hard_cap:
                 log_kv(logger, logging.ERROR, "LoopControl", "hard cap exceeded",
                        iter=state.iters, hard_cap=cfg.hard_cap, transition=T_HARD_CAP)
-                yield StreamEvent("error", {
-                    "message": f"已达框架硬熔断上限（{cfg.hard_cap} 轮），本轮对话中止。",
-                })
-                self._finish(state, T_HARD_CAP)
+                for ev in self._fail(
+                    state, T_HARD_CAP,
+                    f"已达框架硬熔断上限（{cfg.hard_cap} 轮），本轮对话中止。",
+                ):
+                    yield ev
                 return
 
             # ── 主动压缩：估算逼近窗口上限就先摘要，别等真的 413 ─────────
@@ -176,9 +191,6 @@ class NativeLoop:
                         finish_reason = item.finish_reason
                         if item.usage is not None:
                             state.last_usage = item.usage
-            except asyncio.CancelledError:
-                await self._cancel_tasks(early_tasks)
-                raise
             except ContextOverflowError as exc:
                 # ★ 恢复优先于失败：上下文超长不是终止条件，而是"压缩后重来一轮"。
                 await self._cancel_tasks(early_tasks)
@@ -189,16 +201,22 @@ class NativeLoop:
                     continue
                 log_kv(logger, logging.ERROR, "LoopControl", "context overflow, unrecoverable",
                        iter=state.iters, transition=T_MODEL_ERROR)
-                yield StreamEvent("error", {"message": str(exc)})
-                self._finish(state, T_MODEL_ERROR)
+                for ev in self._fail(state, T_MODEL_ERROR, str(exc)):
+                    yield ev
                 return
             except NativeLlmError as exc:
                 await self._cancel_tasks(early_tasks)
                 log_kv(logger, logging.ERROR, "LoopControl", "model error",
                        iter=state.iters, kind=exc.kind, transition=T_MODEL_ERROR)
-                yield StreamEvent("error", {"message": str(exc)})
-                self._finish(state, T_MODEL_ERROR)
+                for ev in self._fail(state, T_MODEL_ERROR, str(exc)):
+                    yield ev
                 return
+            except BaseException:
+                # 取消 / GeneratorExit 兜底，必须排在具体异常之后。用 BaseException
+                # 是因为消费方 `aclose()` 抛来的 GeneratorExit 既不是 Exception
+                # 也不是 CancelledError，窄捕获会漏掉，让已提前投递的工具变成游离 task。
+                await self._cancel_tasks(early_tasks)
+                raise
 
             # 模型本轮产出固化进历史：正文 + 工具调用同属一条 assistant 消息。
             state.messages.append(Msg(
@@ -213,8 +231,8 @@ class NativeLoop:
             if not ready_calls:
                 log_kv(logger, logging.INFO, "LoopControl", "no tool calls, turn complete",
                        iter=state.iters, finish_reason=finish_reason, transition=T_COMPLETED)
-                yield StreamEvent("done", {"finish_reason": finish_reason or "stop"})
-                self._finish(state, T_COMPLETED)
+                for ev in self._complete(state, finish_reason):
+                    yield ev
                 return
 
             # ── 收集工具结果：先回收已提前开跑的，再按批次跑其余 ─────────
@@ -235,8 +253,12 @@ class NativeLoop:
                     for ev in self._result_events(outcome):
                         yield ev
                     state.messages.append(outcome.message)
-            except asyncio.CancelledError:
-                # 取消时也必须补齐配对，否则这段历史下次进模型会被判 400。
+            except BaseException:
+                # 用 BaseException 而不是 CancelledError：消费方若走 `aclose()`，
+                # 生成器在 yield 处收到的是 GeneratorExit（它不是 Exception 的子类，
+                # 也不是 CancelledError），窄捕获会让提前投递的工具任务变成游离 task
+                # 继续跑——那可能是技能沙箱子进程或 skill-center 的 HTTP 调用。
+                # 取消时也必须补齐 tool_result 配对，否则这段历史下次进模型会被判 400。
                 await self._cancel_tasks(early_tasks)
                 self._fill_missing_results(state, ready_calls)
                 log_kv(logger, logging.WARNING, "LoopControl", "cancelled during tools",
@@ -247,21 +269,46 @@ class NativeLoop:
             log_kv(logger, logging.INFO, "LoopControl", "next turn",
                    iter=state.iters, tool_calls=len(ready_calls), transition=T_NEXT_TURN)
 
+    # ── 收口 ───────────────────────────────────────────────────────────────
+    # 所有出口都必须经过这两个方法。SSE 契约要求 **每一条流都以 done 收尾**——
+    # agent_loop（`agent_loop_engine.py` 末尾无条件 yield done）与 plan_execute 都是如此，
+    # native_loop 曾经在失败路径上直接 return，造成两个下游问题：
+    #   1. `citation_injector` 只在 done 时扫描正文注入引用（citation_injector.py:70），
+    #      硬熔断场景下模型往往已经产出带 [n] 的正文，引用块会整块丢失；
+    #   2. 评测 harness 只在 done 时置 finished=True（eval/harness/sse_client.py:51），
+    #      同样的熔断在两代引擎的报告里字段不一致，破坏可比性。
+    # done 的 finish_reason 填 transition 名，让下游能机器可读地区分收口原因。
+
     def _finish(self, state: LoopState, reason: str) -> None:
         state.transition = reason
         self.final_messages = state.messages
         self.stop_reason = reason
 
+    def _fail(self, state: LoopState, reason: str, message: str) -> list[StreamEvent]:
+        self._finish(state, reason)
+        return [
+            StreamEvent("error", {"message": message}),
+            StreamEvent("done", {"finish_reason": reason}),
+        ]
+
+    def _complete(self, state: LoopState, finish_reason: Optional[str]) -> list[StreamEvent]:
+        self._finish(state, T_COMPLETED)
+        return [StreamEvent("done", {"finish_reason": finish_reason or "stop"})]
+
     # ── 上下文压缩 ─────────────────────────────────────────────────────────
 
     async def _maybe_proactive_compact(self, state: LoopState) -> None:
         """估算上下文逼近窗口上限时先摘要，避免真的撞上 413。"""
-        if self._chat is None or state.compact_failures > 0:
+        if self._chat is None:
+            return
+        if state.compact_cooldown > 0:
+            state.compact_cooldown -= 1
             return
         decision = compact.decide(
             state.messages, state.last_usage,
             context_window_tokens=self._config.context_window_tokens,
             buffer_tokens=self._config.compact_buffer_tokens,
+            fixed_overhead_chars=self._fixed_overhead_chars,
         )
         if not decision.should:
             return
@@ -275,9 +322,9 @@ class NativeLoop:
             trigger="proactive",
         )
         if compacted is None:
-            state.compact_failures += 1
+            self._enter_compact_cooldown(state, "proactive")
             return
-        state.messages = compacted
+        self._adopt_compacted(state, compacted)
 
     async def _reactive_compact(self, state: LoopState, *, already_emitted: bool) -> bool:
         """模型报上下文超长后的恢复：压缩历史并让调用方重来一轮。
@@ -299,12 +346,33 @@ class NativeLoop:
             trigger="reactive",
         )
         if compacted is None:
-            state.compact_failures += 1
+            self._enter_compact_cooldown(state, "reactive")
             return False
-        state.messages = compacted
+        self._adopt_compacted(state, compacted)
         log_kv(logger, logging.WARNING, "LoopControl", "recovered from context overflow, retrying",
                attempt=state.attempted_reactive_compact, transition=T_REACTIVE_COMPACT)
         return True
+
+    @staticmethod
+    def _adopt_compacted(state: LoopState, compacted: list[Msg]) -> None:
+        """采用压缩结果。
+
+        ★ 必须同时作废 ``last_usage``：它记的是**压缩前**那次请求的 prompt_tokens，
+        而 `compact.estimate_tokens` 取 usage 与字符估算的较大者。压缩已经把字符数打下去了，
+        旧 usage 却会把估算值顶回原位，导致下一轮立刻触发一次冗余的二次压缩
+        （多花一次摘要调用、且摘要被二次摘要，早期信息经两轮有损压缩）。
+        置空后由下一次模型调用的 TurnEnd 立刻填回真值。
+        """
+        state.messages = compacted
+        state.last_usage = None
+
+    @staticmethod
+    def _enter_compact_cooldown(state: LoopState, trigger: str) -> None:
+        state.compact_failures += 1
+        state.compact_cooldown = _COMPACT_COOLDOWN_TURNS
+        log_kv(logger, logging.WARNING, "Compact", "compaction failed, cooling down",
+               trigger=trigger, failures=state.compact_failures,
+               cooldown_turns=_COMPACT_COOLDOWN_TURNS)
 
     # ── 请求组装 ───────────────────────────────────────────────────────────
 
@@ -325,7 +393,7 @@ class NativeLoop:
         # 计划续推：模型上一轮登记的计划若还有未完成步骤，提醒它继续推进。
         # `iters > 1` 是为了避开刚登记计划的那一轮——那时提醒"继续推进"没有意义。
         plan = state.tool_state.get(TASK_PLAN_KEY)
-        if state.iters > 1 and _has_open_steps(plan):
+        if state.iters > 1 and has_open_steps(plan):
             request.append(Msg(role="user", content=PLAN_CONTINUATION_REMINDER))
 
         # force-summary 软收尾：到达业务轮次上限，用一条系统消息劝停。
@@ -415,17 +483,3 @@ def _plan_events(raw_arguments: str) -> Optional[list[StreamEvent]]:
             "step": n, "total": len(steps), "title": step, "status": status,
         }))
     return events
-
-
-def _has_open_steps(plan: Any) -> bool:
-    if not isinstance(plan, dict):
-        return False
-    steps = plan.get("steps") or []
-    current = plan.get("current", 1)
-    return (
-        isinstance(steps, list)
-        and bool(steps)
-        and isinstance(current, int)
-        and not isinstance(current, bool)
-        and 1 <= current <= len(steps)
-    )

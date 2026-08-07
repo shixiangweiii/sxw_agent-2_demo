@@ -17,7 +17,7 @@ from agent.engine.loop_tools import LOOP_INSTRUCTION, resolve_sub_agent_engine
 from agent.engine.loop_tools.task_plan_tool import update_task_plan
 from agent.engine.loop_tools.tool_search_tool import build_deferred_tools, tool_search
 from agent.engine.native_loop.history import HistoryStore
-from agent.engine.native_loop.llm_client import NativeLlmClient
+from agent.engine.native_loop.llm_client import NativeLlmClient, get_shared_client
 from agent.engine.native_loop.loop import LoopConfig, NativeLoop
 from agent.engine.native_loop.messages import content_to_msg
 from agent.engine.native_loop.sub_agent import build_researcher_tool
@@ -51,7 +51,7 @@ def get_runtime(ctx: "AgentContext") -> NativeRuntime:
     global _runtime  # noqa: PLW0603 - 进程级单例的既定写法
     if _runtime is None:
         _runtime = NativeRuntime(
-            client=NativeLlmClient(ctx.settings),
+            client=get_shared_client(ctx.settings),
             history=HistoryStore(),
             registry=build_registry(_collect_tools(ctx)),
         )

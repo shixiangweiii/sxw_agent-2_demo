@@ -5,9 +5,10 @@ from typing import Any
 
 from google.adk.tools.tool_context import ToolContext
 
+from agent.engine.loop_tools import TASK_PLAN_KEY, has_open_steps
 from agent.tool_args_contract import normalize_task_plan_args
 
-TASK_PLAN_KEY = "task_plan"
+__all__ = ["TASK_PLAN_KEY", "has_open_steps", "update_task_plan"]
 
 
 def update_task_plan(steps: list[str], current_step: int, tool_context: ToolContext) -> dict[str, Any]:
@@ -27,15 +28,3 @@ def update_task_plan(steps: list[str], current_step: int, tool_context: ToolCont
         "all_done": all_done,
         "note": "计划已登记。请继续执行未完成步骤；全部完成后给出最终答案。",
     }
-
-
-def has_open_steps(plan: dict[str, Any]) -> bool:
-    steps = plan.get("steps") or []
-    current = plan.get("current", 1)
-    return (
-        isinstance(steps, list)
-        and bool(steps)
-        and isinstance(current, int)
-        and not isinstance(current, bool)
-        and 1 <= current <= len(steps)
-    )
