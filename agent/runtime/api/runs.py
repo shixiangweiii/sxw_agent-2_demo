@@ -140,7 +140,25 @@ async def create_run(
         _store(request),
         default_deadline_ms=settings.runtime_default_deadline_seconds * 1000,
     )
+    # Admission 应用层幂等校验
+    '''
+    curl -i -X POST http://127.0.0.1:8000/api/v1/runs \
+      -H 'Content-Type: application/json' \
+      -H 'Idempotency-Key: demo-request-001' \
+      -d '{
+        "client_request_id":"11111111-1111-4111-8111-111111111111",
+        "conversation_id":null,
+        "principal_id":"demo-user",
+        "agent_id":"demo-agent",
+        "engine":"native_loop",
+        "input":{
+          "text":"什么是混合召回？",
+          "attachment_refs":[]
+        }
+      }'    
+    '''
     result = await service.create(
+        # 前端请求传入
         CreateRunInput(
             client_request_id=str(body.client_request_id),
             conversation_id=body.conversation_id,
