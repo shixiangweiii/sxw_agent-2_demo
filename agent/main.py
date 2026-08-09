@@ -62,7 +62,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="sxw-canonical-agent-runtime", version="1.0.0", lifespan=lifespan)
 app.add_middleware(TraceMiddleware, service="agent-api")
 app.include_router(artifacts_router)
-app.include_router(runs_router)
+app.include_router(runs_router) # 注册 /api/v1/runs 接口，会话接入层直接和前端交互的接口
 app.include_router(documents_router)
 app.include_router(traces_router)
 app.mount("/chat-ui", StaticFiles(directory=WEB_DIR, html=True), name="chat-ui")
