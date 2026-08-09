@@ -46,6 +46,7 @@
 | 每引擎当前 release | Authority | `active_releases`；Release Registrar | CreateRun admission 查询 | API 自己按环境变量临时拼 release；无 active release 仍受理 Run |
 | Worker 活性 | Diagnostic / Operations | `runtime_workers` heartbeat/draining | 运维观察 | 用 heartbeat 直接判 Run FAILED；代替 Activity lease recovery |
 | Trace | Diagnostic | Trace Store JSONL | 调试、评测 summary | 参与 Run/Tool/Checkpoint/terminal 裁决；Trace disabled 阻断恢复 |
+| Trace 关联键 | Diagnostic | `runs.trace_id`（admission 写入，Worker 只读绑定，见 ADR-0007） | span/日志联查、`GET /api/v1/traces/{id}` | 参与 request digest、幂等或任何状态裁决 |
 | ADK Session | Cache / Adapter State | 单次 ADK attempt 内临时对象 | 从 canonical history 编译的模型输入 | 进程级共享、跨 attempt 恢复、函数返回后保留或写回权威历史 |
 | ADK InMemoryArtifactService | Cache / Adapter State | 单次 attempt 适配器 | 从 CAS 构造的临时多模态输入 | 作为 Artifact 权威或跨 Run 持久化 |
 | native messages/tool state | Cache / Adapter State | 单次 Kernel Step / attempt | 从 canonical events + checkpoint 编译 | 进程级 HistoryStore；将 request-local `tool_state` 当 checkpoint |

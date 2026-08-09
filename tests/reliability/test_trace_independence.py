@@ -20,8 +20,8 @@ from agent.runtime.domain.models import (
     WorkingState,
 )
 from agent.runtime.worker.dispatcher import RuntimeWorker
-from common.obs import set_trace_id
-from common.trace import configure_tracing
+from common.obs import get_trace_id, set_trace_id
+from common.trace import configure_tracing, get_trace
 
 
 @dataclass
@@ -265,6 +265,112 @@ async def _snapshot_recovered_run(
             if event.event_type is EventType.ASSISTANT_MESSAGE_COMMITTED
         ],
     }
+
+
+class CompletingAdapter:
+    """最小可完成引擎：本用例只关心 span 落在哪条 trace 上，不关心引擎语义。"""
+
+    name = "native_loop"
+
+    def __init__(self, release: str) -> None:
+        self.release_fingerprint = release
+
+    async def execute(self, request, io):
+        await io.emit("text", {"delta": "ok"})
+        return EngineOutcome(kind=EngineOutcomeKind.COMPLETED)
+
+
+async def _admit(store, clock, *, trace_id: str, key: str):
+    return (await AdmissionService(
+        store, clock=clock, default_deadline_ms=60_000,
+    ).create(
+        CreateRunInput(
+            client_request_id=str(uuid.uuid4()),
+            conversation_id=None,
+            principal_id="demo-user",
+            agent_id="demo-agent",
+            engine="native_loop",
+            text="trace propagation",
+            attachment_refs=(),
+            deadline_at=None,
+            trace_id=trace_id,
+        ),
+        idempotency_key=key,
+    )).run
+
+
+@pytest.mark.asyncio
+async def test_rel_29_worker_recovers_the_admitted_trace_id_across_the_process_boundary(
+    tmp_path,
+):
+    """Worker 进程没有 HTTP 中间件，trace_id 必须从持久化的 Run 上接力。
+
+    回归的是重构把执行搬出 API 进程后引入的断裂：当时 Worker 侧 `get_trace_id()`
+    恒为默认 "-"，于是（a）所有 Run 的 span 挤进同一条轨迹和同一个文件、
+    （b）`GET /api/v1/traces/{trace_id}` 对每个 Run 都 404、
+    （c）内存里那条 "-" 记录永不被 ring buffer 淘汰。
+
+    ★ 本用例**刻意不调用 `set_trace_id`**——那正是旧用例掩盖住这个洞的原因。
+    """
+    runtime_path = tmp_path / "runtime.db"
+    trace_root = tmp_path / "traces"
+    store = SqliteRuntimeStore(RuntimeDatabase(runtime_path))
+    await store.initialize()
+    release = await store.register_release(
+        ReleaseManifest(engine="native_loop", components={"rel-029": "propagation-v1"}),
+        activate=True,
+    )
+    clock = FakeClock()
+
+    carried = await _admit(store, clock, trace_id="rel-029-carried", key="rel-029-carried")
+    anonymous = await _admit(store, clock, trace_id="", key="rel-029-anonymous")
+    # 诊断字段必须持久化，否则跨不过 API→DB→Worker 这道进程边界。
+    assert (await store.get_run(carried.envelope.run_id)).trace_id == "rel-029-carried"
+    assert (await store.get_run(anonymous.envelope.run_id)).trace_id == ""
+
+    _configure_trace("propagation", trace_root)
+    worker = RuntimeWorker(
+        store=store,
+        coordinator=RunCoordinator(
+            store,
+            EngineRegistry({"native_loop": CompletingAdapter(release)}),
+            clock=clock,
+            event_flush_bytes=1,
+        ),
+        worker_id="worker-propagation",
+        release_map={"native_loop": release},
+        concurrency=1,
+        lease_ms=60_000,
+        clock=clock,
+    )
+    # run_once 是**直接 await** 的确定性入口（不像 run() 那样每个 claim 各起一个
+    # task），所以它同时也是"绑定 trace_id 必须按 token 还原"的证据。
+    assert await worker.run_once() is True
+    assert get_trace_id() == "-", "worker 不得把 Run 的 trace_id 泄漏给调用方上下文"
+    assert await worker.run_once() is True
+    assert get_trace_id() == "-"
+    assert await worker.run_once() is False
+
+    # 1) 客户端带来的 trace_id 可按原值查回——这正是 API/eval harness 的取回路径。
+    carried_trace = get_trace("rel-029-carried")
+    assert carried_trace is not None, "worker 的 span 必须落在 admission 观察到的 trace 上"
+    assert {span["trace_id"] for span in carried_trace["spans"]} == {"rel-029-carried"}
+    engine_spans = [s for s in carried_trace["spans"] if s["kind"] == "engine"]
+    assert [s["attributes"]["run_id"] for s in engine_spans] == [carried.envelope.run_id]
+
+    # 2) 没带 x-trace-id 时回落到 run_id，仍然是每个 Run 一个唯一可查的键。
+    fallback_trace = get_trace(anonymous.envelope.run_id)
+    assert fallback_trace is not None
+    assert {span["trace_id"] for span in fallback_trace["spans"]} == {
+        anonymous.envelope.run_id
+    }
+
+    # 3) 两个 Run 不得共用一条 trace 或一个文件（旧行为下二者都塌进 "-"）。
+    assert get_trace("-") is None
+    assert carried_trace["trace_file"] != fallback_trace["trace_file"]
+    assert len(list(trace_root.rglob("*.jsonl"))) == 2
+
+    configure_tracing(enabled=False, engine="rel-029-cleanup")
 
 
 @pytest.mark.asyncio

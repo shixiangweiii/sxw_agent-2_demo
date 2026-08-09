@@ -26,6 +26,7 @@ from agent.runtime.domain.models import (
     utc_now_ms,
 )
 from agent.runtime.ports.store import RuntimeStore
+from common.obs import get_trace_id
 
 router = APIRouter(prefix="/api/v1/runs", tags=["runs"])
 
@@ -147,6 +148,9 @@ async def create_run(
             text=body.input.text,
             attachment_refs=tuple(body.input.attachment_refs),
             deadline_at=rfc3339_to_ms(body.deadline_at),
+            # TraceMiddleware 已把 x-trace-id（或新生成的 id）放进 contextvar。
+            # 这里把它固化到 Run 上，让另一个进程里的 Worker 能接上同一条轨迹。
+            trace_id=get_trace_id(),
         ),
         idempotency_key=idempotency_key or "",
     )

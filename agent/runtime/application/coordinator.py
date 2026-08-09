@@ -26,7 +26,7 @@ from agent.runtime.ports.tool import (
     ToolReconciliationExecutor,
     ToolReconciliationMarker,
 )
-from common.obs import get_logger, log_kv
+from common.obs import get_logger, log_kv, use_trace_id
 from common.trace import KIND_ENGINE, start_span
 
 logger = get_logger("agent.runtime.coordinator")
@@ -72,6 +72,18 @@ class RunCoordinator:
         self.tool_reconciler = tool_reconciler
 
     async def execute_claim(self, claim: Claim, *, worker_id: str) -> RunStatus:
+        """恢复本 Run 的诊断 trace_id，再执行。
+
+        Worker 进程没有 `TraceMiddleware`，contextvar 也跨不过 API→DB→Worker 这道
+        交接。不在这里恢复，`get_trace_id()` 就恒为默认值 "-"：全部 span 挤进同一条
+        轨迹、`GET /api/v1/traces/{trace_id}` 永远 404、内存里那条记录还会无限增长。
+        回落到 run_id 是为了保证**每个 Run 始终有一个唯一且可查的轨迹键**，
+        哪怕调用方没带 x-trace-id。
+        """
+        with use_trace_id(claim.run.trace_id or claim.run.envelope.run_id):
+            return await self._execute_claim(claim, worker_id=worker_id)
+
+    async def _execute_claim(self, claim: Claim, *, worker_id: str) -> RunStatus:
         activity = await self.store.mark_activity_running(
             claim.activity.activity_id,
             worker_id=worker_id,

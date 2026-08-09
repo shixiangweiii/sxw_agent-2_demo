@@ -22,7 +22,7 @@ async def test_api_and_worker_can_initialize_the_same_empty_runtime_database(tmp
         rows = await (await conn.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         )).fetchall()
-    assert [row["version"] for row in rows] == [1, 2]
+    assert [row["version"] for row in rows] == [1, 2, 3]
 
 
 @pytest.mark.asyncio
@@ -47,8 +47,13 @@ async def test_existing_v1_database_upgrades_to_tool_reconciliation_capability(t
         columns = await (await conn.execute(
             "PRAGMA table_info(tool_executions)"
         )).fetchall()
-    assert [row["version"] for row in versions] == [1, 2]
+        run_columns = await (await conn.execute(
+            "PRAGMA table_info(runs)"
+        )).fetchall()
+    assert [row["version"] for row in versions] == [1, 2, 3]
     assert "supports_reconcile" in {row["name"] for row in columns}
+    # 003：诊断 trace_id 增量补到既有库上，不需要重建（REL-029 的跨进程轨迹接力靠它）。
+    assert "trace_id" in {row["name"] for row in run_columns}
 
 
 @pytest.mark.asyncio

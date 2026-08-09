@@ -267,6 +267,7 @@ def _run_from_row(row: aiosqlite.Row) -> RunRecord:
     return RunRecord(
         envelope=envelope,
         status=RunStatus(row["state"]),
+        trace_id=row["trace_id"],
         revision=row["revision"],
         next_seq=row["next_seq"],
         current_activity_id=row["current_activity_id"],
@@ -460,8 +461,8 @@ class SqliteRuntimeStore:
                       conversation_id,turn_seq,turn_id,principal_id,agent_id,engine,deadline_at,
                       cancel_token_id,release_fingerprint,input_event_id,attachment_refs_json,
                       input_text,state,revision,next_seq,current_activity_id,terminal_status,
-                      terminal_payload_json,pending_input_json,created_at,updated_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                      terminal_payload_json,pending_input_json,created_at,updated_at,trace_id
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         command.run_id, SCHEMA_VERSION, command.request_id,
                         command.client_request_id, command.idempotency_key, conversation_id,
@@ -469,7 +470,7 @@ class SqliteRuntimeStore:
                         command.deadline_at, command.cancel_token_id, fingerprint,
                         command.input_event_id, canonical_json(list(command.attachment_refs)),
                         command.input_text, RunStatus.DISPATCH_PENDING, 0, 1, None, None,
-                        None, None, command.created_at, command.created_at,
+                        None, None, command.created_at, command.created_at, command.trace_id,
                     ),
                 )
                 activity_id = stable_id("act", command.run_id, "engine:0")

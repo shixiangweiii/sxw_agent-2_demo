@@ -37,6 +37,8 @@ class AdmissionCommand:
     input_text: str
     attachment_refs: tuple[str, ...]
     created_at: int
+    # 诊断字段，不参与 request_digest（否则同一请求换个 trace_id 重放就会撞 409）。
+    trace_id: str = ""
 
 
 @dataclass(frozen=True)

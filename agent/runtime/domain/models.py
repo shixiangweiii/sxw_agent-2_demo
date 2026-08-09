@@ -185,6 +185,11 @@ class CanonicalEvent(BaseModel):
 class RunRecord(BaseModel):
     envelope: RuntimeEnvelope
     status: RunStatus
+    # Admission 观察到的诊断 trace_id，故意留在**冻结的 RuntimeEnvelope 之外**：
+    # Trace 只诊断，不该混进入口身份契约（runtime-envelope-v1 是 R0 冻结的六契约之一）。
+    # 但它必须持久化——API 与 Worker 是两个进程，contextvar 跨不过这道 DB 交接。
+    # 空串表示调用方没带 x-trace-id；读侧回落到 run_id，见 RunCoordinator.execute_claim。
+    trace_id: str = ""
     revision: int
     next_seq: int
     current_activity_id: str | None = None

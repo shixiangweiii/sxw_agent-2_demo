@@ -6,13 +6,14 @@
 """
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import json
 import logging
 import sys
 import time
 import uuid
-from typing import Any, Callable, Awaitable
+from typing import Any, Awaitable, Callable, Iterator
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -28,6 +29,23 @@ def get_trace_id() -> str:
 
 def set_trace_id(trace_id: str) -> None:
     _trace_id_var.set(trace_id)
+
+
+@contextlib.contextmanager
+def use_trace_id(trace_id: str) -> Iterator[str]:
+    """在一段作用域内绑定 trace_id，退出时**按 token 还原**。
+
+    给没有 HTTP 中间件的常驻进程用（Worker 从持久化的 Run 上恢复 trace_id）。
+    与裸 `set_trace_id` 的关键差别是必须还原：Worker 的每个 claim 通常跑在自己的
+    `asyncio.create_task` 里（context 是副本，互不影响），但 `run_once()` 这类
+    确定性入口是**直接 await** 的——那里裸 set 会把 trace_id 泄漏给调用方，
+    并在连续多次调用间互相串味。
+    """
+    token = _trace_id_var.set(trace_id)
+    try:
+        yield trace_id
+    finally:
+        _trace_id_var.reset(token)
 
 
 def new_trace_id() -> str:

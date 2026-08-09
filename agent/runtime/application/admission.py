@@ -18,6 +18,9 @@ class CreateRunInput:
     text: str
     attachment_refs: tuple[str, ...]
     deadline_at: int | None
+    # 入口观察到的 x-trace-id。**刻意不进 digest_payload**：它是诊断信号，
+    # 让它参与幂等摘要会把"同一请求重放但换了 trace_id"误判成 409 冲突。
+    trace_id: str = ""
 
     def digest_payload(self) -> dict[str, object]:
         # Preserve attachment order: it is meaningful for multimodal prompts.
@@ -75,5 +78,6 @@ class AdmissionService:
             input_text=request.text,
             attachment_refs=request.attachment_refs,
             created_at=now,
+            trace_id=request.trace_id,
         )
         return await self.store.admit(command)

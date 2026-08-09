@@ -114,6 +114,14 @@ cp .env.example .env
 
 `full` 可能包含用户原始提问和模型完整输入；这些文件不得随评测报告分发。
 
+轨迹按 trace_id 取回：`GET /api/v1/traces/{trace_id}?level=none|summary|full`（`level` 只能在落盘级别之上再降级）。
+
+关联键的来源固定为 CreateRun 那一刻：请求带 `x-trace-id` 就用它，没带则由 `TraceMiddleware` 生成，并在响应头 `x-trace-id` 里回显。该值随 Run 持久化（`runs.trace_id`），Worker 执行时再绑定回来——API 与 Worker 是两个进程，不落库就接不上（见 ADR-0007）。所以：
+
+- 一个 Run 一条 trace、一个 JSONL 文件，文件名以 trace_id 结尾；
+- 查询的是 Run 的执行轨迹，用 CreateRun 的 trace_id，不是后续 SSE 订阅请求的；
+- API 进程查不到内存命中时读盘，因此 Worker 重启后仍可取回（受 `TRACE_RETENTION_DAYS` 约束）。
+
 ## 4. 一键启动
 
 ```bash
