@@ -12,7 +12,10 @@ from arag.components.retriever import HybridRetriever
 from arag.components.rewrite import QueryRewriter
 from arag.config import AragSettings
 from arag.processor.image import ImageProcessor
-from arag.store.factory import build_fulltext_index, build_graph_store, build_vector_store
+from arag.persistence.repository import RagRepository
+from arag.persistence.service import IndexCoordinator
+from arag.projection.snapshot import ProjectionManager
+from arag.store.factory import build_graph_store
 from arag.store.fulltext_index import FullTextIndex
 from arag.store.graph_store import GraphStore
 from arag.store.vector_store import VectorStore
@@ -34,22 +37,19 @@ class AragContext:
     retriever: HybridRetriever
     generator: Generator
     image_processor: ImageProcessor
+    repository: RagRepository
+    projections: ProjectionManager
+    index_coordinator: IndexCoordinator
 
 
 async def build_context(settings: AragSettings) -> AragContext:
-    vector_store = build_vector_store(settings)
-    fulltext_index = build_fulltext_index(settings)
+    repository = RagRepository(settings.rag_db_path, settings.rag_storage_dir)
+    await repository.initialize()
+    projections = ProjectionManager(repository)
+    await projections.rebuild()
+    vector_store = projections.vector_store
+    fulltext_index = projections.fulltext_index
     graph_store = build_graph_store(settings)
-    persisted_chunks = await vector_store.all_chunks()
-    if persisted_chunks:
-        await fulltext_index.add(persisted_chunks)
-        log_kv(
-            logger,
-            logging.INFO,
-            "Boot",
-            "rebuilt fulltext index from persisted embeddings",
-            chunks=len(persisted_chunks),
-        )
     embedder = Embedder(settings)
     chat = ChatClient(settings)
     chunker = Chunker()
@@ -57,6 +57,24 @@ async def build_context(settings: AragSettings) -> AragContext:
     retriever = HybridRetriever(vector_store, fulltext_index, embedder, rewriter)
     generator = Generator(chat)
     image_processor = ImageProcessor(chat)
+    index_coordinator = IndexCoordinator(
+        repository=repository,
+        projections=projections,
+        enricher=image_processor,
+        chunker=chunker,
+        embedder=embedder,
+        embedding_model=settings.embedding_model,
+        poll_interval_seconds=settings.index_job_poll_interval_seconds,
+    )
+    await index_coordinator.start()
+    log_kv(
+        logger,
+        logging.INFO,
+        "Boot",
+        "rebuilt search projections from rag.db authority",
+        chunks=len(projections.snapshot.chunks),
+        projection_state=await repository.projection_state(),
+    )
     return AragContext(
         settings=settings,
         vector_store=vector_store,
@@ -69,4 +87,11 @@ async def build_context(settings: AragSettings) -> AragContext:
         retriever=retriever,
         generator=generator,
         image_processor=image_processor,
+        repository=repository,
+        projections=projections,
+        index_coordinator=index_coordinator,
     )
+
+
+async def close_context(ctx: AragContext) -> None:
+    await ctx.index_coordinator.stop()

@@ -1,162 +1,136 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code when working with code in this repository.
+本仓库的完整 AI 编码约定以 `AGENTS.md` 为准；运行步骤见 `RUNBOOK.md`，R0 冻结语义见 `docs/reliability/README.md`。本文件保留 Claude/Codex 在每次改动前必须掌握的最小、同步架构上下文。
 
-> 项目定位与能力总览见 `README.md`，逐步运行、环境变量和排障见 `RUNBOOK.md`，评测方案见 `eval/README.md`。本文件记录 AI 编码时需要掌握的项目背景、目标、跨模块架构与工程约定。
+## 定位与决策
 
-## 项目背景与定位
+项目用于个人学习、架构验证和面试准备，不承担真实线上流量。目标是单机持久化可靠 Agent Runtime 参考实现，而不是分布式 HA。
 
-本项目由公司生产项目的核心链路抽取、简化而来，用于个人学习、技术方案验证和面试准备。目标是保留生产级 Agent 系统的主链路形状和关键工程取舍，并将它们组织成可在本机独立运行、便于讲解和持续实验的样板工程；它不是生产源码的完整镜像，也不承担真实线上流量。
+不兼容旧接口、旧本地数据、旧状态或旧行为，不建设兼容层、双写或迁移。优先选择清晰、先进、可验证的设计；改动后仍必须保持四服务五进程、主链路和可靠性测试完整。
 
-需要对照生产实现时，可参考以下本机源码，但应提炼设计而不是机械复制内部治理逻辑：
+生产实现参考（只提炼设计）：
 
-| 方向 | 参考路径 |
+| 方向 | 路径 |
 |---|---|
-| 接入层、会话管理、文件上传 | `/Users/shixiangweii/IdeaProjects/sxw_work/codes/fy26_albert_chat2/albert-chat-2` |
-| Agent 核心运行时与推理引擎 | `/Users/shixiangweii/PycharmProjects/fy26_deap_agent/albert-agent-2` |
-| 技能中心与 A2A | `/Users/shixiangweii/IdeaProjects/sxw_work/codes/2026_albert-skill-center_proj/albert-skill-center` |
+| 接入/会话/上传 | `/Users/shixiangweii/IdeaProjects/sxw_work/codes/fy26_albert_chat2/albert-chat-2` |
+| Agent Runtime | `/Users/shixiangweii/PycharmProjects/fy26_deap_agent/albert-agent-2` |
+| Skill Center/A2A | `/Users/shixiangweii/IdeaProjects/sxw_work/codes/2026_albert-skill-center_proj/albert-skill-center` |
 | ARAG | `/Users/shixiangweii/PycharmProjects/arag_learn_proj/lippi-arag` |
 
-## 项目目标
+## 主链路
 
-1. 展示 Plan-Execute → ADK 驱动的 Tool-Use Loop → 自研 Tool-Use Loop 三代推理引擎的演进、统一抽象、适用场景和行为差异。
-2. 复刻工具调用、技能执行、子代理委派、异常反馈、熔断、降级和引用生成等生产级主链路。
-3. 展示向量检索、BM25、RRF 融合、查询改写、多模态入库与持久化组成的工程化 RAG。
-4. 通过 SSE、trace_id、结构化日志和真实 LLM 黑盒评测，让系统可运行、可观察、可比较。
-5. 为面试讲解和后续技术实验提供结构清晰、边界诚实、易于演进的代码基线。
+```text
+Artifact upload → POST /api/v1/runs → runtime.db
+→ independent Runtime Worker → RunCoordinator
+→ per-Run EngineAdapter → Tool/Artifact/ARAG/Skill/A2A
+→ committed Canonical Events → SSE replay/tail
+```
 
-## 改造原则与交付要求
+进程：Runtime API(:8000)、Runtime Worker、ARAG(:8100)、skill-center(:8200)、A2A(:8300)。API 只做 admission/status/cancel/signal/Event/Artifact/Web，不能加载 LLM 或远程 Tool 目录；Worker 负责执行并注册三个 immutable engine release。
 
-- **先进方案优先**：本项目不要求历史兼容、存量技术债兼容或线上灰度兼容。旧接口、数据结构和实现不再合理时，可以直接调整、替换或删除，无须为历史行为保留兼容层。
-- **主链路必须完整**：不背兼容包袱不等于降低工程质量。改动后应保持四服务可启动、核心链路可运行、可选下游故障可降级，并完成与风险相称的验证。
-- **跨文件保持一致**：代码变更涉及架构、配置、端口、命令、能力边界或评测行为时，同步更新 `README.md`、`RUNBOOK.md`、本文件、`AGENTS.md` 和相关评测资料。
-- **聚焦核心价值**：优先实现能说明 Agent Runtime、RAG、技能/A2A、可靠性或评测方法的能力；与学习和面试主线无关的企业内部治理可以继续裁剪。
-- **诚实描述边界**：不得把演示桩或预留端口写成已投产能力。`native_loop` 尚未评测，`eval/reports/` 下的数字全部来自 `agent_loop`/`plan_execute`，不得套用；其压缩阈值在上游不返回 usage 时是**字符估算**（日志标 `estimated=true`），不是精确 token 计数。PromptCache 的显式缓存断点仅对 Anthropic 生效；AgentBay 未接真实 SDK；GraphStore 未接检索流；LocalSandbox 不是生产级隔离；Claude SKILL 尚不支持 Artifact 跨 Skill 传递和 HITL/暂停恢复。
-- **保护敏感信息**：API Key 只允许通过真实环境变量或被 Git 忽略的本地 `.env` 注入，禁止写入代码、文档、评测产物或提交历史。
+## 不变量
 
-## 当前系统概览
+- CreateRun 必填 `Idempotency-Key` 与 `engine=plan_execute|agent_loop|native_loop`；engine 是 Run 不可变字段。
+- 同 scope key+digest 返回原 Run，不同 digest 409；幂等重放优先于 conversation busy。
+- 同 conversation 同时最多一个非终态 Run。
+- `runs` 是 status/terminal 唯一裁判，terminal 最多一个且只由 RunCoordinator 提交。
+- Activity 由 `activities` 裁决；WorkingState 的 model plan 不是调度表。
+- history 由 committed USER + 仅成功 ASSISTANT + checkpoint 编译；失败 partial delta 不进入后续语义历史。
+- Canonical Event append-only；seq 分配和插入同事务。只有 committed event 可被 SSE 读取。
+- output delta 按 100ms/2KiB 聚合并在边界前 flush；final assistant + citation + success terminal 原子提交。
+- SSE 断开只停止观看，不取消 Run。cursor 在客户端；首版无服务端 ACK/观看位置表。
+- lease/revision/fencing 抑制过期 Worker 迟到结果；Worker 丢失只触发恢复。
+- deadline 为绝对 UTC；所有下游接收剩余预算。
+- Trace 只诊断，关闭/缺失不影响恢复。
+- SQLite 写事务必须短，事务内禁止 LLM、Tool、RAG、Skill、文件系统或等待人工。
 
-基于 **Google ADK 2.6.2** 精简复刻的生产级 AI Agent 系统，由 **4 个独立的 FastAPI/uvicorn 服务**经 HTTP 协作。核心卖点是「**Agent 运行时的规划/推理引擎**」与混合召回 RAG。代码与文档以中文为主。
+完整状态机、错误码和 failure matrix 在 `docs/reliability/`；实现与其冲突时不得静默另起语义。
 
-## 常用命令
+## 存储
 
-所有 Python 命令都走仓库自带 `.venv`（**不要用系统 python**）：
+| 路径 | Authority |
+|---|---|
+| `local_storage/runtime/runtime.db` | Run/Activity/Event/Checkpoint/ToolExecution/Signal/Timer/Release |
+| `local_storage/artifacts/sha256/` | Runtime Artifact bytes |
+| `local_storage/arag/rag.db` | Document/version/chunk/index job 权威及可重算 embedding rows |
+| `local_storage/arag/documents/sha256/` | 原始文档 bytes |
+| `local_storage/demo_effects/effects.db` | 模拟外部副作用，故意独立 |
+| `local_storage/traces/` | 诊断，不是业务事实 |
+
+Runtime/RAG 使用 `aiosqlite + 显式 SQL + checksum migration`，不引入 ORM/Alembic 或第二 backend。Runtime 连接启用 WAL、`synchronous=FULL`、foreign keys、busy timeout；未知 schema/checksum 改写 fail-fast。
+
+Artifact ID 等于 SHA-256；写入为 temp/fsync/atomic rename/fsync dir，再提交 metadata/ref。非图片附件只给模型已校验的 8KiB preview，`read_artifact` 有界读取默认 32KiB/最大 64KiB；图片从已校验 CAS 物化为 attempt-local 多模态 Part。HTTP Range 单次 1MiB。大结果/read 切片只存 Artifact ref/preview，native 恢复时重新物化。
+
+## 三代引擎
+
+公开端口：`EngineAdapter.execute(EngineRunRequest, RuntimeIO) -> EngineOutcome`。内部 `ReasoningEngine` 和 event draft 只是 adapter 内兼容面，不能裁决公开 terminal。
+
+- `plan_execute`：显式 decision plan → execution；plan checkpoint 后不得重新规划。
+- `agent_loop`：ADK `BaseLlmFlow` 驱动 Tool-Use Loop；Plugin/LiteLlm 做 guard、异常反馈和循环控制。
+- `native_loop`：自研 loop；只读工具分批并发、流式工具执行、compact；`native-kernel-v1` 在 model request、完整 ToolCall batch、每个 ToolResult、next-turn/completed 提交 checkpoint。
+
+三引擎共享系统指令/Tool/Skill/RAG 契约。修改共享 prompt/工具必须分别验证两个 loop 引擎。`SUB_AGENT_ENGINE` 取 `auto` 时跟随当前 Run；远端 A2A 不受影响。
+
+两个 ADK 引擎只承诺 invocation/step 边界恢复，不宣称 mid-turn deterministic replay。ADK attempt-local session/artifact 用后销毁；native 不得恢复进程级历史。`native_loop` 从最后 committed kernel checkpoint 恢复；半个 model stream 重放 model slot，已提交 ToolExecution 由稳定 slot/Broker 复用，但不承诺 provider token 级流重放。`/reliability-demo` 是在通用 checkpoint 之上的 HITL signal → 独立幂等副作用 → Artifact 确定性纵切。
+
+## Tool、Skill、A2A
+
+Tool effect 必须显式分类：
+
+- READ_ONLY 可受控 retry；
+- IDEMPOTENT_EFFECT 必须透传 Runtime stable idempotency key；
+- NON_IDEMPOTENT_EFFECT/UNKNOWN_EFFECT 不得透明 retry；
+- dispatch 后 timeout/ACK 不明进入 UNKNOWN → reconcile/manual；MANUAL_REQUIRED 只接受严格 `tool_reconciliation` signal，人工 committed/failed 或再次查询与 Tool Activity、canonical result、父 Run 原子推进，人工 failed 不得重发；
+- COMMITTED 结果复用；同 stable slot 的 name/request digest 不一致 fail closed。
+
+未评审的新 Skill/A2A/Claude SKILL 默认 UNKNOWN_EFFECT。Skill UI 必须先 commit Canonical Event 再发布。
+
+skill-center NDJSON 以独立 EOF frame 结束并保留首个失败 sticky。Claude SKILL 是 Agent-as-Tool，LocalSandbox 非生产隔离，AgentBay 是桩；无跨 Skill Artifact 和子 Runner HITL。A2A 是无父历史远端新会话，请求必须自包含。
+
+精确锁定 `google-adk[a2a]==2.6.2` 和 `a2a-sdk==1.1.2`；依赖 ADK 私有契约处升级时重新审计，缺符号应 fail-fast。
+
+## ARAG
+
+入库是 durable job：`PREPARED → BUILDING → VALIDATING → READY → ACTIVATED|FAILED`。parse/caption/embed 在事务外；验证后单事务切 active version。Retrieval 只看 active version，旧 chunks 不可见。
+
+numpy vector/BM25 是从 `rag.db` active truth 重建的不可变投影，不是 Document SSOT。投影损坏应重建并返回 DEGRADED。检索稳定区分 HIT/MISS/DEGRADED/DENIED/ERROR；Evidence 带完整 document/index/version/hash/page/span/scope/query 字段。
+
+GraphStore 仍未接检索流。
+
+## 命令
+
+所有 Python 使用 `.venv`：
 
 ```bash
 PY=.venv/bin/python
 
-# 一键启动全部 4 服务（先下游后 agent，自动健康检查 + 入库样本知识库），Ctrl-C 一并退出
 bash scripts/run_all.sh
+bash scripts/check.sh
 
-# 单独起某个服务（注意 agent 须最后起：它启动时会拉技能目录 + 发现 A2A）
+# 手动五进程
 $PY -m uvicorn a2a_service.main:app --port 8300
 $PY -m uvicorn skillcenter.main:app --port 8200
 $PY -m uvicorn arag.main:app        --port 8100
+$PY -m agent.runtime.worker.main
 $PY -m uvicorn agent.main:app       --port 8000
 
-# 入库样本知识库（首次运行或清空 local_storage/embedding 后执行；重复入库按 chunk_id 覆盖）
-curl -X POST http://127.0.0.1:8100/v1/index/sample
-
-# 重建虚拟环境（仅当 .venv/ 不存在）
-python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
+# 真实 LLM 行为评测（需环境变量 Key）
+bash eval/run_eval.sh
 ```
 
-**本仓库没有单元测试**。`py_compile` 是约定的编译校验门（替代单测）：
+`run_all.sh` 必须等待本次 Worker 的新鲜 `ACTIVE` heartbeat，且 release map 与三个 active pointers 完全一致后才能启动 API；不能用旧库中已有的三行 pointer 充当 readiness。脚本保持 macOS Bash 3.2 兼容，并监督全部五个进程。
 
-```bash
-find agent arag common skillcenter a2a_service -name '*.py' | xargs "$PY" -m py_compile
-```
+`scripts/check.sh` 执行 py_compile、`pytest tests/reliability`、schema/checksum 和旧协议扫描。可靠性 PASS 不依赖真实 LLM；smoke/eval 依赖真实 Key，行为得分不能替代可靠性门禁。
 
-端到端评测（真实 LLM 黑盒、解析 SSE）走 `eval/` harness；它依赖**两个 agent 实例**（8000=agent_loop / 8001=plan_execute，因 `ENGINE` 是启动期配置不可单请求切换）：
+## 改动要求
 
-```bash
-export DASHSCOPE_API_KEY=sk-***   # 仅环境变量，切勿写入任何文件
-bash eval/run_eval.sh             # 两引擎各跑一遍并聚合报告；arag-down pass 需手动停 arag 后单独跑
-# 或手动分步：
-$PY -m eval.harness.runner --engine agent_loop   --base-url http://127.0.0.1:8000 --out eval/reports/<ts>
-$PY -m eval.harness.runner --engine plan_execute --base-url http://127.0.0.1:8001 --out eval/reports/<ts>
-# native_loop 需第三个实例（:8002）；本轮尚未产出评测数字
-$PY -m eval.harness.report --out eval/reports/<ts>      # 聚合出 summary.md
-# 单 suite：--suite routing；arag-down 鲁棒性子集：先停 arag 再加 --only-arag-down
-# 降方差：--repeat 3；不重跑 LLM 只重评分：$PY -m eval.harness.rescore --out eval/reports/<ts>
-```
+- 改状态机/事务/契约：先读 `docs/reliability/`，同步 ADR、JSON Schema 和 reliability test。
+- 改架构、API、配置、端口、能力边界或 eval：同步 `README.md`、`RUNBOOK.md`、`AGENTS.md`、本文件、`eval/README.md`、`.env.example`。
+- 新 Tool 必须注册 effect manifest；新 native 只读 Tool 还要显式并发安全。
+- 新 Claude SKILL 包含根 `SKILL.md`、frontmatter 和全部资源；默认不并行、effect unknown。
+- API Key 只在真实环境变量/被忽略 `.env`，禁止出现在代码、文档、报告和提交。
+- 工作树可能有用户改动；保留无关修改，不做破坏性 reset。
 
-> 首版报告位于 `eval/reports/20260629-090605/`；A/B prompt 回归位于 `eval/reports/{baseline-r3,improved-r3}/`。现有结果表明同一 prompt 改动可能让两代引擎产生相反收益，因此修改 prompt、工具集或循环控制时必须分别验证两代引擎，不能用一套结果代替另一套。
+## 诚实边界
 
-## 架构大局
-
-### 服务拓扑与调用链
-```
-用户 → agent(:8000) ──┬─→ arag(:8100)         知识检索（混合召回 RAG）
-                      ├─→ skill-center(:8200)  技能目录/执行 + A2A 注册表
-                      └─→ a2a_service(:8300)   A2A 远程子代理（ADK to_a2a 暴露 math_expert）
-```
-**对外只需访问 agent**。下游不可用时一律 **best-effort 降级**（不阻断 agent 启动 / 不中断对话），对应能力静默跳过——排障时按 `[QaRetrieve] degraded`、`[SkillCatalog] ... skip`、`[A2ALoad] ... skip` 等日志定位。
-
-agent 还内置浏览器 Web Chat：`web/` 中的静态资源由 `agent/main.py` 挂载到 `GET /chat-ui/`，根路径 `/` 重定向到该页面；文档上传经 agent 的 `POST /api/v1/documents/index` 代理转发到 arag `/v1/index`。
-
-### 三代推理引擎（核心抽象）
-`agent/engine/base.py` 定义统一端口 `ReasoningEngine.run_stream(ctx) -> AsyncIterator[StreamEvent]`，由 `build_engine()` 按 `ENGINE` 配置选型。对比轴是**循环归谁驱动**：
-- **`plan_execute`**（Gen1）：`decision_planner` 出计划 → `execution_planner` 逐步执行。前置规划、可控可解释。
-- **`agent_loop`**（Gen2，默认）：Tool-Use Agent Loop，但 `while` 在 ADK `BaseLlmFlow.run_async()` 内部；我们只在 Plugin / LiteLlm 子类两个扩展点上挂策略。
-- **`native_loop`**（Gen3）：**自研循环，不依赖任何 Agent 框架**，以 Claude Code `src/query.ts:241 queryLoop()` 为蓝本，`while` 在 `agent/engine/native_loop/loop.py` 里。
-
-**三引擎共享**同一套工具面、系统指令、检索/技能/citation 下游与 SSE 契约；切换只改「循环归谁驱动」。
-
-**工具面**：`translate`/`text_stats`/`tool_search`/`update_task_plan`/`researcher` 是两代 loop 引擎共有、`plan_execute` 没有的（`plan_execute` 只用 `ctx.tools`）。共享部分收在 `agent/engine/loop_tools/`（含 `LOOP_INSTRUCTION`），两代 loop 引擎 import 同一份——**改工具面或 prompt 必须两边同时生效**，否则对比就退化成工具面之争 / prompt 之争。评测只在共享子集上对比。
-
-**`native_loop` 相对 `agent_loop` 多出的能力**（都是 ADK 插件面表达不了的）：
-1. 按只读性分批的**工具并发调度**（连续 `concurrency_safe` 并发、其余串行、批次间保序；Claude SKILL 的 `parallel_safe`/`exclusive_resources` frontmatter 在这里真正驱动主循环调度）；
-2. **流式工具执行**——**一轮内除最后一个之外的 tool_call 可提前开跑**，不必等模型流结束（完整性信号是「出现了更高 index」，故末个调用必然等到流末；单工具调用轮因此无收益）。安全阀 `NATIVE_STREAMING_TOOL_EXEC=false` 可退化为流完再跑；
-3. CC 式**上下文压缩**：阈值触发摘要 + compact boundary + preserved tail + 413 反应式恢复（`agent_loop` 是 `MessageBudget` 硬裁头部，两者行为不同，是有意保留的对比素材）；
-4. 自己拥有工具参数解析，因此**不需要** `tool_args_normalizer` 那套 ADK 私有符号 monkeypatch。
-
-`native_loop` 的每个续推/收口点都带命名 transition（`next_turn`/`force_summary`/`reactive_compact_retry`/`hard_cap`/`completed`/`model_error`），走 `[LoopControl]` 日志。
-
-Claude SKILL 采用 **Agent-as-Tool**：一个 Skill Agent 只执行一个 SKILL 包，对主循环表现为一次标准工具调用。项目不另设 MultiSkillOrchestrator、DAG 或独立 Skill 状态机；有依赖的 Skill 由主 Agent 收到上游 `tool_result` 后跨轮串行调用，同轮并行仅用于彼此独立的调用。`update_task_plan` 只是复杂任务的可选进度记录，不是调度器。
-
-### 生产级加固落在两个 ADK 扩展点（面试主线）
-1. **ADK Plugin** `agent/plugins/agent_invocation_plugin.py`：`before_tool_callback` 短路工具参数解析 sentinel；`on_tool_error_callback` 把框架级异常封装成 `function_response` 喂回模型、**不中断 turn**；`before_model_callback` 做计划续推 / 消息预算 / force-summary。
-2. **LiteLlm 子类/适配层** `agent/llm/`：在 ADK 构造 FunctionCall 前把非对象参数规范化为 sentinel（计划顶层数组可无歧义恢复），并提供上下文超长截断重试、异常分类、PromptCache 缓存断点（provider-aware）。
-
-> ⚠️ 诚实声明：PromptCache 显式缓存断点为 Anthropic 专属，本 demo 默认 provider（DashScope/Qwen）下为 no-op。
-
-### 三种「扩展智能体」机制（不要混淆）
-- **skill-center 技能**（`agent/skills/` → `skillcenter/`）：远程 MCP 风格执行网关；NDJSON 契约为数据帧 `eof=false` + 独立 `eof=true,data=null`；缺 EOF/坏帧按稳定错误码处理，首个失败 sticky 保留到 function response 与 `[SkillInvoke]` 日志；展示帧经 UI 队列合并为 `skill_event`。
-- **SKILL Agent-as-Tool**（代码目录 `agent/claude_skill/`）：每次调用把完整技能包复制到独立沙箱的 `skills/<skill_id>/`，子 Agent 必须先读取根部 `SKILL.md` 再执行；独立 Runner 带轻量 ToolArgsGuard。Runtime 负责调用身份、超时、取消和并发治理，主 Agent 只接收标准、长度受限的 `tool_result`。`LocalSandbox` 可跑，`AgentBay` 仍是不可运行的云桩；该能力纯本地，不依赖下游服务。
-- **A2A 远程子代理**（`agent/a2a/loader.py` + `a2a_service/`）：ADK 原生 A2A，经 agent-card 发现 + JSON-RPC 委派；每次远程调用是无父历史的新会话，request 必须自包含；skill-center 作注册表。
-
-### RAG（arag）
-`query → rewrite → 向量(numpy 余弦)+全文(BM25/jieba) 双路 → RRF 互惠排名融合 → 低价值过滤`。入库链路 `parse → image caption(视觉) → chunk → embed → store`。存储是**端口-适配器**设计（`arag/store/`：VectorStore / FullTextIndex / GraphStore）。当前 `local` 向量库会把 embedding 与 chunk 元数据持久化到 `local_storage/embedding/`，arag 重启后自动加载并用 chunks 重建 BM25；GraphStore 仍是内存端口占位。
-
-### 流式与可观测
-统一 SSE 事件：`text · tool_call · tool_result · plan_step · citation · skill_event · done · error`。`common/obs.py` 提供 `trace_id` 全链路透传 + 结构化 JSON 日志；日志按 `[Tag]` 前缀检索（`[QaRetrieve]` `[SkillInvoke]` `[ClaudeSkill]` `[A2ALoad]` `[LoopControl]` …）。`common/skill_contract.py` 是技能线协议契约。
-
-**结构化轨迹（`common/trace.py`）**：日志回答"发生了什么"，轨迹回答"**为什么**"。一次请求 = 一棵 Span 树（`request / plan / turn / llm / tool / retrieval / compact`），记录每轮模型**真正看到的输入**（含续推提醒、force-summary、压缩摘要）、token、耗时、工具参数与结果、检索质量信号。落盘为 `local_storage/traces/<YYYYMMDD>/<日期>-<时分秒>-<当日序号>-<引擎>-<trace_id>.jsonl`（span 关闭即追加一行，进程被 kill 也留下可读的半截轨迹）。查询走 `GET /api/v1/traces/{trace_id}?level=summary|full`。
-
-- **埋点分布**：`chat.py` 的 root span + SSE 旁路（引擎无关，一处覆盖三代）；`AgentInvocationPlugin`（**同时覆盖 agent_loop 与 plan_execute**）；`native_loop` 的 loop/llm_client/executor。三代引擎的 span 树**同构**——`plan_execute` 仅多一个 `plan.decision`。
-- ⚠️ **诚实边界**：ADK 的插件回调是离散点，`adk.turn` 的边界靠"下一次 before_model / run 结束"**推断**，duration 略失真；`native.turn` 是循环体内真实的一圈。比较两代耗时时须知道这个差别。
-- ⚠️ `after_model_callback` 在 ADK 流式循环**内部**触发（每个增量块一次），必须按 `partial` 过滤，否则一轮会产出几十个 llm span。
-- 图片/二进制在落盘前一律替换为占位摘要（约定同 `native_loop/compact.py::_render_content`）；不做这件事的话，单条多模态轨迹会从 ~4 KB 涨到 ~2 MB。
-- `trace_id` 是**客户端可控**的（`TraceMiddleware` 采纳 `x-trace-id`），进文件名前必须走白名单净化——这是评测建立联查键的同一条路径。
-
-## 项目特定约定与坑
-
-- **配置**：每个服务用 `pydantic-settings` 读取**同目录 `.env`**（字段名大写即环境变量名，真实环境变量优先）。改 `.env` 后须**重启对应服务**才生效。密钥 `DASHSCOPE_API_KEY` 切勿提交。
-- **换模型/换厂商**只改 `LLM_MODEL` / `LLM_BASE_URL` / `DASHSCOPE_API_KEY`（内部用 `openai/<LLM_MODEL>` 走 litellm 的 openai 兼容 provider）。
-- **A2A 依赖精确锁定**：`google-adk[a2a]==2.6.2`、`a2a-sdk==1.1.2`。ADK 的 A2A 仍标 EXPERIMENTAL，导入有 `UserWarning` 属正常。
-- **ADK 私有契约须随版本审计**：工具参数 shim 依赖 LiteLlm 私有转换切面，`ClaudeSkillTool._detect_error_in_response` 依赖 function flow 的动态 telemetry hook。仓库精确 pin `google-adk==2.6.2`；私有符号不匹配应启动失败而非静默降级。
-- **trace 落盘含用户原始提问与每轮模型完整输入**（`TRACE_PAYLOAD_LEVEL=full` 为本 demo 的调试取向默认值）。`local_storage/` 已被 gitignore，但这些文件**不得随评测报告分发**；入库的只有 `eval/reports/<ts>/traces/` 下的 summary 级轨迹。
-- **熔断**：`MAX_LOOP_ITERS`（默认 8）是 loop 引擎软收尾轮次；硬熔断 = 该值 + 2。`agent_loop`/`plan_execute` 靠 `RunConfig.max_llm_calls`（抛 `LlmCallsLimitExceededError`），`native_loop` 是循环自查后收口为 `error` 事件。
-- **子引擎切换**：`SUB_AGENT_ENGINE=auto|adk|native` 决定 researcher 与 **Claude SKILL 子 Runner** 用哪一代循环（`auto` 跟随主引擎，`plan_execute` 视同 `adk`）。**A2A 不受此项影响**——远端跑在 `a2a_service` 自己的 ADK 上，agent 侧开关改不了它。
-- **ADK `AgentTool` 在 native_loop 下必须走桥接**：`AgentTool.run_async` 硬依赖 `tool_context._invocation_context`（取 user_id / credential_service / plugin_manager），鸭子类型 shim 满足不了。`build_registry` 会自动识别并改走 `agent/engine/native_loop/adk_bridge.py`（自建子 Runner）。新增 ADK 原生工具时注意这条，否则表现为「该工具永远失败」。
-- **Claude SKILL 运行时配置**：`SKILL_CALL_TIMEOUT_SECONDS=120`（含排队、装载、执行和结果整理）、`SKILL_MAX_LLM_CALLS=16`、`SKILL_MAX_PARALLEL_CALLS=2`、`SKILL_RESULT_MAX_CHARS=8000`。修改后须重启 agent。
-- **Claude SKILL 并发**：同一 invocation 内默认串行；只有 frontmatter 为 `parallel_safe: true` 且 `exclusive_resources: []` 时才允许并行，同时受进程级并发上限控制。声明同名独占资源的调用跨请求互斥。
-- **沙箱**：`SANDBOX_PROVIDER=local` 才真实可跑（子进程，**非生产隔离**）；`agentbay` 是云桩，调用即 `SandboxUnavailableError`。每次调用整包复制且独立清理；当前没有 Artifact 跨 Skill 传递、HITL/暂停恢复或真实 AgentBay，不能依赖共享目录跨 Skill 传文件。
-
-## 如何新增能力
-
-- **通用工具**：在 `agent/tools/builtin_tools.py` 写带类型注解 + docstring 的函数 → 加入 `build_builtin_tools()`（ADK 自动转 FunctionTool；`native_loop` 由 `agent/engine/native_loop/tools.py::from_function` 自行生成 schema，只读工具记得加进该文件的 `_READ_ONLY_TOOLS` 才能进并发批次）。
-- **skill-center 技能**：在 `skillcenter/skills.py` 的 `SKILL_DEFS` 加定义 + 在 `execute_sync`/`execute_streaming` 加分支。
-- **SKILL 沙箱技能**：在 `agent/claude_skill/skills_data/<id>/SKILL.md` 写 `name`、`description`、`parallel_safe`、`exclusive_resources` frontmatter + 指令体；`scripts/`、`references/` 和资源文件放在同一技能包目录并随调用整包复制。`parallel_safe` 默认 `false`，`exclusive_resources` 默认空列表。
-- **A2A 子代理**：在 `a2a_service/agents.py` 定义 ADK `LlmAgent` 并 `to_a2a` 暴露；在 `skillcenter/a2a_api.py` 注册到 `/instance/list`。
+没有 Memory、完整 Context Compiler、PostgreSQL/Temporal、分布式 HA、磁盘容灾或服务端 Delivery ACK。Prompt cache 显式断点仅 Anthropic 生效；默认 DashScope 是 no-op。Runtime 已有 Artifact/signal 不代表 Claude SKILL/A2A 自动具备跨调用 Artifact 或 HITL。

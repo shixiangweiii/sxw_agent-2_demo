@@ -1,6 +1,7 @@
-"""ADK Event → 统一 SSE 流事件。
+"""ADK Event → Engine event drafts.
 
-SSE 事件类型：text | tool_call | tool_result | plan_step | citation | done | error
+This is not a delivery or terminal protocol. Runtime adapters first commit the
+drafts as Canonical Events; SSE only reads those committed rows.
 """
 from __future__ import annotations
 
@@ -13,11 +14,12 @@ from typing import Any
 class StreamEvent:
     event: str
     data: dict[str, Any] = field(default_factory=dict)
-
-
-def sse_format(ev: StreamEvent) -> str:
-    """序列化为 SSE 帧：`event: <type>\\ndata: <json>\\n\\n`。"""
-    return f"event: {ev.event}\ndata: {json.dumps(ev.data, ensure_ascii=False)}\n\n"
+    # Attempt-local routing hint for the Engine Adapter.  It is deliberately
+    # outside ``data`` so it can never leak into a Canonical Event/SSE payload.
+    # ``broker`` means the durable Tool Broker already owns call/result facts;
+    # ``engine`` is reserved for synthesized failures that never dispatched
+    # and therefore have no ToolExecution ledger row.
+    authority: str | None = None
 
 
 def _json_safe(obj: Any) -> Any:
@@ -29,7 +31,7 @@ def _json_safe(obj: Any) -> Any:
 
 
 def adk_event_to_stream_events(event: Any) -> list[StreamEvent]:
-    """把单个 ADK Event 翻译为零或多个 SSE 流事件。
+    """把单个 ADK Event 翻译为零或多个 Engine event draft。
 
     文本只取流式增量（``event.partial`` 为真）；最终聚合文本跳过以免重复。
     工具调用 / 工具结果出现在非流式事件里，原样转出。

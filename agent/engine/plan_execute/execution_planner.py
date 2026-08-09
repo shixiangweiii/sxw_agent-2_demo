@@ -7,9 +7,9 @@ from google.adk.agents import LlmAgent
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.runners import Runner
 
-from agent.engine.base import RunContext
+from agent.engine.base import APP_NAME, RunContext
 from agent.plugins.agent_invocation_plugin import AgentInvocationPlugin
-from agent.session.session_service import APP_NAME
+from agent.runtime.adapters.brokered_tools import AdkToolBatch, broker_adk_tools
 from agent.skills.stream_merge import merge_runner_events
 from agent.stream.event_converters import StreamEvent, adk_event_to_stream_events
 
@@ -38,6 +38,7 @@ class ExecutionPlanner:
         self._ctx = ctx
 
     async def execute(self, rc: RunContext, plan: list[str]) -> AsyncIterator[StreamEvent]:
+        tool_batch = AdkToolBatch(rc) if rc.tool_broker is not None else None
         agent = LlmAgent(
             name="executor",
             model=self._ctx.llm,
@@ -45,16 +46,16 @@ class ExecutionPlanner:
             instruction=_build_instruction(plan),
             # 只用共享工具集：没有 update_task_plan / tool_search / 延迟工具 / researcher。
             # 这也是评测只在共享子集上对比两代引擎的原因（否则是工具面之争，不是引擎之争）。
-            tools=list(self._ctx.tools),
+            tools=broker_adk_tools(list(self._ctx.tools), rc, batch=tool_batch),
         )
         runner = Runner(
             app_name=APP_NAME,
             agent=agent,
-            session_service=self._ctx.session_manager.service,
-            artifact_service=self._ctx.artifact_service,
+            session_service=rc.session_service,
+            artifact_service=rc.artifact_service,
             # 与 Agent-Loop 对齐：ToolErrorFeedback（工具异常喂回不中断）。
             # 不传 LoopController → before_model 为 no-op，不引入续推/force-summary 语义。
-            plugins=[AgentInvocationPlugin()],
+            plugins=[AgentInvocationPlugin(tool_batch=tool_batch)],
         )
         # 与 agent_loop 同值的硬熔断，但**没有软收尾**：这里不挂 LoopController，
         # 所以触顶时是直接抛 LlmCallsLimitExceededError（最终表现为一个 error 事件），

@@ -13,10 +13,12 @@ fastapi
 uvicorn[standard]
 sse-starlette
 python-multipart                 # multipart 上传（多模态图片/文件）
+aiosqlite==0.22.1                # Canonical Runtime / RAG SQLite（显式 SQL）
 
 # --- HTTP / config ---
 httpx
 pydantic-settings
+python-dotenv>=1,<2                # run_all 与各 BaseSettings 共享同一 .env/真实环境变量解析语义
 PyYAML>=6,<7                    # Claude SKILL frontmatter 安全解析
 
 # --- LLM / embeddings ---

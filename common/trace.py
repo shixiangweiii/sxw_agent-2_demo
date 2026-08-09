@@ -269,9 +269,23 @@ def redact(value: Any, _depth: int = 0) -> Any:
 
     if isinstance(value, dict):
         out: dict[str, Any] = {}
+        artifact_backed = any(
+            value.get(key)
+            for key in ("artifact_ref", "result_ref", "evidence_set_ref")
+        )
         for key, item in value.items():
             name = str(key)
-            out[name] = "***" if _SECRET_KEY_RE.search(name) else redact(item, _depth + 1)
+            if _SECRET_KEY_RE.search(name):
+                out[name] = "***"
+            elif artifact_backed and name in {
+                "content", "preview", "data", "response", "result",
+            }:
+                # The durable Artifact is the authority.  A trace retains its
+                # ref plus a digest/size signal, never another copy of the model
+                # slice or large ToolResult.
+                out[name] = _artifact_payload_digest(item)
+            else:
+                out[name] = redact(item, _depth + 1)
         return out
 
     if isinstance(value, (list, tuple, set)):
@@ -290,6 +304,20 @@ def redact(value: Any, _depth: int = 0) -> Any:
         except Exception:  # noqa: BLE001
             pass
     return redact(str(value), _depth + 1)
+
+
+def _artifact_payload_digest(value: Any) -> dict[str, Any]:
+    try:
+        text = value if isinstance(value, str) else json.dumps(
+            value, ensure_ascii=False, default=str, sort_keys=True,
+        )
+    except (TypeError, ValueError):
+        text = str(value)
+    return {
+        "artifact_backed": True,
+        "chars": len(text),
+        "sha1": _sha1(text.encode("utf-8", "replace")),
+    }
 
 
 # ── 落盘 ───────────────────────────────────────────────────────────────────
@@ -323,9 +351,8 @@ class _Tracer:
     # 每天首次写入时扫当日目录取 max 续号：抗进程重启（否则重启后序号归零、
     # 与既有文件撞名）。一天一次 O(n)，可忽略。
     #
-    # ⚠️ seq 是「**本进程**当日第 N 次」，不是全局序号。评测双实例
-    # （8000=agent_loop / 8001=plan_execute）并跑时两串序号会交错——
-    # 文件名里的 engine 段与 trace_id 段保证不撞车。
+    # ⚠️ seq 是「**本进程**当日第 N 次」，不是全局序号。API、Worker
+    # 和下游进程各自记录；文件名里的 engine 段与 trace_id 段避免撞车。
     def _next_seq(self, day: str, day_dir: Path) -> int:
         if day != self._seq_day:
             self._seq_day = day

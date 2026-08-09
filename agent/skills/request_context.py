@@ -16,6 +16,10 @@ class SkillRequestContext:
     session_id: str
     text: str = ""
     user: dict[str, Any] = field(default_factory=dict)
+    run_id: str = ""
+    activity_id: str = ""
+    deadline_at_ms: int | None = None
+    idempotency_key: str = ""
 
 
 _var: contextvars.ContextVar[Optional[SkillRequestContext]] = contextvars.ContextVar(

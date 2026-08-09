@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sxw-agent.local/schemas/runtime-envelope-v1.schema.json",
+  "title": "RuntimeEnvelope v1",
+  "description": "Admission 事务生成后冻结的 Store 权威对象。此 Schema 校验 SQLite/领域序列化形状，因此时间为 UTC epoch milliseconds；HTTP API 在边界处投影为 RFC3339 UTC。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "request_id",
+    "client_request_id",
+    "idempotency_key",
+    "conversation_id",
+    "turn_id",
+    "run_id",
+    "principal_id",
+    "agent_id",
+    "engine",
+    "deadline_at",
+    "cancel_token_id",
+    "release_fingerprint",
+    "input_event_id",
+    "attachment_refs",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "request_id": { "$ref": "#/$defs/requestId" },
+    "client_request_id": { "type": "string", "format": "uuid" },
+    "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "conversation_id": { "$ref": "#/$defs/conversationId" },
+    "turn_id": { "$ref": "#/$defs/turnId" },
+    "run_id": { "$ref": "#/$defs/runId" },
+    "principal_id": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "agent_id": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "engine": {
+      "type": "string",
+      "enum": ["plan_execute", "agent_loop", "native_loop"]
+    },
+    "deadline_at": { "$ref": "#/$defs/epochMilliseconds" },
+    "cancel_token_id": { "$ref": "#/$defs/cancelTokenId" },
+    "release_fingerprint": { "$ref": "#/$defs/sha256" },
+    "input_event_id": { "$ref": "#/$defs/eventId" },
+    "attachment_refs": {
+      "type": "array",
+      "description": "顺序具有语义，规范化请求摘要必须保留该顺序。",
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/artifactId" }
+    },
+    "created_at": { "$ref": "#/$defs/epochMilliseconds" }
+  },
+  "$defs": {
+    "compactUuidV4": {
+      "type": "string",
+      "description": "uuid.UUID.hex 的 32 位小写 compact 表示；版本 nibble 为 4。",
+      "pattern": "^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$"
+    },
+    "requestId": {
+      "type": "string",
+      "pattern": "^req_[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$"
+    },
+    "conversationId": {
+      "type": "string",
+      "pattern": "^conv_[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$"
+    },
+    "turnId": {
+      "type": "string",
+      "pattern": "^turn_[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$"
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^run_[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$"
+    },
+    "cancelTokenId": {
+      "type": "string",
+      "pattern": "^cancel_[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$"
+    },
+    "eventId": {
+      "type": "string",
+      "pattern": "^evt_[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$"
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "artifactId": {
+      "description": "Artifact ID 等于小写 SHA-256 内容 digest。",
+      "$ref": "#/$defs/sha256"
+    },
+    "epochMilliseconds": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "UTC Unix epoch milliseconds，仅用于 Store/领域权威对象。"
+    }
+  }
+}

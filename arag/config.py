@@ -21,7 +21,10 @@ class AragSettings(BaseSettings):
     vector_backend: str = "local"         # local | pgvector ...
     fulltext_backend: str = "local"       # local | es ...
     graph_backend: str = "local"          # local | neo4j ...（仅端口，未接检索流）
-    embedding_storage_dir: str = "local_storage/embedding"
+    # SQLite is document/version/chunk authority.  In-memory vector/BM25 are rebuildable projections.
+    rag_db_path: str = "local_storage/arag/rag.db"
+    rag_storage_dir: str = "local_storage/arag"
+    index_job_poll_interval_seconds: float = 0.25
 
     log_level: str = "INFO"
 

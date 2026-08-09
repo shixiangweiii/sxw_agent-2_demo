@@ -1,12 +1,13 @@
-"""agent 运行时上下文：装配 LLM / 工具 / 会话 / 制品（依赖注入容器）。"""
+"""Worker 进程装配：LLM、只读工具目录与 Skill 并发协调器。
+
+跨 attempt 会话、Artifact 和检查点不属于该进程级容器；它们的权威分别是
+Canonical Event、内容寻址 CAS 与 Runtime Store。
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from google.adk.artifacts import InMemoryArtifactService
-
-from agent.artifacts.artifact_service import build_artifact_service
 from agent.config import AgentSettings
 from agent.llm.chat import AgentChatClient
 from agent.llm.hardened_litellm import HardenedLiteLlm, build_llm
@@ -15,7 +16,6 @@ from agent.claude_skill.catalog import load_claude_skills
 from agent.claude_skill.claude_skill_tool import ClaudeSkillTool
 from agent.claude_skill.contracts import SkillRuntimeConfig
 from agent.claude_skill.execution_coordinator import SkillExecutionCoordinator
-from agent.session.session_service import SessionManager
 from agent.skills.catalog import load_skill_tools
 from agent.tools.builtin_tools import build_builtin_tools, simulate_unstable_operation
 from agent.tools.knowledge_search import build_knowledge_search_tool
@@ -29,8 +29,6 @@ class AgentContext:
     chat: AgentChatClient                       # 轻量单轮补全：plan_execute 规划相 +
                                                 # native_loop 的压缩摘要与原生 researcher
     tools: list[Callable[..., Any]]             # ★ 三代引擎共享的工具集，启动期组装、请求期只读
-    session_manager: SessionManager             # 多轮对话历史（ADK session）
-    artifact_service: InMemoryArtifactService   # 多模态图片等制品
     skill_coordinator: SkillExecutionCoordinator  # Claude SKILL 并发/独占资源治理（进程级单例）
 
 
@@ -41,8 +39,6 @@ def build_agent_context(settings: AgentSettings) -> AgentContext:
         chat=AgentChatClient(settings),
         tools=[*build_builtin_tools(), build_knowledge_search_tool(settings),
                simulate_unstable_operation],
-        session_manager=SessionManager(),
-        artifact_service=build_artifact_service(),
         skill_coordinator=SkillExecutionCoordinator(settings.skill_max_parallel_calls),
     )
 

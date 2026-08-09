@@ -37,6 +37,7 @@ _READ_ONLY_TOOLS = frozenset({
     "tool_search",
     "translate",
     "text_stats",
+    "read_artifact",
 })
 
 
@@ -51,6 +52,7 @@ class NativeToolContext:
     function_call_id: str
     invocation_id: str
     state: dict[str, Any] = field(default_factory=dict)
+    logical_key: str = ""
 
 
 @dataclass(frozen=True)

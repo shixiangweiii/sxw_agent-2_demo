@@ -17,8 +17,7 @@ class AgentSettings(BaseSettings):
     llm_model: str = "qwen3.7-plus"
     embedding_model: str = "text-embedding-v3"
 
-    # --- Engine ---
-    engine: str = "agent_loop"            # plan_execute | agent_loop | native_loop
+    # --- Engine Runtime（引擎由每个 Run 选择，不再由启动期 ENGINE 选型）---
     max_loop_iters: int = 8
     # 子代理 / 子 Runner（researcher、Claude SKILL 子 Runner）用哪一代循环。
     # auto = 跟随主引擎（plan_execute 视同 adk）。A2A **不受本项影响**：
@@ -66,6 +65,25 @@ class AgentSettings(BaseSettings):
     trace_dir: str = "local_storage/traces"
     trace_max_field_chars: int = Field(default=20000, gt=0)   # 单字段截断，防巨型工具结果
     trace_retention_days: int = Field(default=7, ge=0)        # 0 = 不清理
+
+    # --- Canonical Runtime / Worker ---
+    runtime_db_path: str = "local_storage/runtime/runtime.db"
+    artifact_root: str = "local_storage/artifacts"
+    demo_effects_db_path: str = "local_storage/demo_effects/effects.db"
+    runtime_worker_id: str = "runtime-worker-local"
+    runtime_worker_concurrency: int = Field(default=4, gt=0)
+    runtime_worker_poll_ms: int = Field(default=250, gt=0)
+    runtime_lease_seconds: int = Field(default=30, gt=0)
+    runtime_lease_renew_seconds: int = Field(default=10, gt=0)
+    runtime_shutdown_grace_seconds: int = Field(default=20, gt=0)
+    runtime_event_flush_ms: int = Field(default=100, gt=0)
+    runtime_event_flush_bytes: int = Field(default=2048, gt=0)
+    runtime_sse_poll_ms: int = Field(default=250, gt=0)
+    runtime_sse_heartbeat_seconds: int = Field(default=15, gt=0)
+    runtime_busy_timeout_ms: int = Field(default=5000, gt=0)
+    runtime_default_deadline_seconds: int = Field(default=600, gt=0)
+    runtime_artifact_cleanup_interval_seconds: int = Field(default=3600, gt=0)
+    runtime_artifact_orphan_age_hours: int = Field(default=24, gt=0)
 
     log_level: str = "INFO"
 

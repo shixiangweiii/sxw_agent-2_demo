@@ -59,7 +59,7 @@ class SelectedSkillTool(BaseTool):
             agentInfo=AgentInfo(agentCode=rc.agent_uuid),
             invocationInfo=InvocationInfo(invocationSource="AI_AGENT"),
             inputInfo=InputInfo(text=rc.text),
-            sessionInfo=SessionInfo(sessionId=rc.session_id),
+            sessionInfo=SessionInfo(sessionId=rc.session_id, runId=rc.run_id or None),
             userInfo=UserInfo(userId=rc.user_id),
         ))
 
@@ -79,6 +79,12 @@ class SelectedSkillTool(BaseTool):
             tenantId=agent_uuid, skillId=self._skill_id, toolName=self._tool_name,
             arguments=coerce_args_by_schema(args or {}, self._raw_schema),
             context=self._build_context(),
+            meta={
+                "runId": rc.run_id,
+                "activityId": rc.activity_id,
+                "deadlineAtMs": rc.deadline_at_ms,
+                "idempotencyKey": rc.idempotency_key,
+            } if rc else None,
         )
         log_kv(
             logger,

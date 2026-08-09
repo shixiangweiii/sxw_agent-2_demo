@@ -33,6 +33,7 @@ class ToolCall:
     id: str
     name: str
     arguments: str = ""
+    logical_key: str = ""
 
 
 @dataclass
@@ -83,7 +84,7 @@ def to_wire(messages: Iterable[Msg]) -> list[dict[str, Any]]:
 
 
 # ── genai Content → Msg ────────────────────────────────────────────────────
-# 接入层（api/chat.py）构造的是 ADK/GenAI 的 types.Content。原来由 LiteLlm 负责把
+# Runtime adapter 构造的是 ADK/GenAI 的 types.Content。原来由 LiteLlm 负责把
 # inline_data 转成 base64 image_url；自研循环必须自己做这一步。
 
 def content_to_msg(content: Any) -> Msg:
@@ -224,6 +225,7 @@ def messages_after_boundary(messages: list[Msg]) -> list[Msg]:
 # 这样原子单元结构完全不受影响（消息条数不变，call/response 配对天然保持）。
 
 _TRUNCATION_NOTE = "\n\n[本条工具结果因超出单条体积上限已截断；如需完整内容请缩小查询范围后重试]"
+_ARTIFACT_READ_MAX_CHARS = 70 * 1024
 
 
 def apply_tool_result_budget(messages: list[Msg], max_chars: int) -> int:
@@ -233,9 +235,14 @@ def apply_tool_result_budget(messages: list[Msg], max_chars: int) -> int:
         if msg.role != "tool":
             continue
         text = _as_text(msg.content)
-        if len(text) <= max_chars:
+        message_limit = (
+            max(max_chars, _ARTIFACT_READ_MAX_CHARS)
+            if msg.name == "read_artifact"
+            else max_chars
+        )
+        if len(text) <= message_limit:
             continue
-        keep = max(0, max_chars - len(_TRUNCATION_NOTE))
+        keep = max(0, message_limit - len(_TRUNCATION_NOTE))
         msg.content = text[:keep] + _TRUNCATION_NOTE
         truncated += 1
     return truncated

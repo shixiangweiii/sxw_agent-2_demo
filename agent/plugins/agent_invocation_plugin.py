@@ -19,7 +19,7 @@ native_loop 的 turn span 是循环体内真实的一圈。对比时间时须知
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from google.adk.plugins.base_plugin import BasePlugin
 
@@ -37,15 +37,24 @@ from common.trace import (
     push_span,
 )
 
+if TYPE_CHECKING:
+    from agent.runtime.adapters.brokered_tools import AdkToolBatch
+
 logger = get_logger("agent.plugin")
 
 
 class AgentInvocationPlugin(BasePlugin):
-    def __init__(self, controller: Optional[LoopController] = None) -> None:
+    def __init__(
+        self,
+        controller: Optional[LoopController] = None,
+        *,
+        tool_batch: "AdkToolBatch | None" = None,
+    ) -> None:
         super().__init__(name="agent_invocation")
         # controller=None：仅启用 ToolErrorFeedback / 可观测（供 Plan-Execute 复用，
         # 不引入 Agent-Loop 的续推 / force-summary 语义）。
         self._ctrl = controller
+        self._tool_batch = tool_batch
         # 轨迹状态。插件实例是**每请求一份**（两个引擎都在 run_stream/execute 里现构造），
         # 所以这些字段不会跨请求串味。
         self._turn_span: Any = None
@@ -75,6 +84,14 @@ class AgentInvocationPlugin(BasePlugin):
         # partial 为假、或带 usage —— 两者任一成立即本轮模型输出结束。
         if getattr(llm_response, "partial", False):
             return None
+        if self._tool_batch is not None:
+            # ADK 2.6.2 awaits this aggregate callback before scheduling any
+            # function task.  The callback therefore forms the durable batch
+            # boundary: flush text, atomically PREPARE every call, then return.
+            await self._tool_batch.prepare_model_response(
+                llm_response,
+                turn_ordinal=max(0, self._turn_index - 1),
+            )
         usage = getattr(llm_response, "usage_metadata", None)
         self._end_llm_span(llm_response, usage)
         return None

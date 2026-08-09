@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from collections import defaultdict
 from dataclasses import asdict
 from datetime import datetime
@@ -156,7 +157,26 @@ def index_payload(arag_url: str, payload_path: Path, timeout: float = 180.0) -> 
     with httpx.Client(timeout=timeout) as client:
         resp = client.post(f"{arag_url.rstrip('/')}/v1/index", json=json.loads(payload_path.read_text(encoding="utf-8")))
         resp.raise_for_status()
-        return resp.json()
+        accepted = resp.json()
+        job_ids = accepted.get("job_ids")
+        if resp.status_code != 202 or not isinstance(job_ids, list) or not job_ids:
+            raise RuntimeError("ARAG did not return the durable 202 + job_ids contract")
+        deadline = time.monotonic() + timeout
+        jobs: list[dict[str, Any]] = []
+        for job_id in job_ids:
+            while True:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"index job activation timed out: {job_id}")
+                status_resp = client.get(f"{arag_url.rstrip('/')}/v1/index/jobs/{job_id}")
+                status_resp.raise_for_status()
+                job = status_resp.json()
+                if job.get("state") == "ACTIVATED":
+                    jobs.append(job)
+                    break
+                if job.get("state") == "FAILED":
+                    raise RuntimeError(f"index job failed: {job_id}: {job.get('error')}")
+                time.sleep(0.25)
+        return {**accepted, "jobs": jobs}
 
 
 def _format_percent(score: float) -> str:

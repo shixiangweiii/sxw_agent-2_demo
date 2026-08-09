@@ -2,8 +2,8 @@
 
 用法（执行阶段）：
     python -m eval.harness.runner --engine agent_loop   --base-url http://127.0.0.1:8000 --out eval/reports/<ts>
-    python -m eval.harness.runner --engine plan_execute --base-url http://127.0.0.1:8001 --out eval/reports/<ts>
-    python -m eval.harness.runner --engine native_loop  --base-url http://127.0.0.1:8002 --out eval/reports/<ts>
+    python -m eval.harness.runner --engine plan_execute --base-url http://127.0.0.1:8000 --out eval/reports/<ts>
+    python -m eval.harness.runner --engine native_loop  --base-url http://127.0.0.1:8000 --out eval/reports/<ts>
     python -m eval.harness.runner --engine agent_loop   --only-arag-down --out eval/reports/<ts>   # arag 停服后跑
 """
 from __future__ import annotations

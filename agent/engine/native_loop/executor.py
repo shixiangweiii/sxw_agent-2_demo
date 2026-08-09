@@ -147,6 +147,7 @@ async def execute_one(
             function_call_id=call.id or f"call_{uuid.uuid4().hex}",
             invocation_id=invocation_id,
             state=state,
+            logical_key=getattr(call, "logical_key", ""),
         )
         log_kv(logger, logging.INFO, "ToolCall", "invoke", tool=call.name, call_id=call.id)
         try:

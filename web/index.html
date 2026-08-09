@@ -27,16 +27,24 @@
           <h2 class="side-title">会话设置</h2>
           <label class="field">
             <span>Agent</span>
-            <input id="agentUuid" type="text" value="demo" autocomplete="off">
+            <input id="agentUuid" type="text" value="demo-agent" autocomplete="off">
+          </label>
+          <label class="field">
+            <span>Engine</span>
+            <select id="engineSelect">
+              <option value="native_loop">native_loop</option>
+              <option value="agent_loop">agent_loop</option>
+              <option value="plan_execute">plan_execute</option>
+            </select>
           </label>
           <label class="field">
             <span>User</span>
             <input id="userId" type="text" value="web-user" autocomplete="off">
           </label>
           <label class="field">
-            <span>Session</span>
+            <span>Conversation</span>
             <div class="inline-field">
-              <input id="sessionId" type="text" autocomplete="off">
+              <input id="conversationId" type="text" placeholder="由服务端创建" autocomplete="off">
               <button id="newSessionBtn" class="icon-button" type="button" title="新会话" aria-label="新会话">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
               </button>
@@ -67,9 +75,12 @@
           <p class="composer-hint">支持 txt / md / pdf / docx 入库 · 图片提问 · 流式输出</p>
           <div class="composer-actions">
             <span id="composerStatus" class="composer-status"></span>
-            <button id="stopBtn" class="secondary-button" type="button" disabled>
+              <button id="stopBtn" class="secondary-button" type="button" disabled title="仅断开 SSE，Run 继续执行">
               <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
-              停止
+              停止观看
+            </button>
+            <button id="cancelBtn" class="secondary-button" type="button" disabled title="显式取消 Run">
+              取消运行
             </button>
             <button id="sendBtn" class="primary-button" type="submit">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4Z"/></svg>

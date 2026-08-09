@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sxw-agent.local/schemas/artifact-v1.schema.json",
+  "title": "ArtifactRef v1",
+  "description": "Filesystem CAS 写入成功后返回、并由 POST /api/v1/artifacts 公开的不可变引用。storage path、来源 link、sensitivity 与 retention 属于 Runtime SQLite metadata/link 权威，不复制进 ArtifactRef。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "digest_sha256",
+    "size_bytes",
+    "media_type",
+    "filename",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "artifact_id": {
+      "description": "等于 digest_sha256；ArtifactRef 的 Pydantic model validator 强制两者相同。",
+      "$ref": "#/$defs/sha256"
+    },
+    "digest_sha256": { "$ref": "#/$defs/sha256" },
+    "size_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "大小上限由写入 purpose/admission 策略执行；当前默认内部 100MiB、公开上传 20MiB。"
+    },
+    "media_type": {
+      "type": "string",
+      "minLength": 1,
+      "description": "ArtifactRef 保留调用方提供的非空 media type；参数化类型也合法。"
+    },
+    "filename": {
+      "oneOf": [
+        { "type": "string" },
+        { "type": "null" }
+      ]
+    },
+    "created_at": { "$ref": "#/$defs/utcTimestamp" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "utcTimestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$",
+      "description": "公开 ArtifactRef 使用 RFC3339 UTC。"
+    }
+  }
+}

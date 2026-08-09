@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sxw-agent.local/schemas/working-state-v1.schema.json",
+  "title": "WorkingState v1",
+  "description": "可恢复认知状态。顶层字段冻结；内部 plan/fact/budget 是 engine-owned JSON，不得复制 Runtime Activity 的完成事实。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "goal",
+    "constraints",
+    "model_plan",
+    "confirmed_facts",
+    "open_questions",
+    "pending_input",
+    "budget",
+    "artifact_refs",
+    "evidence_refs",
+    "release_fingerprint"
+  ],
+  "properties": {
+    "goal": { "type": "string", "maxLength": 32768 },
+    "constraints": {
+      "type": "array",
+      "maxItems": 256,
+      "items": { "type": "string", "maxLength": 8192 }
+    },
+    "model_plan": {
+      "type": "array",
+      "description": "Engine 的认知计划 JSON；不是 activities 状态机。具体 item 形状由 release fingerprint 冻结。",
+      "maxItems": 256,
+      "items": { "type": "object" }
+    },
+    "confirmed_facts": {
+      "type": "array",
+      "description": "已确认事实 JSON；可附 evidence_refs，但不能伪造 Activity 状态。",
+      "maxItems": 2048,
+      "items": { "type": "object" }
+    },
+    "open_questions": {
+      "type": "array",
+      "maxItems": 256,
+      "items": { "type": "string", "maxLength": 8192 }
+    },
+    "pending_input": {
+      "oneOf": [
+        { "type": "object" },
+        { "type": "null" }
+      ]
+    },
+    "budget": {
+      "type": "object",
+      "description": "Engine-owned budget snapshot；绝对 deadline 若出现，使用 Store epoch milliseconds。"
+    },
+    "artifact_refs": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "$ref": "#/$defs/artifactId" }
+    },
+    "evidence_refs": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": { "type": "string", "minLength": 1, "maxLength": 255 }
+    },
+    "release_fingerprint": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "artifactId": {
+      "description": "Artifact ID 等于小写 SHA-256 内容 digest。",
+      "$ref": "#/$defs/sha256"
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

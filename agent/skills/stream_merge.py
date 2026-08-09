@@ -18,6 +18,11 @@ _SENTINEL: object = object()
 logger = logging.getLogger(__name__)
 
 
+class _PumpFailure:
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+
 async def merge_runner_events(
     runner_events: AsyncIterator[Any],
     convert: Callable[[Any], list[StreamEvent]],
@@ -38,10 +43,10 @@ async def merge_runner_events(
         except asyncio.CancelledError:
             # 客户端断开/上游关闭生成器属于正常取消，不应伪装成 error SSE。
             raise
-        except Exception as exc:  # noqa: BLE001 - Runner 异常转 error 事件，保证收口
-            # Runner 内部异常（如硬熔断 LlmCallsLimitExceededError）在这里被转成 error 事件，
-            # 而不是让异常穿透——这样 SSE 流仍能正常收尾，前端不会卡在半截。
-            await queue.put(StreamEvent("error", {"message": str(exc)}))
+        except Exception as exc:  # noqa: BLE001 - 把原异常交给 EngineAdapter 分类
+            # 不再把 Runner 失败伪装成普通流事件。否则生成器会“正常”结束，
+            # 上层无法区分真实完成与异常后 EOF。
+            await queue.put(_PumpFailure(exc))
         finally:
             # 哨兵是消费侧唯一的"结束信号"。用 put_nowait 而非 await put：
             # 取消场景下 await 可能挂住，导致消费侧永远等不到结束。
@@ -55,6 +60,8 @@ async def merge_runner_events(
             item = await queue.get()
             if item is _SENTINEL:
                 break
+            if isinstance(item, _PumpFailure):
+                raise item.error
             yield item
     except BaseException:
         primary_failed = True

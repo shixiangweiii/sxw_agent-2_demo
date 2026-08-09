@@ -9,7 +9,7 @@ from dataclasses import dataclass
 class EvalConfig:
     base_url: str = "http://127.0.0.1:8000"
     engine: str = "agent_loop"
-    agent_uuid: str = "demo"
+    agent_uuid: str = "demo-agent"
     arag_url: str = "http://127.0.0.1:8100"
     skill_center_url: str = "http://127.0.0.1:8200"
     a2a_card_url: str = "http://127.0.0.1:8300/.well-known/agent-card.json"

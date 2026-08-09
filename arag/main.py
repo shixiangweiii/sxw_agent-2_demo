@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from arag.api.index import router as index_router
 from arag.api.retrieve import router as retrieve_router
 from arag.config import get_settings
-from arag.context import build_context
+from arag.context import AragContext, build_context, close_context
 from common.obs import TraceMiddleware, get_logger, log_kv, setup_logging
 
 settings = get_settings()
@@ -29,6 +29,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
            vector=settings.vector_backend, fulltext=settings.fulltext_backend,
            graph=settings.graph_backend, port=settings.arag_port)
     yield
+    await close_context(app.state.ctx)
     log_kv(logger, logging.INFO, "Boot", "arag service stopped")
 
 
@@ -41,12 +42,23 @@ app.include_router(retrieve_router)
 @app.get("/healthz")
 async def healthz() -> dict[str, Any]:
     """存活探针：返回当前存储后端选型。"""
+    ctx: AragContext | None = getattr(app.state, "ctx", None)
     return {
         "status": "ok",
         "service": "arag",
         "backends": {
-            "vector": settings.vector_backend,
-            "fulltext": settings.fulltext_backend,
+            "document_authority": "sqlite",
+            "vector": "sqlite-rebuildable-numpy",
+            "fulltext": "sqlite-rebuildable-bm25",
             "graph": settings.graph_backend,
         },
+        "projection": (
+            {
+                "generation": ctx.projections.snapshot.generation,
+                "chunks": len(ctx.projections.snapshot.chunks),
+                "degraded_reason": ctx.projections.snapshot.degraded_reason,
+            }
+            if ctx is not None
+            else None
+        ),
     }

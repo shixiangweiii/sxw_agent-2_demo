@@ -17,7 +17,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 from agent.engine.loop_tools import (
     FORCE_SUMMARY_REMINDER,
@@ -45,7 +45,6 @@ from agent.engine.native_loop.messages import (
 from agent.engine.native_loop.tools import ToolRegistry
 from agent.llm.chat import AgentChatClient
 from agent.stream.event_converters import StreamEvent
-from agent.tool_args_contract import TaskPlanArgumentsError, normalize_task_plan_args
 from common.obs import get_logger, log_kv
 from common.trace import KIND_COMPACT, KIND_TURN, current_span, start_span
 
@@ -110,6 +109,7 @@ class NativeLoop:
         system_instruction: str,
         config: LoopConfig,
         chat: Optional[AgentChatClient] = None,
+        checkpoint: Callable[[LoopState, str], Awaitable[None]] | None = None,
     ) -> None:
         self._client = client
         self._registry = registry
@@ -117,6 +117,7 @@ class NativeLoop:
         self._config = config
         # 摘要走轻量单轮补全客户端；为 None 时压缩整体禁用（降级为只做体积治理）。
         self._chat = chat
+        self._checkpoint_hook = checkpoint
         self._invocation_id = f"invocation_{uuid.uuid4().hex}"
         # run() 结束后由调用方取回：完整历史 + 收口原因（transition 名）。
         # stop_reason 让嵌套场景（如 Claude SKILL 子 Runner）能区分
@@ -130,13 +131,23 @@ class NativeLoop:
             json.dumps(registry.wire_declarations(), ensure_ascii=False),
         )
 
-    async def run(self, messages: list[Msg]) -> AsyncIterator[StreamEvent]:
+    async def run(
+        self,
+        messages: list[Msg],
+        *,
+        initial_state: LoopState | None = None,
+    ) -> AsyncIterator[StreamEvent]:
         """驱动循环，产出统一 StreamEvent 序列。结束时 ``final_messages`` 可取回完整历史。"""
-        state = LoopState(messages=messages)
+        state = initial_state or LoopState(messages=messages)
         cfg = self._config
         log_kv(logger, logging.INFO, "NativeLoop", "start",
                max_iters=cfg.max_iters, hard_cap=cfg.hard_cap,
                streaming_tool_exec=cfg.streaming_tool_exec, tools=len(self._registry))
+
+        # 若进程在完整 ToolCall batch 落盘后消失，先恢复缺失的
+        # ToolResult；稳定 logical slot 会让 Broker 复用已提交结果。
+        async for event in self._resume_pending_tools(state):
+            yield event
 
         while True:
             state.iters += 1
@@ -160,6 +171,8 @@ class NativeLoop:
             with start_span("native.turn", KIND_TURN, iter=state.iters) as turn_span:
                 # ── 主动压缩：估算逼近窗口上限就先摘要，别等真的 413 ─────────
                 await self._maybe_proactive_compact(state)
+                # 持久化模型 I/O 前的边界；半个 stream 失败时从此重放。
+                await self._checkpoint(state, "MODEL_REQUEST")
 
                 request_messages = self._build_request(state)
                 turn_span.set(request_messages=len(request_messages))
@@ -182,6 +195,13 @@ class NativeLoop:
                             text_parts.append(item.text)
                             yield StreamEvent("text", {"delta": item.text})
                         elif isinstance(item, ToolCallReady):
+                            # Runtime identity is derived from the durable model activity slot,
+                            # not from a provider-generated function_call_id.  A whole-attempt
+                            # replay therefore lands on the same ToolExecution and mismatches
+                            # fail closed in the Broker.
+                            item.call.logical_key = (
+                                f"native:turn:{state.iters - 1}:call:{len(ready_calls)}"
+                            )
                             ready_calls.append(item.call)
                             for ev in self._call_events(item.call):
                                 yield ev
@@ -248,6 +268,7 @@ class NativeLoop:
                 # 依据是"本轮有没有发起工具调用"，不看 finish_reason：
                 # 后者在多数 OpenAI 兼容实现上并不可靠（CC 源码同注）。
                 if not ready_calls:
+                    await self._checkpoint(state, "COMPLETED")
                     log_kv(logger, logging.INFO, "LoopControl", "no tool calls, turn complete",
                            iter=state.iters, finish_reason=finish_reason,
                            transition=T_COMPLETED)
@@ -256,6 +277,13 @@ class NativeLoop:
                         yield ev
                     return
 
+                # Side-effect/UNKNOWN 工具必须等完整 ToolCall batch 落盘。
+                try:
+                    await self._checkpoint(state, "TOOL_BATCH_COMMITTED")
+                except BaseException:
+                    await self._cancel_tasks(early_tasks)
+                    raise
+
                 # ── 收集工具结果：先回收已提前开跑的，再按批次跑其余 ─────────
                 try:
                     for call, task in early_tasks:
@@ -263,6 +291,7 @@ class NativeLoop:
                         for ev in self._result_events(outcome):
                             yield ev
                         state.messages.append(outcome.message)
+                        await self._checkpoint(state, "TOOL_RESULT_COMMITTED")
 
                     async for outcome in executor.run_calls(
                         deferred_calls,
@@ -274,6 +303,7 @@ class NativeLoop:
                         for ev in self._result_events(outcome):
                             yield ev
                         state.messages.append(outcome.message)
+                        await self._checkpoint(state, "TOOL_RESULT_COMMITTED")
                 except BaseException:
                     # 用 BaseException 而不是 CancelledError：消费方若走 `aclose()`，
                     # 生成器在 yield 处收到的是 GeneratorExit（它不是 Exception 的子类，
@@ -288,19 +318,14 @@ class NativeLoop:
                     raise
 
                 state.transition = T_NEXT_TURN
+                await self._checkpoint(state, "NEXT_TURN")
                 turn_span.set(transition=T_NEXT_TURN)
                 log_kv(logger, logging.INFO, "LoopControl", "next turn",
                        iter=state.iters, tool_calls=len(ready_calls), transition=T_NEXT_TURN)
 
     # ── 收口 ───────────────────────────────────────────────────────────────
-    # 所有出口都必须经过这两个方法。SSE 契约要求 **每一条流都以 done 收尾**——
-    # agent_loop（`agent_loop_engine.py` 末尾无条件 yield done）与 plan_execute 都是如此，
-    # native_loop 曾经在失败路径上直接 return，造成两个下游问题：
-    #   1. `citation_injector` 只在 done 时扫描正文注入引用（citation_injector.py:70），
-    #      硬熔断场景下模型往往已经产出带 [n] 的正文，引用块会整块丢失；
-    #   2. 评测 harness 只在 done 时置 finished=True（eval/harness/sse_client.py:51），
-    #      同样的熔断在两代引擎的报告里字段不一致，破坏可比性。
-    # done 的 finish_reason 填 transition 名，让下游能机器可读地区分收口原因。
+    # 引擎出口仅记录内部 stop reason。Run terminal 由 Coordinator 独占裁决；
+    # 不再发 done，也不把生成器 EOF 当成对外完成协议。
 
     def _finish(self, state: LoopState, reason: str) -> None:
         state.transition = reason
@@ -309,14 +334,11 @@ class NativeLoop:
 
     def _fail(self, state: LoopState, reason: str, message: str) -> list[StreamEvent]:
         self._finish(state, reason)
-        return [
-            StreamEvent("error", {"message": message}),
-            StreamEvent("done", {"finish_reason": reason}),
-        ]
+        return [StreamEvent("error", {"message": message, "reason": reason})]
 
     def _complete(self, state: LoopState, finish_reason: Optional[str]) -> list[StreamEvent]:
         self._finish(state, T_COMPLETED)
-        return [StreamEvent("done", {"finish_reason": finish_reason or "stop"})]
+        return []
 
     # ── 上下文压缩 ─────────────────────────────────────────────────────────
 
@@ -449,6 +471,45 @@ class NativeLoop:
 
     # ── 工具执行 ───────────────────────────────────────────────────────────
 
+    async def _checkpoint(self, state: LoopState, phase: str) -> None:
+        if self._checkpoint_hook is not None:
+            await self._checkpoint_hook(state, phase)
+
+    async def _resume_pending_tools(self, state: LoopState) -> AsyncIterator[StreamEvent]:
+        """恢复最近一个已落盘 batch 中尚未配对的 ToolResult。"""
+        assistant_index: int | None = None
+        for index in range(len(state.messages) - 1, -1, -1):
+            message = state.messages[index]
+            if message.role == "assistant" and message.tool_calls:
+                assistant_index = index
+                break
+            if message.role != "tool":
+                break
+        if assistant_index is None:
+            return
+        calls = state.messages[assistant_index].tool_calls or []
+        answered = {
+            message.tool_call_id
+            for message in state.messages[assistant_index + 1:]
+            if message.role == "tool"
+        }
+        pending = [call for call in calls if call.id not in answered]
+        if not pending:
+            return
+        async for outcome in executor.run_calls(
+            pending,
+            self._registry,
+            invocation_id=self._invocation_id,
+            state=state.tool_state,
+            max_concurrency=self._config.max_tool_concurrency,
+        ):
+            for event in self._result_events(outcome):
+                yield event
+            state.messages.append(outcome.message)
+            await self._checkpoint(state, "TOOL_RESULT_COMMITTED")
+        state.transition = T_NEXT_TURN
+        await self._checkpoint(state, "NEXT_TURN")
+
     def _is_concurrency_safe(self, call: ToolCall) -> bool:
         spec = self._registry.get(call.name)
         return bool(spec and spec.concurrency_safe and not spec.exclusive_resources)
@@ -482,45 +543,30 @@ class NativeLoop:
     # ── 事件翻译 ───────────────────────────────────────────────────────────
 
     def _call_events(self, call: ToolCall) -> list[StreamEvent]:
-        """tool_call → SSE。计划工具翻成 plan_step，让 UI 表现为进度条而非工具噪音。"""
+        """tool_call → Engine projection; durable Broker facts remain authoritative."""
         if call.name == PLAN_TOOL:
-            plan_events = _plan_events(call.arguments)
-            if plan_events is not None:
-                return plan_events
-        args, _ = executor.parse_arguments(call)
+            # The post-result native checkpoint atomically persists WorkingState
+            # and MODEL_PLAN_UPDATED.  Do not publish request-local plan state.
+            return []
+        args, parse_error = executor.parse_arguments(call)
+        broker_owned = self._registry.get(call.name) is not None and parse_error is None
         return [StreamEvent("tool_call", {
             "id": call.id,
             "name": call.name,
             "args": args or {},
-        })]
+        }, authority="broker" if broker_owned else "engine")]
 
     def _result_events(self, outcome: executor.ToolOutcome) -> list[StreamEvent]:
         # 计划工具的返回不给用户看：它的信息已经由 plan_step 表达过了。
         if outcome.call.name == PLAN_TOOL:
             return []
+        _, parse_error = executor.parse_arguments(outcome.call)
+        broker_owned = (
+            self._registry.get(outcome.call.name) is not None
+            and parse_error is None
+        )
         return [StreamEvent("tool_result", {
             "id": outcome.call.id,
             "name": outcome.call.name,
             "response": executor.json_safe(outcome.response),
-        })]
-
-
-def _plan_events(raw_arguments: str) -> Optional[list[StreamEvent]]:
-    """把 update_task_plan 的参数翻译成一组 plan_step 事件（字段与 ADK 侧逐字段一致）。"""
-    args, error = executor.parse_arguments(ToolCall(id="", name=PLAN_TOOL, arguments=raw_arguments))
-    if args is None:
-        return None
-    try:
-        normalized = normalize_task_plan_args(args)
-    except (TaskPlanArgumentsError, TypeError, ValueError):
-        return None
-    steps = normalized["steps"]
-    current = normalized["current_step"]
-    events: list[StreamEvent] = []
-    for i, step in enumerate(steps):
-        n = i + 1
-        status = "done" if n < current else ("running" if n == current else "planned")
-        events.append(StreamEvent("plan_step", {
-            "step": n, "total": len(steps), "title": step, "status": status,
-        }))
-    return events
+        }, authority="broker" if broker_owned else "engine")]

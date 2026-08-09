@@ -7,8 +7,9 @@ const MAX_TEXT_CHARS = 200000;
 const el = {
   healthStatus: document.querySelector("#healthStatus"),
   agentUuid: document.querySelector("#agentUuid"),
+  engineSelect: document.querySelector("#engineSelect"),
   userId: document.querySelector("#userId"),
-  sessionId: document.querySelector("#sessionId"),
+  conversationId: document.querySelector("#conversationId"),
   newSessionBtn: document.querySelector("#newSessionBtn"),
   documentInput: document.querySelector("#documentInput"),
   imageInput: document.querySelector("#imageInput"),
@@ -19,20 +20,26 @@ const el = {
   composerStatus: document.querySelector("#composerStatus"),
   sendBtn: document.querySelector("#sendBtn"),
   stopBtn: document.querySelector("#stopBtn"),
+  cancelBtn: document.querySelector("#cancelBtn"),
 };
 
 const state = {
   documents: [],
   imageFile: null,
   imagePreviewUrl: "",
-  abortController: null,
+  runId: localStorage.getItem("sxw.run_id") || "",
+  lastSeq: Number(localStorage.getItem("sxw.last_seq") || "0"),
+  watchController: null,
+  watching: false,
+  terminal: false,
+  submitting: false,
 };
 
 let pdfjsPromise = null;
 let mammothPromise = null;
 
-function newSessionId() {
-  return `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+function uuid() {
+  return crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
 }
 
 function setStatus(text, kind = "") {
@@ -40,140 +47,100 @@ function setStatus(text, kind = "") {
   el.composerStatus.className = `composer-status ${kind}`.trim();
 }
 
-function setBusy(isBusy) {
-  el.sendBtn.disabled = isBusy;
-  el.stopBtn.disabled = !isBusy;
-  el.queryInput.disabled = isBusy;
-  el.documentInput.disabled = isBusy;
-  el.imageInput.disabled = isBusy;
+function refreshControls() {
+  el.sendBtn.disabled = state.submitting || (state.runId && !state.terminal);
+  el.stopBtn.disabled = !state.watching;
+  el.cancelBtn.disabled = !state.runId || state.terminal;
+  el.queryInput.disabled = state.submitting;
+  el.documentInput.disabled = state.submitting;
+  el.imageInput.disabled = state.submitting;
 }
 
 function scrollToBottom() {
   el.messages.scrollTop = el.messages.scrollHeight;
 }
 
-function escapeText(value) {
-  return String(value ?? "");
-}
-
-function shortCallId(value) {
-  const callId = String(value ?? "");
-  if (!callId) {
-    return "";
-  }
-  return callId.length <= 8 ? callId : callId.slice(-8);
-}
-
 function appendMessage(role, content = "", extraClass = "") {
   const node = document.createElement("article");
   node.className = `message ${role} ${extraClass}`.trim();
-
   const label = document.createElement("div");
   label.className = "message-role";
   label.textContent = role === "user" ? "You" : role === "assistant" ? "Agent" : "System";
-
   const body = document.createElement("div");
   body.className = "message-content";
   body.textContent = content;
-
   node.append(label, body);
   el.messages.append(node);
   scrollToBottom();
   return { node, body };
 }
 
-function addProcessPanel(messageNode) {
-  let panel = messageNode.querySelector(".process-panel");
-  if (panel) {
-    return panel.querySelector(".process-list");
-  }
-  panel = document.createElement("details");
-  panel.className = "process-panel";
-
-  const summary = document.createElement("summary");
-  summary.textContent = "过程";
-  const list = document.createElement("div");
-  list.className = "process-list";
-
-  panel.append(summary, list);
-  messageNode.append(panel);
-  return list;
-}
-
 function addProcessItem(messageNode, label, payload) {
-  const list = addProcessPanel(messageNode);
+  let panel = messageNode.querySelector(".process-panel");
+  if (!panel) {
+    panel = document.createElement("details");
+    panel.className = "process-panel";
+    const summary = document.createElement("summary");
+    summary.textContent = "过程";
+    const list = document.createElement("div");
+    list.className = "process-list";
+    panel.append(summary, list);
+    messageNode.append(panel);
+  }
   const item = document.createElement("div");
   item.className = "process-item";
-
   const name = document.createElement("div");
   name.className = "process-label";
   name.textContent = label;
-  item.append(name);
-
   const pre = document.createElement("pre");
   pre.textContent = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
-  item.append(pre);
-
-  list.append(item);
+  item.append(name, pre);
+  panel.querySelector(".process-list").append(item);
   scrollToBottom();
 }
 
 function addCitations(messageNode, refs) {
-  if (!Array.isArray(refs) || refs.length === 0) {
-    return;
-  }
+  if (!Array.isArray(refs) || !refs.length) return;
   const section = document.createElement("section");
   section.className = "citations";
-
   const title = document.createElement("h3");
   title.textContent = "引用";
   const list = document.createElement("ul");
   list.className = "citation-list";
-
-  for (const ref of refs) {
+  refs.forEach((ref, index) => {
     const item = document.createElement("li");
     item.className = "citation-item";
-    item.textContent = `[${ref.n}] ${ref.title || ref.doc_id || "document"}`;
+    item.textContent = `[${ref.n || index + 1}] ${ref.title || ref.doc_id || ref.evidence_id || "document"}`;
     list.append(item);
-  }
-
+  });
   section.append(title, list);
   messageNode.append(section);
-  scrollToBottom();
 }
 
 function renderAttachments() {
   el.attachmentList.replaceChildren();
-
   for (const doc of state.documents) {
     const item = document.createElement("div");
     item.className = "attachment-item";
-    item.dataset.name = doc.file.name;
-
     const name = document.createElement("div");
     name.className = "attachment-name";
     name.textContent = doc.file.name;
     const meta = document.createElement("div");
     meta.className = "attachment-meta";
     meta.textContent = doc.status || `${Math.ceil(doc.file.size / 1024)} KB`;
-
     item.append(name, meta);
     el.attachmentList.append(item);
   }
-
   if (state.imageFile) {
     const item = document.createElement("div");
     item.className = "attachment-item";
-
     const img = document.createElement("img");
     img.className = "image-preview";
     img.alt = state.imageFile.name;
     img.src = state.imagePreviewUrl;
-
     const name = document.createElement("div");
     name.className = "attachment-name";
     name.textContent = state.imageFile.name;
-
     item.append(img, name);
     el.attachmentList.append(item);
   }
@@ -181,26 +148,16 @@ function renderAttachments() {
 
 function updateDocumentStatus(fileName, status) {
   const doc = state.documents.find((entry) => entry.file.name === fileName);
-  if (doc) {
-    doc.status = status;
-  }
+  if (doc) doc.status = status;
   renderAttachments();
 }
 
 function inferFileType(file) {
   const name = file.name.toLowerCase();
-  if (file.type) {
-    return file.type;
-  }
-  if (name.endsWith(".md") || name.endsWith(".markdown")) {
-    return "text/markdown";
-  }
-  if (name.endsWith(".pdf")) {
-    return "application/pdf";
-  }
-  if (name.endsWith(".docx")) {
-    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-  }
+  if (file.type) return file.type;
+  if (name.endsWith(".md") || name.endsWith(".markdown")) return "text/markdown";
+  if (name.endsWith(".pdf")) return "application/pdf";
+  if (name.endsWith(".docx")) return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
   return "text/plain";
 }
 
@@ -215,14 +172,11 @@ async function loadPdfjs() {
 }
 
 async function loadMammoth() {
-  if (window.mammoth) {
-    return window.mammoth;
-  }
+  if (window.mammoth) return window.mammoth;
   if (!mammothPromise) {
     mammothPromise = new Promise((resolve, reject) => {
       const script = document.createElement("script");
       script.src = MAMMOTH_URL;
-      script.async = true;
       script.onload = () => resolve(window.mammoth);
       script.onerror = () => reject(new Error("failed to load mammoth"));
       document.head.append(script);
@@ -231,249 +185,195 @@ async function loadMammoth() {
   return mammothPromise;
 }
 
-async function parsePdf(file) {
-  const pdfjs = await loadPdfjs();
-  const data = new Uint8Array(await file.arrayBuffer());
-  const pdf = await pdfjs.getDocument({ data }).promise;
-  const pages = [];
-  for (let pageNo = 1; pageNo <= pdf.numPages; pageNo += 1) {
-    const page = await pdf.getPage(pageNo);
-    const content = await page.getTextContent();
-    const text = content.items.map((item) => item.str || "").join(" ").trim();
-    if (text) {
-      pages.push(text);
-    }
-  }
-  return pages.join("\n\n");
-}
-
-async function parseDocx(file) {
-  const mammoth = await loadMammoth();
-  const result = await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() });
-  return result.value || "";
-}
-
 async function extractDocumentText(file) {
   const type = inferFileType(file);
-  const name = file.name.toLowerCase();
   let text = "";
-
-  if (type === "application/pdf" || name.endsWith(".pdf")) {
-    text = await parsePdf(file);
-  } else if (type.includes("wordprocessingml") || name.endsWith(".docx")) {
-    text = await parseDocx(file);
+  if (type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+    const pdfjs = await loadPdfjs();
+    const pdf = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+    const pages = [];
+    for (let pageNo = 1; pageNo <= pdf.numPages; pageNo += 1) {
+      const page = await pdf.getPage(pageNo);
+      const content = await page.getTextContent();
+      pages.push(content.items.map((item) => item.str || "").join(" "));
+    }
+    text = pages.join("\n\n");
+  } else if (type.includes("wordprocessingml")) {
+    const mammoth = await loadMammoth();
+    text = (await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() })).value || "";
   } else {
     text = await file.text();
   }
-
   text = text.trim();
-  if (!text) {
-    throw new Error("未提取到文本");
-  }
-  if (text.length > MAX_TEXT_CHARS) {
-    throw new Error(`文本超过 ${MAX_TEXT_CHARS} 字符，请拆分后上传`);
-  }
+  if (!text) throw new Error("未提取到文本");
+  if (text.length > MAX_TEXT_CHARS) throw new Error(`文本超过 ${MAX_TEXT_CHARS} 字符`);
   return text;
 }
 
-function buildDocId(sessionId, index) {
-  const safeSession = sessionId.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 48) || "session";
-  return `web-${safeSession}-${Date.now()}-${index}`;
+async function waitForIndexJob(jobId) {
+  for (let count = 0; count < 480; count += 1) {
+    const response = await fetch(`/api/v1/documents/index/jobs/${encodeURIComponent(jobId)}`);
+    if (!response.ok) throw new Error("索引任务查询失败");
+    const job = await response.json();
+    if (job.state === "ACTIVATED") return job;
+    if (job.state === "FAILED") throw new Error(job.error?.message || "文档入库失败");
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error("文档入库超时");
 }
 
 async function indexSelectedDocuments() {
-  if (state.documents.length === 0) {
-    return null;
-  }
-  if (state.documents.length > MAX_DOCUMENTS) {
-    throw new Error(`每次最多上传 ${MAX_DOCUMENTS} 个文档`);
-  }
-
-  const userId = el.userId.value.trim() || "web-user";
-  const sessionId = el.sessionId.value.trim() || newSessionId();
-  el.sessionId.value = sessionId;
-
+  if (!state.documents.length) return [];
   const documents = [];
-  for (const [index, entry] of state.documents.entries()) {
+  for (const entry of state.documents) {
     updateDocumentStatus(entry.file.name, "解析中...");
-    const content = await extractDocumentText(entry.file);
-    updateDocumentStatus(entry.file.name, "等待入库");
     documents.push({
-      doc_id: buildDocId(sessionId, index),
+      // A filename is the demo's stable logical document identity. Re-uploading an edited
+      // file creates a new immutable version and atomically replaces the active pointer.
+      doc_id: `web:${entry.file.name}`,
+      dataset_id: "default",
       title: entry.file.name,
-      content,
-      metadata: {
-        source: "web-ui",
-        file_name: entry.file.name,
-        file_type: inferFileType(entry.file),
-        user_id: userId,
-        session_id: sessionId,
-      },
+      content: await extractDocumentText(entry.file),
+      metadata: { source: "web-ui", file_name: entry.file.name, file_type: inferFileType(entry.file) },
     });
+    updateDocumentStatus(entry.file.name, "等待入库");
   }
-
-  setStatus("文档入库中...");
-  const resp = await fetch("/api/v1/documents/index", {
+  const response = await fetch("/api/v1/documents/index", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ documents }),
   });
-  if (!resp.ok) {
-    const errorBody = await resp.json().catch(() => ({}));
-    throw new Error(errorBody.detail || "文档入库失败，检查 arag 服务");
+  if (!response.ok) throw new Error("文档入库受理失败");
+  if (response.status !== 202) throw new Error(`文档入库受理必须返回 HTTP 202，实际为 ${response.status}`);
+  const accepted = await response.json();
+  if (!Array.isArray(accepted.job_ids) || accepted.job_ids.length !== documents.length) {
+    throw new Error("文档入库受理响应缺少完整 job_ids");
   }
-  const data = await resp.json();
-  for (const entry of state.documents) {
-    updateDocumentStatus(entry.file.name, "已入库");
-  }
-  return data;
+  const jobs = await Promise.all(accepted.job_ids.map(waitForIndexJob));
+  state.documents.forEach((entry) => updateDocumentStatus(entry.file.name, "已激活"));
+  return jobs;
 }
 
-function appendUserMessage(query) {
-  const parts = [];
-  if (query) {
-    parts.push(query);
-  }
-  if (state.documents.length) {
-    parts.push(`文档：${state.documents.map((entry) => entry.file.name).join(", ")}`);
-  }
-  if (state.imageFile) {
-    parts.push(`图片：${state.imageFile.name}`);
-  }
-  appendMessage("user", parts.join("\n"));
+async function uploadImageArtifact() {
+  if (!state.imageFile) return [];
+  const form = new FormData();
+  form.append("file", state.imageFile, state.imageFile.name);
+  const response = await fetch("/api/v1/artifacts", { method: "POST", body: form });
+  if (!response.ok) throw new Error("图片 Artifact 上传失败");
+  return [(await response.json()).artifact_id];
 }
 
 function parseSseBlock(block) {
-  const event = { type: "message", data: "" };
-  const lines = block.split(/\r?\n/);
+  const event = { type: "message", id: null, data: "" };
   const data = [];
-  for (const line of lines) {
-    if (line.startsWith("event:")) {
-      event.type = line.slice(6).trim();
-    } else if (line.startsWith("data:")) {
-      data.push(line.slice(5).trimStart());
-    }
+  for (const line of block.split(/\r?\n/)) {
+    if (line.startsWith("id:")) event.id = Number(line.slice(3).trim());
+    else if (line.startsWith("event:")) event.type = line.slice(6).trim();
+    else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
   }
   event.data = data.join("\n");
   return event;
 }
 
-async function readSseResponse(resp, assistant) {
-  const reader = resp.body.getReader();
+function handleSseEvent(event, assistant) {
+  if (!event.data) return;
+  let envelope;
+  try { envelope = JSON.parse(event.data); } catch { return; }
+  const payload = envelope.payload || {};
+  if (event.id) {
+    state.lastSeq = Math.max(state.lastSeq, event.id);
+    localStorage.setItem("sxw.last_seq", String(state.lastSeq));
+  }
+  if (event.type === "text") {
+    assistant.body.textContent += payload.delta || "";
+    scrollToBottom();
+  } else if (event.type === "assistant_message") {
+    // The committed semantic message is authoritative.  In particular, a
+    // fresh page may be rebuilding its UI from events after all streaming
+    // deltas were already consumed by a previous page instance.
+    assistant.body.textContent = payload.text || "";
+    scrollToBottom();
+  } else if (event.type === "citation") {
+    addCitations(assistant.node, payload.citations || payload.refs || []);
+  } else if (["tool_call", "tool_result", "plan_step", "skill_event", "run_status", "activity_status"].includes(event.type)) {
+    addProcessItem(assistant.node, event.type, payload);
+  } else if (event.type === "terminal") {
+    state.terminal = true;
+    state.watching = false;
+    setStatus(`运行结束：${envelope.terminal_status}`, envelope.terminal_status === "SUCCEEDED" ? "ok" : "bad");
+    refreshControls();
+  }
+}
+
+async function consumeSse(response, assistant) {
+  const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-
   while (true) {
     const { value, done } = await reader.read();
-    if (done) {
-      break;
-    }
-    buffer += decoder.decode(value, { stream: true });
-    buffer = buffer.replace(/\r\n/g, "\n");
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
     let boundary = buffer.indexOf("\n\n");
     while (boundary !== -1) {
-      const block = buffer.slice(0, boundary);
+      handleSseEvent(parseSseBlock(buffer.slice(0, boundary)), assistant);
       buffer = buffer.slice(boundary + 2);
-      handleSseEvent(parseSseBlock(block), assistant);
       boundary = buffer.indexOf("\n\n");
     }
   }
-  buffer += decoder.decode();
-  const tail = buffer.trim();
-  if (tail) {
-    handleSseEvent(parseSseBlock(tail), assistant);
-  }
 }
 
-function handleSseEvent(event, assistant) {
-  let payload = {};
-  try {
-    payload = event.data ? JSON.parse(event.data) : {};
-  } catch {
-    payload = { raw: event.data };
+async function watchRun(assistant) {
+  state.watching = true;
+  refreshControls();
+  while (state.watching && !state.terminal) {
+    state.watchController = new AbortController();
+    try {
+      const response = await fetch(
+        `/api/v1/runs/${encodeURIComponent(state.runId)}/events?after_seq=${state.lastSeq}`,
+        { signal: state.watchController.signal },
+      );
+      if (!response.ok || !response.body) throw new Error(`SSE 订阅失败：${response.status}`);
+      await consumeSse(response, assistant);
+      if (!state.terminal && state.watching) await new Promise((resolve) => setTimeout(resolve, 500));
+    } catch (error) {
+      if (error.name === "AbortError") break;
+      setStatus("订阅断开，正在按 cursor 重连...");
+      await new Promise((resolve) => setTimeout(resolve, 750));
+    }
   }
-
-  if (event.type === "text") {
-    assistant.body.textContent += escapeText(payload.delta);
-    scrollToBottom();
-    return;
-  }
-  if (event.type === "citation") {
-    addCitations(assistant.node, payload.refs || []);
-    return;
-  }
-  if (event.type === "tool_call") {
-    const callId = shortCallId(payload.id);
-    const callLabel = callId ? ` · #${callId}` : "";
-    addProcessItem(
-      assistant.node,
-      `tool_call · ${payload.name || ""}${callLabel}`,
-      payload,
-    );
-    return;
-  }
-  if (event.type === "tool_result") {
-    const callId = shortCallId(payload.id || payload.response?.skillCallId);
-    const callLabel = callId ? ` · #${callId}` : "";
-    addProcessItem(
-      assistant.node,
-      `tool_result · ${payload.name || ""}${callLabel}`,
-      payload,
-    );
-    return;
-  }
-  if (event.type === "plan_step") {
-    addProcessItem(assistant.node, "plan_step", payload);
-    return;
-  }
-  if (event.type === "skill_event") {
-    const eventName = payload.dataType === "CARD" ? "skill_card" : "skill_event";
-    const callId = shortCallId(payload.skillCallId);
-    const callLabel = callId ? ` · #${callId}` : "";
-    const label = `${eventName} · ${payload.skill || ""}${callLabel}`;
-    addProcessItem(assistant.node, label, payload.data ?? payload);
-    return;
-  }
-  if (event.type === "error") {
-    assistant.body.textContent += `\n${payload.message || "请求失败"}`;
-    assistant.node.classList.add("error");
-    return;
-  }
-  if (event.type !== "done") {
-    addProcessItem(assistant.node, event.type, payload);
-  }
+  state.watchController = null;
+  refreshControls();
 }
 
-async function sendChat(query) {
-  const form = new FormData();
-  form.append("query", query || (state.imageFile ? "请描述这张图片。" : ""));
-  form.append("user_id", el.userId.value.trim() || "web-user");
-  form.append("session_id", el.sessionId.value.trim() || newSessionId());
-  if (state.imageFile) {
-    form.append("image", state.imageFile, state.imageFile.name);
-  }
-
-  const agentUuid = encodeURIComponent(el.agentUuid.value.trim() || "demo");
-  state.abortController = new AbortController();
-  const resp = await fetch(`/api/v1/chat/${agentUuid}/stream`, {
+async function createRun(query, attachmentRefs) {
+  const response = await fetch("/api/v1/runs", {
     method: "POST",
-    body: form,
-    signal: state.abortController.signal,
+    headers: { "content-type": "application/json", "Idempotency-Key": uuid() },
+    body: JSON.stringify({
+      client_request_id: uuid(),
+      conversation_id: el.conversationId.value.trim() || null,
+      principal_id: el.userId.value.trim() || "web-user",
+      agent_id: el.agentUuid.value.trim() || "demo-agent",
+      engine: el.engineSelect.value,
+      input: { text: query || "请描述上传的附件。", attachment_refs: attachmentRefs },
+    }),
   });
-  if (!resp.ok || !resp.body) {
-    throw new Error(`对话请求失败：${resp.status}`);
-  }
-
-  const assistant = appendMessage("assistant", "");
-  await readSseResponse(resp, assistant);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error?.message || `Run 创建失败：${response.status}`);
+  state.runId = body.run_id;
+  state.lastSeq = 0;
+  state.terminal = false;
+  el.conversationId.value = body.conversation_id;
+  localStorage.setItem("sxw.run_id", state.runId);
+  localStorage.setItem("sxw.last_seq", "0");
+  localStorage.setItem("sxw.conversation_id", body.conversation_id);
+  return body;
 }
 
-function clearAttachmentsAfterSend() {
+function clearAttachments() {
   state.documents = [];
   state.imageFile = null;
-  if (state.imagePreviewUrl) {
-    URL.revokeObjectURL(state.imagePreviewUrl);
-  }
+  if (state.imagePreviewUrl) URL.revokeObjectURL(state.imagePreviewUrl);
   state.imagePreviewUrl = "";
   el.documentInput.value = "";
   el.imageInput.value = "";
@@ -483,79 +383,115 @@ function clearAttachmentsAfterSend() {
 async function handleSubmit(event) {
   event.preventDefault();
   const query = el.queryInput.value.trim();
-  if (!query && state.documents.length === 0 && !state.imageFile) {
+  if (!query && !state.documents.length && !state.imageFile) {
     setStatus("请输入内容或选择附件", "bad");
     return;
   }
-
-  appendUserMessage(query);
-  setBusy(true);
-  setStatus("处理中...");
-
+  appendMessage("user", [query, state.imageFile ? `图片：${state.imageFile.name}` : ""].filter(Boolean).join("\n"));
+  state.submitting = true;
+  refreshControls();
   try {
-    const indexResult = await indexSelectedDocuments();
-    if (indexResult) {
-      appendMessage("system", `文档已入库：${indexResult.indexed_docs} 个文档，${indexResult.indexed_chunks} 个片段。`);
+    const jobs = await indexSelectedDocuments();
+    if (jobs.length) appendMessage("system", `${jobs.length} 个文档版本已 ACTIVATED。`);
+    if (!query && !state.imageFile) {
+      setStatus("文档入库完成", "ok");
+      return;
     }
-    if (query || state.imageFile) {
-      await sendChat(query);
-    } else {
-      setStatus("文档已入库，可以开始提问", "ok");
-    }
+    const refs = await uploadImageArtifact();
+    const created = await createRun(query, refs);
+    const assistant = appendMessage("assistant", "");
+    addProcessItem(assistant.node, "run_accepted", created);
+    clearAttachments();
     el.queryInput.value = "";
-    clearAttachmentsAfterSend();
-    setStatus("完成", "ok");
-  } catch (err) {
-    if (err.name === "AbortError") {
-      appendMessage("system", "已停止生成。");
-      setStatus("已停止");
-    } else {
-      appendMessage("error", err.message || String(err), "error");
-      setStatus(err.message || "请求失败", "bad");
-    }
+    setStatus(`Run ${created.run_id} 执行中...`);
+    await watchRun(assistant);
+  } catch (error) {
+    appendMessage("error", error.message || String(error), "error");
+    setStatus(error.message || "请求失败", "bad");
   } finally {
-    setBusy(false);
-    state.abortController = null;
+    state.submitting = false;
+    refreshControls();
   }
+}
+
+async function cancelRun() {
+  if (!state.runId || state.terminal) return;
+  const response = await fetch(`/api/v1/runs/${encodeURIComponent(state.runId)}/cancel`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ command_id: uuid(), reason: "cancelled from Web UI" }),
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    setStatus(body.error?.message || "取消失败", "bad");
+    return;
+  }
+  setStatus("取消指令已提交，等待安全边界...");
+}
+
+async function resumeStoredRun() {
+  if (!state.runId) return;
+  try {
+    const response = await fetch(`/api/v1/runs/${encodeURIComponent(state.runId)}`);
+    if (!response.ok) return;
+    const run = await response.json();
+    el.conversationId.value = run.conversation_id;
+    // localStorage owns only the transport cursor, not a durable rendering of
+    // the answer/process DOM.  On a fresh page the old cursor therefore cannot
+    // be used as a projection cursor: replay every committed public event to
+    // rebuild the UI, even when the Run already reached terminal while closed.
+    const previousCursor = state.lastSeq;
+    state.lastSeq = 0;
+    state.terminal = false;
+    localStorage.setItem("sxw.last_seq", "0");
+    const assistant = appendMessage("assistant", "");
+    addProcessItem(assistant.node, "resume", {
+      run_id: state.runId,
+      after_seq: 0,
+      previous_transport_cursor: previousCursor,
+    });
+    setStatus("从 committed events 重建上次 Run...");
+    await watchRun(assistant);
+  } catch { /* a stale local cursor is harmless */ }
 }
 
 async function loadHealth() {
   try {
-    const resp = await fetch("/healthz");
-    const data = await resp.json();
-    el.healthStatus.textContent = `${data.engine || "agent"} · ${data.model || ""}`;
-  } catch {
-    el.healthStatus.textContent = "未连接";
-  }
+    const response = await fetch("/healthz");
+    const health = await response.json();
+    el.healthStatus.textContent = `${health.service} · ${Object.keys(health.active_releases || {}).length}/3 releases`;
+  } catch { el.healthStatus.textContent = "未连接"; }
 }
 
 function bindEvents() {
   el.chatForm.addEventListener("submit", handleSubmit);
   el.stopBtn.addEventListener("click", () => {
-    if (state.abortController) {
-      state.abortController.abort();
-    }
+    state.watching = false;
+    if (state.watchController) state.watchController.abort();
+    setStatus("已停止观看；Run 仍在 Worker 中执行。");
+    refreshControls();
   });
+  el.cancelBtn.addEventListener("click", cancelRun);
   el.newSessionBtn.addEventListener("click", () => {
-    el.sessionId.value = newSessionId();
-    appendMessage("system", "新会话已创建。");
+    state.watching = false;
+    if (state.watchController) state.watchController.abort();
+    state.runId = "";
+    state.lastSeq = 0;
+    state.terminal = false;
+    el.conversationId.value = "";
+    localStorage.removeItem("sxw.run_id");
+    localStorage.removeItem("sxw.last_seq");
+    localStorage.removeItem("sxw.conversation_id");
+    appendMessage("system", "将在下次发送时创建新 Conversation。");
+    refreshControls();
   });
   el.documentInput.addEventListener("change", () => {
-    state.documents = Array.from(el.documentInput.files || []).slice(0, MAX_DOCUMENTS).map((file) => ({
-      file,
-      status: `${Math.ceil(file.size / 1024)} KB`,
-    }));
-    if ((el.documentInput.files || []).length > MAX_DOCUMENTS) {
-      setStatus(`每次最多上传 ${MAX_DOCUMENTS} 个文档`, "bad");
-    } else {
-      setStatus("");
-    }
+    state.documents = Array.from(el.documentInput.files || []).slice(0, MAX_DOCUMENTS)
+      .map((file) => ({ file, status: `${Math.ceil(file.size / 1024)} KB` }));
     renderAttachments();
   });
   el.imageInput.addEventListener("change", () => {
-    if (state.imagePreviewUrl) {
-      URL.revokeObjectURL(state.imagePreviewUrl);
-    }
+    if (state.imagePreviewUrl) URL.revokeObjectURL(state.imagePreviewUrl);
     state.imageFile = (el.imageInput.files || [])[0] || null;
     state.imagePreviewUrl = state.imageFile ? URL.createObjectURL(state.imageFile) : "";
     renderAttachments();
@@ -563,10 +499,12 @@ function bindEvents() {
 }
 
 function init() {
-  el.sessionId.value = newSessionId();
+  el.conversationId.value = localStorage.getItem("sxw.conversation_id") || "";
   bindEvents();
+  refreshControls();
   loadHealth();
-  appendMessage("system", "已就绪。");
+  appendMessage("system", "已就绪。停止观看不会取消 Run。");
+  resumeStoredRun();
 }
 
 init();

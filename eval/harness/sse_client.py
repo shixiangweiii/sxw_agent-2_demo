@@ -1,8 +1,9 @@
-"""SSE 客户端：向 agent 发 multipart 请求，解析 SSE 事件流 → CollectedRun。"""
+"""Run API client: create -> committed SSE replay/tail -> explicit status."""
 from __future__ import annotations
 
 import json
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -16,6 +17,7 @@ from eval.harness.config import EvalConfig
 class CollectedRun:
     case_id: str
     engine: str
+    run_id: str = ""
     text: str = ""
     tool_calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     tool_results: list[tuple[str, Any]] = field(default_factory=list)
@@ -25,17 +27,22 @@ class CollectedRun:
     had_error: bool = False
     error_msg: str = ""
     finished: bool = False
+    terminal_status: str = ""
+    last_seq: int = 0
     ttft_ms: float = 0.0
     total_ms: float = 0.0
     transport_error: str = ""
     raw_events: list[dict[str, Any]] = field(default_factory=list)
-    # 与服务端轨迹的联查键。注意**单靠它不唯一**：同一条 case 会分别发给两个引擎实例，
-    # 唯一键是 (engine, trace_id)——results.jsonl 里 engine 是独立字段，天然成立。
     trace_id: str = ""
 
 
-def _dispatch(run: CollectedRun, ev_type: str, data: dict[str, Any], t0: float) -> None:
-    run.raw_events.append({"event": ev_type, "data": data})
+def _dispatch(
+    run: CollectedRun, ev_type: str, envelope: dict[str, Any], t0: float,
+) -> None:
+    data = envelope.get("payload") or {}
+    seq = int(envelope.get("seq") or 0)
+    run.last_seq = max(run.last_seq, seq)
+    run.raw_events.append({"event": ev_type, "seq": seq, "data": data})
     if ev_type == "text":
         if run.ttft_ms == 0.0:
             run.ttft_ms = (time.monotonic() - t0) * 1000.0
@@ -43,87 +50,134 @@ def _dispatch(run: CollectedRun, ev_type: str, data: dict[str, Any], t0: float) 
     elif ev_type == "tool_call":
         run.tool_calls.append((str(data.get("name", "")), dict(data.get("args") or {})))
     elif ev_type == "tool_result":
-        run.tool_results.append((str(data.get("name", "")), data.get("response")))
+        run.tool_results.append((str(data.get("name", "")), data.get("response", data.get("result"))))
     elif ev_type == "citation":
-        run.citations.append(data)
+        run.citations.extend(data.get("citations") or data.get("refs") or [])
     elif ev_type == "skill_event":
         run.skill_events.append(data)
     elif ev_type == "plan_step":
         run.plan_steps.append(data)
-    elif ev_type == "done":
+    elif ev_type == "terminal":
         run.finished = True
-        # 服务端回带的 trace_id 是**权威**的：轨迹文件就是按它命名的。
-        # 正常情况下与我们发出去的一致；不一致说明服务端没采纳请求头，
-        # 此时按服务端的走，否则会照着一个不存在的 id 去捞轨迹。
-        if data.get("trace_id"):
-            run.trace_id = str(data["trace_id"])
-    elif ev_type == "error":
-        run.had_error = True
-        run.error_msg = str(data.get("message", ""))
+        run.terminal_status = str(envelope.get("terminal_status") or "")
+        if run.terminal_status != "SUCCEEDED":
+            run.had_error = True
+            run.error_msg = str(data.get("message") or data.get("code") or run.terminal_status)
+
+
+def _upload_image(client: httpx.Client, cfg: EvalConfig, path: Path, trace_id: str) -> str:
+    with path.open("rb") as handle:
+        response = client.post(
+            f"{cfg.base_url}/api/v1/artifacts",
+            files={"file": (path.name, handle, "image/jpeg")},
+            headers={"x-trace-id": trace_id},
+        )
+    response.raise_for_status()
+    return str(response.json()["artifact_id"])
+
+
+def _consume_subscription(
+    client: httpx.Client,
+    cfg: EvalConfig,
+    run: CollectedRun,
+    t0: float,
+    deadline: float,
+) -> None:
+    while not run.finished and time.monotonic() < deadline:
+        url = f"{cfg.base_url}/api/v1/runs/{run.run_id}/events"
+        try:
+            with client.stream(
+                "GET", url,
+                params={"after_seq": run.last_seq},
+                headers={"x-trace-id": run.trace_id, "Last-Event-ID": str(run.last_seq)},
+            ) as response:
+                response.raise_for_status()
+                event_type: Optional[str] = None
+                data_lines: list[str] = []
+                for line in response.iter_lines():
+                    if line == "":
+                        if event_type is not None:
+                            raw = "\n".join(data_lines)
+                            try:
+                                envelope = json.loads(raw) if raw else {}
+                            except json.JSONDecodeError:
+                                envelope = {"payload": {"_raw": raw}}
+                            _dispatch(run, event_type, envelope, t0)
+                        event_type, data_lines = None, []
+                        if run.finished:
+                            return
+                        continue
+                    if line.startswith("event:"):
+                        event_type = line[len("event:"):].strip()
+                    elif line.startswith("data:"):
+                        data_lines.append(line[len("data:"):].lstrip())
+        except Exception as exc:  # committed cursor makes reconnect safe
+            run.transport_error = f"{type(exc).__name__}: {exc}"
+            time.sleep(0.25)
 
 
 def chat(
-    cfg: EvalConfig, case_id: str, engine: str, query: str,
-    image_path: Optional[str] = None, base_dir: Optional[Path] = None, rep: int = 0,
+    cfg: EvalConfig,
+    case_id: str,
+    engine: str,
+    query: str,
+    image_path: Optional[str] = None,
+    base_dir: Optional[Path] = None,
+    rep: int = 0,
 ) -> CollectedRun:
-    # 主动指定 trace_id（而不是让服务端生成再回读）：可读、可预测，
-    # 报告里一眼能看出是哪条 case 的哪次重复；`TraceMiddleware` 优先采纳请求头。
     trace_id = f"eval-{case_id}-r{rep}"
     run = CollectedRun(case_id=case_id, engine=engine, trace_id=trace_id)
-    url = f"{cfg.base_url}/api/v1/chat/{cfg.agent_uuid}/stream"
-    session_id = f"{engine}::{case_id}" + (f"::r{rep}" if rep else "")
-    form = {"query": query, "user_id": "eval", "session_id": session_id}
-    files: Optional[dict[str, Any]] = None
-    fh = None
-    if image_path:
-        p = (base_dir / image_path) if base_dir else Path(image_path)
-        if p.exists():
-            fh = p.open("rb")
-            files = {"image": (p.name, fh, "image/jpeg")}
     t0 = time.monotonic()
+    deadline = t0 + cfg.request_timeout_s
     try:
         with httpx.Client(timeout=cfg.request_timeout_s) as client:
-            with client.stream("POST", url, data=form, files=files,
-                               headers={"x-trace-id": trace_id}) as resp:
-                resp.raise_for_status()
-                ev_type: Optional[str] = None
-                data_lines: list[str] = []
-                for line in resp.iter_lines():
-                    if line == "":
-                        if ev_type is not None:
-                            raw = "\n".join(data_lines)
-                            try:
-                                payload = json.loads(raw) if raw else {}
-                            except json.JSONDecodeError:
-                                payload = {"_raw": raw}
-                            _dispatch(run, ev_type, payload, t0)
-                        ev_type, data_lines = None, []
-                        continue
-                    if line.startswith("event:"):
-                        ev_type = line[len("event:"):].strip()
-                    elif line.startswith("data:"):
-                        data_lines.append(line[len("data:"):].lstrip())
-    except Exception as exc:  # noqa: BLE001 - 传输异常记录为 transport_error，不抛
+            attachment_refs: list[str] = []
+            if image_path:
+                path = (base_dir / image_path) if base_dir else Path(image_path)
+                if path.exists():
+                    attachment_refs.append(_upload_image(client, cfg, path, trace_id))
+            create_response = client.post(
+                f"{cfg.base_url}/api/v1/runs",
+                json={
+                    "client_request_id": str(uuid.uuid4()),
+                    "conversation_id": None,
+                    "principal_id": "eval",
+                    "agent_id": cfg.agent_uuid,
+                    "engine": engine,
+                    "input": {"text": query, "attachment_refs": attachment_refs},
+                },
+                headers={
+                    "x-trace-id": trace_id,
+                    "Idempotency-Key": f"{trace_id}-{uuid.uuid4().hex}",
+                },
+            )
+            create_response.raise_for_status()
+            run.run_id = str(create_response.json()["run_id"])
+            _consume_subscription(client, cfg, run, t0, deadline)
+            status_response = client.get(f"{cfg.base_url}/api/v1/runs/{run.run_id}")
+            status_response.raise_for_status()
+            status = status_response.json()
+            terminal = status.get("terminal")
+            if terminal:
+                run.finished = True
+                run.terminal_status = str(terminal.get("status") or "")
+                if run.terminal_status != "SUCCEEDED":
+                    run.had_error = True
+                    run.error_msg = str((terminal.get("payload") or {}).get("message") or run.terminal_status)
+    except Exception as exc:  # behavior harness records transport failures; reliability tests own the gate
         run.transport_error = f"{type(exc).__name__}: {exc}"
-    finally:
-        if fh is not None:
-            fh.close()
     run.total_ms = (time.monotonic() - t0) * 1000.0
     return run
 
 
 def fetch_trace(cfg: EvalConfig, trace_id: str, level: str = "summary") -> Optional[dict[str, Any]]:
-    """从被测 agent 捞回结构化轨迹。失败返回 None——**绝不让取轨迹失败影响评测本身**。
-
-    默认取 summary：入库的报告只留骨架 + payload 摘要，完整输入留在 agent 本机的
-    `local_storage/traces/`（已 gitignore），由记录里的 `trace_file` 指过去。
-    """
     try:
         with httpx.Client(timeout=20.0) as client:
-            resp = client.get(f"{cfg.base_url}/api/v1/traces/{trace_id}",
-                              params={"level": level})
-            if resp.status_code != 200:
+            response = client.get(
+                f"{cfg.base_url}/api/v1/traces/{trace_id}", params={"level": level},
+            )
+            if response.status_code != 200:
                 return None
-            return resp.json()
-    except Exception:  # noqa: BLE001 - 轨迹是诊断增强，不是评测前置条件
+            return response.json()
+    except Exception:
         return None

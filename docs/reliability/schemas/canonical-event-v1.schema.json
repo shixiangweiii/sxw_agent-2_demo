@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sxw-agent.local/schemas/canonical-event-v1.schema.json",
+  "title": "Canonical Runtime Event v1",
+  "description": "append-only、先提交后发布的 Store 权威事件。此对象使用 epoch milliseconds；公开 SSE 是删减字段并把 occurred_at 转成 RFC3339 UTC 的只读投影。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "schema_version",
+    "run_id",
+    "turn_id",
+    "activity_id",
+    "tool_execution_id",
+    "seq",
+    "event_type",
+    "producer",
+    "payload",
+    "payload_ref",
+    "visibility",
+    "sensitivity",
+    "occurred_at",
+    "terminal_status",
+    "release_fingerprint"
+  ],
+  "properties": {
+    "event_id": { "$ref": "#/$defs/eventId" },
+    "schema_version": { "const": "1" },
+    "run_id": { "$ref": "#/$defs/runId" },
+    "turn_id": { "$ref": "#/$defs/turnId" },
+    "activity_id": {
+      "oneOf": [
+        { "$ref": "#/$defs/activityId" },
+        { "type": "null" }
+      ]
+    },
+    "tool_execution_id": {
+      "oneOf": [
+        { "$ref": "#/$defs/toolExecutionId" },
+        { "type": "null" }
+      ]
+    },
+    "seq": { "type": "integer", "minimum": 1 },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "USER_MESSAGE_COMMITTED",
+        "RUN_STATUS_CHANGED",
+        "ACTIVITY_STATUS_CHANGED",
+        "OUTPUT_DELTA_COMMITTED",
+        "MODEL_MESSAGE_COMMITTED",
+        "TOOL_CALL_COMMITTED",
+        "TOOL_RESULT_COMMITTED",
+        "MODEL_PLAN_UPDATED",
+        "SKILL_UI_FRAME_COMMITTED",
+        "RETRIEVAL_COMMITTED",
+        "CHECKPOINT_COMMITTED",
+        "SIGNAL_RECORDED",
+        "CANCEL_REQUESTED",
+        "ASSISTANT_MESSAGE_COMMITTED",
+        "CITATION_SET_COMMITTED",
+        "RUN_TERMINATED"
+      ]
+    },
+    "producer": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+    },
+    "payload": {
+      "oneOf": [
+        { "type": "object" },
+        { "type": "null" }
+      ]
+    },
+    "payload_ref": {
+      "oneOf": [
+        { "$ref": "#/$defs/artifactId" },
+        { "type": "null" }
+      ]
+    },
+    "visibility": {
+      "type": "string",
+      "enum": ["PUBLIC", "INTERNAL"]
+    },
+    "sensitivity": {
+      "type": "string",
+      "enum": ["PUBLIC", "PRIVATE", "SENSITIVE"]
+    },
+    "occurred_at": { "$ref": "#/$defs/epochMilliseconds" },
+    "terminal_status": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "SUCCEEDED",
+            "FAILED",
+            "CANCELLED",
+            "TIMED_OUT",
+            "REJECTED",
+            "INCOMPATIBLE_RELEASE"
+          ]
+        },
+        { "type": "null" }
+      ]
+    },
+    "release_fingerprint": { "$ref": "#/$defs/sha256" }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "payload": { "type": "object" },
+        "payload_ref": { "type": "null" }
+      }
+    },
+    {
+      "properties": {
+        "payload": { "type": "null" },
+        "payload_ref": { "$ref": "#/$defs/artifactId" }
+      }
+    }
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": { "event_type": { "const": "RUN_TERMINATED" } },
+        "required": ["event_type"]
+      },
+      "then": { "properties": { "terminal_status": { "type": "string" } } }
+    }
+  ],
+  "$defs": {
+    "eventId": {
+      "type": "string",
+      "pattern": "^evt_[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$"
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^run_[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$"
+    },
+    "turnId": {
+      "type": "string",
+      "pattern": "^turn_[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$"
+    },
+    "activityId": {
+      "description": "从 run_id + logical_key 派生的 compact UUIDv5。",
+      "type": "string",
+      "pattern": "^act_[0-9a-f]{12}5[0-9a-f]{3}[89ab][0-9a-f]{15}$"
+    },
+    "toolExecutionId": {
+      "description": "从 run_id + logical slot 派生的 compact UUIDv5。",
+      "type": "string",
+      "pattern": "^tool_[0-9a-f]{12}5[0-9a-f]{3}[89ab][0-9a-f]{15}$"
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "artifactId": { "$ref": "#/$defs/sha256" },
+    "epochMilliseconds": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "UTC Unix epoch milliseconds，仅用于 committed Store 对象。"
+    }
+  }
+}

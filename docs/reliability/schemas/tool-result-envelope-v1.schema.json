@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sxw-agent.local/schemas/tool-result-envelope-v1.schema.json",
+  "title": "ToolResultEnvelope v1",
+  "description": "Tool executor 到 Broker 的五类语义结果。ToolExecution 身份、attempt、effect_status、reconcile 与时间由 tool_executions 账本裁决，不重复进此 envelope。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "preview",
+    "result_ref",
+    "error_code",
+    "error_message",
+    "external_object_id",
+    "pending_input"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["SUCCESS", "FAILURE", "INTERRUPT", "NO_OUTPUT", "UNKNOWN"]
+    },
+    "preview": {
+      "description": "面向模型的有界 JSON 值；完整大结果只存在于 result_ref。"
+    },
+    "result_ref": {
+      "oneOf": [
+        { "$ref": "#/$defs/artifactId" },
+        { "type": "null" }
+      ]
+    },
+    "error_code": {
+      "oneOf": [
+        { "type": "string", "minLength": 1, "maxLength": 128 },
+        { "type": "null" }
+      ]
+    },
+    "error_message": {
+      "oneOf": [
+        { "type": "string", "maxLength": 8192 },
+        { "type": "null" }
+      ]
+    },
+    "external_object_id": {
+      "oneOf": [
+        { "type": "string", "minLength": 1, "maxLength": 2048 },
+        { "type": "null" }
+      ]
+    },
+    "pending_input": {
+      "oneOf": [
+        { "type": "object" },
+        { "type": "null" }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "status": { "enum": ["FAILURE", "UNKNOWN"] } },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "error_code": { "type": "string", "minLength": 1 },
+          "error_message": { "type": "string" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "status": { "const": "INTERRUPT" } },
+        "required": ["status"]
+      },
+      "then": { "properties": { "pending_input": { "type": "object" } } }
+    },
+    {
+      "if": {
+        "properties": { "status": { "const": "NO_OUTPUT" } },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "preview": { "type": "null" },
+          "result_ref": { "type": "null" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "artifactId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

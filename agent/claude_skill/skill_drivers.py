@@ -124,7 +124,7 @@ async def drive_native(
     工具面完全相同（沙箱工具本来就是普通 Python 函数）；
     区别只在"循环归谁驱动"，与主引擎的对比是同一条轴。
     """
-    # 延迟 import：ENGINE=agent_loop 且 SUB_AGENT_ENGINE=adk 时不必加载原生循环。
+    # 延迟 import：当前 Run 不使用 native 子引擎时不必加载原生循环。
     from agent.config import get_settings
     from agent.engine.native_loop.llm_client import get_shared_client
     from agent.engine.native_loop.loop import T_HARD_CAP, LoopConfig, NativeLoop
