@@ -72,6 +72,10 @@ _SUMMARY_HEAD_CHARS = 200
 _MAX_EVENTS_PER_SPAN = 2000
 # 内存里保留最近多少条 trace（供查询 API 免读盘）
 _RING_CAPACITY = 64
+# 列表接口单次最多扫多少个文件。控制台会轮询，目录长大后不能每次全读。
+_LIST_SCAN_MAX_FILES = 200
+# 文件摘要缓存条数（键含 mtime/size，文件被追加就自动失效）
+_SUMMARY_CACHE_CAPACITY = 512
 
 # 敏感 key：命中即整值替换。刻意**不匹配裸 token**——
 # prompt_tokens / completion_tokens / max_tokens 都是要留的正常字段。
@@ -87,6 +91,8 @@ _DATA_URL_RE = re.compile(r"^data:([^;,]+);base64,", re.IGNORECASE)
 # x-trace-id 请求头），不做白名单净化就是一个目录穿越洞。
 _UNSAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_-]")
 _SEQ_IN_NAME_RE = re.compile(r"^\d{8}-\d{6}-(\d{4})-")
+# 同一模式的剥离版：把 `{day}-{HHMMSS}-{seq}-` 前缀去掉，剩下的是进程名段。
+_SEQ_PREFIX_RE = re.compile(r"^\d{8}-\d{6}-\d{4}-")
 
 _current_span: contextvars.ContextVar[Optional["Span"]] = contextvars.ContextVar(
     "current_span", default=None,
@@ -445,6 +451,8 @@ class _Tracer:
 
 
 _tracer = _Tracer()
+# 文件摘要缓存：键是 (path, mtime_ns, size)，所以文件一被追加就自然失效。
+_summary_cache: "OrderedDict[tuple[str, int, int], dict[str, Any]]" = OrderedDict()
 
 
 def _prune(root: Path, retention_days: int) -> None:
@@ -481,6 +489,7 @@ def configure_tracing(
         enabled=enabled, payload_level=payload_level, trace_dir=trace_dir,
         max_field_chars=max_field_chars, retention_days=retention_days, engine=engine,
     )
+    _summary_cache.clear()
     log_kv(logger, logging.INFO, "Trace", "tracing configured",
            enabled=enabled, payload_level=_tracer.payload_level,
            dir=str(_tracer.dir) if _tracer.dir else None,
@@ -603,33 +612,44 @@ def close_span(span: Any, status: str = STATUS_OK, **attributes: Any) -> None:
 
 
 def get_trace(trace_id: str, level: str = LEVEL_FULL) -> Optional[dict[str, Any]]:
-    """取一条 trace（先查内存，未命中再读文件）。
+    """取一条 trace（内存 ring + 全部同名落盘文件，按 span_id 去重后合并）。
 
     ``level`` 只能**降级**：落盘时若已是 summary，这里再要 full 也拿不回来。
+
+    ⚠️ 一个 trace_id 可能对应**多个文件**：Worker 重启后重试同一个 Run，
+    ring 已清空、会重新开一个文件，但 trace_id 取自持久化的 Run 因而不变。
+    只读最新的那个会静默丢掉前一次 attempt 的全部 span，所以这里合并。
+    内存记录与它自己的文件是同一批 span（`emit` 同时写两边），靠 span_id 去重。
     """
-    spans: Optional[list[dict[str, Any]]] = None
-    source = "memory"
+    merged: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+    sources: list[str] = []
+
     rec = _tracer.lookup(trace_id)
-    path = rec.path if rec is not None else None
     if rec is not None:
-        spans = list(rec.spans)
-    else:
-        path = _find_trace_file(trace_id)
-        if path is not None:
-            source = "file"
-            spans = _read_jsonl(path)
-    if spans is None:
+        sources.append("memory")
+        for span in rec.spans:
+            merged.setdefault(str(span.get("span_id")), span)
+
+    paths = _find_trace_files(trace_id)
+    if paths:
+        sources.append("file")
+        for path in paths:
+            for span in _read_jsonl(path):
+                merged.setdefault(str(span.get("span_id")), span)
+
+    if not sources:
         return None
+    spans = list(merged.values())
     if level != LEVEL_FULL:
         spans = [_downgrade(s, level) for s in spans]
     return {
         "trace_id": trace_id,
         "level": level,
-        "source": source,
+        "source": "+".join(sources),
         "engine": _tracer.engine,
         # full 轨迹在本机的落盘位置。评测据此在报告里留一个指针而不是二次拷贝
         # ——前提是 harness 与 agent 同机（本项目本来就是本地跑）。
-        "trace_file": str(path) if path else None,
+        "trace_files": [str(path) for path in paths],
         "span_count": len(spans),
         # span 按关闭顺序追加，所以 root 在最后；读侧统一按开始时间排，
         # 再靠 parent_span_id 重建树（文件可能因进程被 kill 而缺 root）。
@@ -649,21 +669,234 @@ def _downgrade(span: dict[str, Any], level: str) -> dict[str, Any]:
     return out
 
 
-def _find_trace_file(trace_id: str) -> Optional[Path]:
-    """按净化后的 trace_id 后缀在日期目录里找文件（新的优先）。"""
+def _find_trace_files(trace_id: str) -> list[Path]:
+    """按净化后的 trace_id 后缀在日期目录里找出**全部**文件（新的在前）。
+
+    同一个 trace_id 跨 Worker 重启会产生多个文件，调用方要把它们当成一条轨迹。
+    """
     root = _tracer.dir
     if root is None:
-        return None
+        return []
     pattern = f"*-{_sanitize(trace_id)}.jsonl"
+    found: list[Path] = []
     try:
         days = sorted((d for d in root.iterdir() if d.is_dir()), reverse=True)
     except OSError:
-        return None
+        return []
     for day in days:
-        matches = sorted(day.glob(pattern), reverse=True)
-        if matches:
-            return matches[0]
-    return None
+        found.extend(sorted(day.glob(pattern), reverse=True))
+    return found
+
+
+def _day_dirs() -> list[Path]:
+    """日期目录，新→旧。"""
+    root = _tracer.dir
+    if root is None:
+        return []
+    try:
+        return sorted(
+            (d for d in root.iterdir()
+             if d.is_dir() and len(d.name) == 8 and d.name.isdigit()),
+            reverse=True,
+        )
+    except OSError:
+        return []
+
+
+def available_trace_days() -> list[str]:
+    """有轨迹的日期（`YYYYMMDD`，新→旧），供控制台做日期选择。"""
+    return [day.name for day in _day_dirs()]
+
+
+def _file_summary(path: Path) -> Optional[dict[str, Any]]:
+    """把一个轨迹文件压成摘要（按 mtime/size 记忆化，供列表轮询复用）。
+
+    ⚠️ trace_id 取自**文件内容**而不是文件名：文件名是
+    `{day}-{time}-{seq}-{process}-{trace_id}`，而 process 与 trace_id 都可能含
+    `-`，切文件名无法可靠还原。反过来，知道了 trace_id 就能从文件名尾部剥出
+    process 段（`runtime-worker` / `runtime-api`），那才是写这条轨迹的进程。
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    cached = _summary_cache.get(key)
+    if cached is not None:
+        _summary_cache.move_to_end(key)
+        return cached
+
+    spans = _read_jsonl(path)
+    if not spans:
+        return None
+    trace_id = str(spans[0].get("trace_id") or "")
+    suffix = f"-{_sanitize(trace_id)}"
+    process = path.stem[:-len(suffix)] if suffix != "-" and path.stem.endswith(suffix) else ""
+    # 文件名前缀是 `{day}-{HHMMSS}-{seq:04d}-`，剥掉它剩下的才是进程名。
+    process = _SEQ_PREFIX_RE.sub("", process)
+
+    starts = [s.get("start_ts") for s in spans if s.get("start_ts") is not None]
+    ends = [s.get("end_ts") for s in spans if s.get("end_ts") is not None]
+    kinds: dict[str, int] = {}
+    tools: list[str] = []
+    tokens = 0
+    errors = cancelled = 0
+    has_root = False
+    engine = run_id = release = None
+    for span in spans:
+        # 根 span 最后才关闭并落盘，所以"还没有根"= 这次 attempt 仍在跑（或进程被
+        # kill 了）。用 parent_span_id 判定而不是看 engine span：重构前的轨迹根是
+        # `chat.request`，只认 engine span 会把所有历史轨迹误标成进行中。
+        if span.get("parent_span_id") is None:
+            has_root = True
+        kind = str(span.get("kind") or "")
+        kinds[kind] = kinds.get(kind, 0) + 1
+        attributes = span.get("attributes") or {}
+        status = span.get("status")
+        if status == STATUS_ERROR:
+            errors += 1
+        elif status == STATUS_CANCELLED:
+            cancelled += 1
+        if kind == KIND_LLM:
+            tokens += int(attributes.get("total_tokens") or 0)
+        elif kind == KIND_TOOL and attributes.get("tool"):
+            tools.append(str(attributes["tool"]))
+        elif kind == KIND_ENGINE:
+            engine = attributes.get("engine") or engine
+            run_id = attributes.get("run_id") or run_id
+            release = attributes.get("release_fingerprint") or release
+
+    summary = {
+        "trace_id": trace_id,
+        "trace_file": str(path),
+        "process": process,
+        "engine": engine,
+        "run_id": run_id,
+        "release_fingerprint": release,
+        "started_at": min(starts) if starts else None,
+        "ended_at": max(ends) if ends else None,
+        "span_count": len(spans),
+        "error_count": errors,
+        "cancelled_count": cancelled,
+        "kinds": kinds,
+        "total_tokens": tokens or None,
+        "tool_calls": tools,
+        "has_root": has_root,
+    }
+    _summary_cache[key] = summary
+    while len(_summary_cache) > _SUMMARY_CACHE_CAPACITY:
+        _summary_cache.popitem(last=False)
+    return summary
+
+
+def _merge_summaries(items: list[dict[str, Any]]) -> dict[str, Any]:
+    """把同一 trace_id 的多个文件摘要合并成一条（跨 Worker 重启的重试）。"""
+    starts = [item["started_at"] for item in items if item["started_at"] is not None]
+    ends = [item["ended_at"] for item in items if item["ended_at"] is not None]
+    kinds: dict[str, int] = {}
+    for item in items:
+        for kind, count in item["kinds"].items():
+            kinds[kind] = kinds.get(kind, 0) + count
+    started = min(starts) if starts else None
+    ended = max(ends) if ends else None
+    errors = sum(item["error_count"] for item in items)
+    cancelled = sum(item["cancelled_count"] for item in items)
+    has_root = any(item["has_root"] for item in items)
+    tokens = sum(item["total_tokens"] or 0 for item in items)
+    return {
+        "trace_id": items[0]["trace_id"],
+        "trace_files": [item["trace_file"] for item in items],
+        "process": next((item["process"] for item in items if item["process"]), ""),
+        "engine": next((item["engine"] for item in items if item["engine"]), None),
+        "run_id": next((item["run_id"] for item in items if item["run_id"]), None),
+        "release_fingerprint": next(
+            (item["release_fingerprint"] for item in items if item["release_fingerprint"]),
+            None,
+        ),
+        "started_at": started,
+        "duration_ms": (
+            round((ended - started) * 1000, 2)
+            if started is not None and ended is not None else None
+        ),
+        "span_count": sum(item["span_count"] for item in items),
+        "attempts": len(items),
+        "error_count": errors,
+        "kinds": kinds,
+        "total_tokens": tokens or None,
+        "tool_calls": [tool for item in items for tool in item["tool_calls"]],
+        "status": (
+            STATUS_ERROR if errors
+            else STATUS_CANCELLED if cancelled
+            else STATUS_OK
+        ),
+        "in_flight": not has_root,
+    }
+
+
+def list_traces(
+    *,
+    day: Optional[str] = None,
+    limit: int = 50,
+    engine: Optional[str] = None,
+    query: Optional[str] = None,
+    status: Optional[str] = None,
+) -> dict[str, Any]:
+    """列出轨迹摘要（新→旧），供 Trace Console 浏览。
+
+    只读文件系统，不碰 Run/Activity 权威表——Trace 是 Diagnostic，
+    列表也不例外。扫描量受 `_LIST_SCAN_MAX_FILES` 约束，避免目录膨胀后
+    每次轮询都把整个 traces 目录读一遍。
+    """
+    days = _day_dirs()
+    day_names = [item.name for item in days]
+    if day is not None:
+        days = [item for item in days if item.name == day]
+
+    scanned: list[dict[str, Any]] = []
+    for day_dir in days:
+        try:
+            files = sorted(day_dir.glob("*.jsonl"), reverse=True)
+        except OSError:
+            continue
+        for path in files:
+            if len(scanned) >= _LIST_SCAN_MAX_FILES:
+                break
+            summary = _file_summary(path)
+            if summary is not None:
+                scanned.append(summary)
+        if len(scanned) >= _LIST_SCAN_MAX_FILES:
+            break
+
+    grouped: "OrderedDict[str, list[dict[str, Any]]]" = OrderedDict()
+    for item in scanned:
+        grouped.setdefault(item["trace_id"], []).append(item)
+    traces = [_merge_summaries(items) for items in grouped.values()]
+
+    if engine:
+        traces = [item for item in traces if item["engine"] == engine]
+    if status:
+        traces = [
+            item for item in traces
+            if (item["status"] == status
+                or (status == "in_flight" and item["in_flight"]))
+        ]
+    if query:
+        needle = query.lower()
+        traces = [
+            item for item in traces
+            if needle in item["trace_id"].lower()
+            or needle in str(item["run_id"] or "").lower()
+        ]
+
+    traces.sort(key=lambda item: item["started_at"] or 0, reverse=True)
+    total = len(traces)
+    return {
+        "days": day_names,
+        "day": day,
+        "total": total,
+        "truncated": len(scanned) >= _LIST_SCAN_MAX_FILES,
+        "traces": traces[:max(1, limit)],
+    }
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -688,6 +921,7 @@ __all__ = [
     "KIND_RETRIEVAL", "KIND_SKILL", "KIND_SUB_AGENT", "KIND_TOOL", "KIND_TURN",
     "LEVEL_FULL", "LEVEL_NONE", "LEVEL_SUMMARY",
     "STATUS_CANCELLED", "STATUS_ERROR", "STATUS_OK",
-    "Span", "close_span", "configure_tracing", "current_span", "get_trace",
-    "open_span", "pop_span", "push_span", "redact", "start_span", "tracing_enabled",
+    "Span", "available_trace_days", "close_span", "configure_tracing", "current_span",
+    "get_trace", "list_traces", "open_span", "pop_span", "push_span", "redact",
+    "start_span", "tracing_enabled",
 ]

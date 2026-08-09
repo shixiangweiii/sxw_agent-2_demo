@@ -38,6 +38,19 @@ def _attr(span: dict[str, Any], key: str, default: Any = None) -> Any:
     return (span.get("attributes") or {}).get(key, default)
 
 
+def _root(trace: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """本轮的根 span = 最后一次 engine attempt。
+
+    重构把执行搬进 Runtime Worker 之后，一个 Run 不再有单一的进程内"请求"
+    作用域（重试跨 Activity、跨进程、甚至跨 Worker 重启），`runtime.engine_attempt`
+    才是每次 attempt 的根。收尾字段（finish_reason / ttft_ms / event_counts /
+    had_error）由 CommittedEventSink 旁路写在它上面，三代引擎对等。
+    取最后一次 attempt：重试后的结论才是这一轮的结论。
+    """
+    engines = _spans(trace, "engine")
+    return engines[-1] if engines else None
+
+
 def summarize(trace: Optional[dict[str, Any]]) -> dict[str, Any]:
     """把轨迹压成一行可读的结构（进 results.jsonl，报告直接引用）。"""
     if not trace:
@@ -46,7 +59,7 @@ def summarize(trace: Optional[dict[str, Any]]) -> dict[str, Any]:
     tools = _spans(trace, "tool")
     retrievals = _spans(trace, "retrieval")
     llms = _spans(trace, "llm")
-    root = next((s for s in trace.get("spans", []) if s.get("kind") == "request"), None)
+    root = _root(trace)
 
     tokens = sum(int(_attr(s, "total_tokens") or 0) for s in llms)
     return {
@@ -59,7 +72,9 @@ def summarize(trace: Optional[dict[str, Any]]) -> dict[str, Any]:
         "finish_reason": _attr(root, "finish_reason") if root else None,
         "forced_summary": any(_attr(s, "forced_summary") for s in turns),
         "compacted": len(_spans(trace, "compact")) or None,
-        "trace_file": trace.get("trace_file"),
+        "ttft_ms": _attr(root, "ttft_ms") if root else None,
+        "attempts": len(_spans(trace, "engine")) or None,
+        "trace_files": trace.get("trace_files") or [],
     }
 
 
@@ -74,7 +89,7 @@ def label(case: dict[str, Any], record: dict[str, Any],
     turns = _spans(trace, "turn")
     tools = _spans(trace, "tool")
     retrievals = _spans(trace, "retrieval")
-    root = next((s for s in trace.get("spans", []) if s.get("kind") == "request"), None)
+    root = _root(trace)
     finish_reason = _attr(root, "finish_reason") if root else None
 
     # ── 检索 ───────────────────────────────────────────────────────────────

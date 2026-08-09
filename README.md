@@ -73,7 +73,7 @@ cp .env.example .env
 bash scripts/run_all.sh
 ```
 
-脚本按 A2A → skill-center → ARAG → Runtime Worker → Runtime API 启动。它先拒绝空/占位 Key，再等待本次 Worker 的新鲜 heartbeat、三个 release 与 active pointer 完全一致，随后提交样本索引任务并轮询到 `ACTIVATED`；任一进程早退、等待超时或 job 失败都会整体退出。真实环境变量优先于 `.env`，该规则也用于脚本绑定端口和定位 SQLite。打开 <http://127.0.0.1:8000/chat-ui/>。
+脚本按 A2A → skill-center → ARAG → Runtime Worker → Runtime API 启动。它先拒绝空/占位 Key，再等待本次 Worker 的新鲜 heartbeat、三个 release 与 active pointer 完全一致，随后提交样本索引任务并轮询到 `ACTIVATED`；任一进程早退、等待超时或 job 失败都会整体退出。真实环境变量优先于 `.env`，该规则也用于脚本绑定端口和定位 SQLite。打开 <http://127.0.0.1:8000/chat-ui/>；诊断轨迹控制台在 <http://127.0.0.1:8000/trace-ui/>（只读，回答下方的「查看轨迹」可直接跳转）。
 
 开发可靠性测试额外安装：
 

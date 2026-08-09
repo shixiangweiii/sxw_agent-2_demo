@@ -66,6 +66,12 @@ app.include_router(runs_router)
 app.include_router(documents_router)
 app.include_router(traces_router)
 app.mount("/chat-ui", StaticFiles(directory=WEB_DIR, html=True), name="chat-ui")
+# 只读诊断控制台。与 chat-ui 平级，共用 web/tokens.css。
+app.mount(
+    "/trace-ui",
+    StaticFiles(directory=WEB_DIR / "trace-console", html=True),
+    name="trace-ui",
+)
 
 
 @app.exception_handler(RuntimeFault)

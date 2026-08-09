@@ -26,7 +26,7 @@ Artifact upload → POST /api/v1/runs → runtime.db
 → committed Canonical Events → SSE replay/tail
 ```
 
-进程：Runtime API(:8000)、Runtime Worker、ARAG(:8100)、skill-center(:8200)、A2A(:8300)。API 只做 admission/status/cancel/signal/Event/Artifact/Web，不能加载 LLM 或远程 Tool 目录；Worker 负责执行并注册三个 immutable engine release。
+进程：Runtime API(:8000)、Runtime Worker、ARAG(:8100)、skill-center(:8200)、A2A(:8300)。API 只做 admission/status/cancel/signal/Event/Artifact/Web，不能加载 LLM 或远程 Tool 目录；Worker 负责执行并注册三个 immutable engine release。Web 面有两个：`/chat-ui` 会话，`/trace-ui` 只读 Trace Console（列表 + 瀑布图，读 `GET /api/v1/traces[/{id}]`）。
 
 ## 不变量
 

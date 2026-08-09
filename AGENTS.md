@@ -33,7 +33,7 @@ Client
 
 四个服务、至少五个进程：
 
-1. `agent.main:app`，:8000，仅 admission/status/cancel/signal/event/Artifact/Web；禁止加载 LLM 和远程工具目录。
+1. `agent.main:app`，:8000，仅 admission/status/cancel/signal/event/Artifact/Web；禁止加载 LLM 和远程工具目录。Web 挂载两个静态面：`/chat-ui`（会话）与 `/trace-ui`（只读 Trace Console），共用 `web/tokens.css`。API 进程本身不产生 span——它与 Worker 各有独立 `_Tracer`，同 trace_id 会写出两个文件。
 2. `agent.runtime.worker.main`，无 HTTP；加载 LLM/工具/Skill/A2A、注册三个 release、领取 Activity。
 3. `arag.main:app`，:8100；内部另有 durable index-job task。
 4. `skillcenter.main:app`，:8200。

@@ -114,13 +114,22 @@ cp .env.example .env
 
 `full` 可能包含用户原始提问和模型完整输入；这些文件不得随评测报告分发。
 
-轨迹按 trace_id 取回：`GET /api/v1/traces/{trace_id}?level=none|summary|full`（`level` 只能在落盘级别之上再降级）。
+两个只读出口：
+
+- `GET /api/v1/traces?day=&engine=&status=&q=&limit=` —— 轨迹摘要列表（新→旧），供控制台浏览；
+- `GET /api/v1/traces/{trace_id}?level=none|summary|full` —— 单条轨迹（`level` 只能在落盘级别之上再降级）。
+
+关闭 tracing 时两者都返回 503 而不是空结果——空列表会被误读成"没有轨迹"。
+
+**Trace Console**（<http://127.0.0.1:8000/trace-ui/>）：左侧按日期/引擎/状态/子串浏览，中间是瀑布图与 Span 树，右侧展开单个 Span 的属性、payload 与事件时间线。默认按 `summary` 取 payload，避免把原始提问与完整模型输入整页铺开；需要原文再切 `full`。可开自动刷新观察进行中的轨迹（根 span 收口前显示为「进行中」）。
 
 关联键的来源固定为 CreateRun 那一刻：请求带 `x-trace-id` 就用它，没带则由 `TraceMiddleware` 生成，并在响应头 `x-trace-id` 里回显。该值随 Run 持久化（`runs.trace_id`），Worker 执行时再绑定回来——API 与 Worker 是两个进程，不落库就接不上（见 ADR-0007）。所以：
 
-- 一个 Run 一条 trace、一个 JSONL 文件，文件名以 trace_id 结尾；
+- 一个 Run 一条 trace，文件名以 trace_id 结尾；Worker 重启后重试会写出第二个文件，读取时按 trace_id 合并成一条（`trace_files` 列出全部）；
 - 查询的是 Run 的执行轨迹，用 CreateRun 的 trace_id，不是后续 SSE 订阅请求的；
 - API 进程查不到内存命中时读盘，因此 Worker 重启后仍可取回（受 `TRACE_RETENTION_DAYS` 约束）。
+
+轨迹的根是 `runtime.engine_attempt`（每次 attempt 一个）。TTFT、`event_counts`、`had_error`、`finish_reason` 由 `CommittedEventSink` 的事件旁路写在它上面——那是三代引擎唯一共同的事件出口，因此信号天然对等。
 
 ## 4. 一键启动
 
@@ -137,7 +146,7 @@ a2a_service → skill-center → arag
 → sample index jobs 受理并轮询到 ACTIVATED（FAILED/超时则整体退出）
 ```
 
-启动脚本会在拉起任何进程前拒绝空/占位 Key。Worker ready 必须同时满足：进程仍存活、本次启动后的 heartbeat 为 `ACTIVE`、三种 release map 与 active pointers 完全一致；旧数据库中的 stale active pointers 不能误判 ready。启动完成后脚本持续监督五个进程，任一进程异常退出都会统一停机。Ctrl-C 会统一通知五个进程停止。Web UI：<http://127.0.0.1:8000/chat-ui/>。
+启动脚本会在拉起任何进程前拒绝空/占位 Key。Worker ready 必须同时满足：进程仍存活、本次启动后的 heartbeat 为 `ACTIVE`、三种 release map 与 active pointers 完全一致；旧数据库中的 stale active pointers 不能误判 ready。启动完成后脚本持续监督五个进程，任一进程异常退出都会统一停机。Ctrl-C 会统一通知五个进程停止。Web UI：<http://127.0.0.1:8000/chat-ui/>；Trace Console：<http://127.0.0.1:8000/trace-ui/>。
 
 ## 5. 手动启动
 

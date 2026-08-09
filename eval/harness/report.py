@@ -118,7 +118,7 @@ def aggregate(out_dir: Path) -> dict[str, Any]:
                 "turns": tr.get("turns"), "tools": tr.get("tool_calls"),
                 "finish_reason": tr.get("finish_reason"),
                 "total_tokens": tr.get("total_tokens"),
-                "trace_id": r.get("trace_id"), "trace_file": tr.get("trace_file"),
+                "trace_id": r.get("trace_id"), "trace_files": tr.get("trace_files") or [],
             })
     metrics["failure_labels"] = {e: dict(c) for e, c in label_counts.items()}
     metrics["failure_detail"] = failure_detail
@@ -206,7 +206,8 @@ def write_summary(out_dir: Path, metrics: dict[str, Any]) -> None:
         for f in metrics["failure_detail"]:
             tools = " → ".join(f.get("tools") or []) or "-"
             labels = " · ".join(f.get("labels") or []) or "-"
-            trace_ref = f.get("trace_file") or f.get("trace_id") or "-"
+            # 同一 trace_id 可能有多个文件（跨 Worker 重启的重试），取第一个当指针。
+            trace_ref = (f.get("trace_files") or [None])[0] or f.get("trace_id") or "-"
             lines.append(
                 f"| `{f['id']}` | {f['engine']} | **{labels}** | {f.get('turns') or '-'} | "
                 f"{tools} | {f.get('finish_reason') or '-'} | {f.get('total_tokens') or '-'} | "

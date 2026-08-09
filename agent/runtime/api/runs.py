@@ -98,6 +98,8 @@ async def _run_json(run: RunRecord, store: RuntimeStore) -> dict[str, Any]:
         "agent_id": run.envelope.agent_id,
         "engine": run.envelope.engine,
         "release_fingerprint": run.envelope.release_fingerprint,
+        # 诊断关联键：让调用方从 Run 一跳到 /trace-ui 或 GET /api/v1/traces/{id}。
+        "trace_id": run.trace_id,
         "status": run.status,
         "revision": run.revision,
         "current_activity_id": run.current_activity_id,

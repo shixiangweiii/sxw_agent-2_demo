@@ -1,0 +1,62 @@
+/* ==========================================================================
+   共享设计令牌 —— Chat UI(/chat-ui) 与 Trace Console(/trace-ui) 共用一套。
+   两个页面各自 <link> 引入本文件，且必须排在自己的样式表**之前**。
+   新增 trace 相关的语义色放在末尾一节，聊天页用不到但共享无害。
+   ========================================================================== */
+
+:root {
+  color-scheme: light;
+  /* 表面三层 */
+  --bg: #f4f6f9;
+  --surface-1: #ffffff;
+  --surface-2: #f8fafc;
+  /* 边框 */
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
+  /* 文字 */
+  --text: #0f172a;
+  --text-2: #475569;
+  --muted: #94a3b8;
+  /* 主色与渐变 */
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-dark: #1e40af;
+  --accent-soft: #eff6ff;
+  --gradient: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+  /* 语义色 */
+  --ok: #059669;
+  --danger: #dc2626;
+  --danger-soft: #fef2f2;
+  --danger-border: #fecaca;
+  /* 圆角梯度 */
+  --r-sm: 8px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 18px;
+  /* 阴影梯度 */
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --shadow-md: 0 1px 3px rgba(15, 23, 42, 0.06), 0 4px 14px rgba(15, 23, 42, 0.05);
+  --shadow-focus: 0 0 0 3px rgba(37, 99, 235, 0.16);
+  --shadow-accent: 0 4px 14px rgba(37, 99, 235, 0.28);
+  /* 字体 */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  /* ---------- Trace Console ----------
+     span kind 配色。每个 kind 一个稳定色相，瀑布图和图例共用，
+     这样"哪一段在烧时间"可以靠颜色一眼扫出来。 */
+  --kind-engine: #6366f1;
+  --kind-turn: #0ea5e9;
+  --kind-llm: #8b5cf6;
+  --kind-tool: #f59e0b;
+  --kind-retrieval: #10b981;
+  --kind-plan: #ec4899;
+  --kind-compact: #64748b;
+  --kind-request: #2563eb;
+  --kind-other: #94a3b8;
+  --warn: #b45309;
+  --warn-soft: #fffbeb;
+  --warn-border: #fde68a;
+}

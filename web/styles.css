@@ -1,51 +1,11 @@
 /* ==========================================================================
    sxw Agent Chat — 现代浅色精致风
-   结构：Tokens → 基础 → 布局 → 侧栏 → 消息流 → 过程面板 → 引用 → 输入区
+   结构：基础 → 布局 → 侧栏 → 消息流 → 过程面板 → 引用 → 输入区
         → 状态反馈(纯 CSS) → 动效 → 响应式
    注意：app.js 动态生成的类名（.message、.process-*、.citation-*、.attachment-*
    等）是本文件的样式契约，改名需同步 app.js。
+   设计令牌在 tokens.css（与 Trace Console 共用），index.html 里先于本文件引入。
    ========================================================================== */
-
-:root {
-  color-scheme: light;
-  /* 表面三层 */
-  --bg: #f4f6f9;
-  --surface-1: #ffffff;
-  --surface-2: #f8fafc;
-  /* 边框 */
-  --border: #e2e8f0;
-  --border-strong: #cbd5e1;
-  /* 文字 */
-  --text: #0f172a;
-  --text-2: #475569;
-  --muted: #94a3b8;
-  /* 主色与渐变 */
-  --accent: #2563eb;
-  --accent-hover: #1d4ed8;
-  --accent-dark: #1e40af;
-  --accent-soft: #eff6ff;
-  --gradient: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
-  /* 语义色 */
-  --ok: #059669;
-  --danger: #dc2626;
-  --danger-soft: #fef2f2;
-  --danger-border: #fecaca;
-  /* 圆角梯度 */
-  --r-sm: 8px;
-  --r-md: 10px;
-  --r-lg: 14px;
-  --r-xl: 18px;
-  /* 阴影梯度 */
-  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
-  --shadow-md: 0 1px 3px rgba(15, 23, 42, 0.06), 0 4px 14px rgba(15, 23, 42, 0.05);
-  --shadow-focus: 0 0 0 3px rgba(37, 99, 235, 0.16);
-  --shadow-accent: 0 4px 14px rgba(37, 99, 235, 0.28);
-  /* 字体 */
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-    "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
-    "Liberation Mono", monospace;
-}
 
 /* ---------- 基础 ---------- */
 * {
@@ -582,6 +542,26 @@ pre {
   font-size: 11.5px;
   font-weight: 600;
   letter-spacing: 0.02em;
+}
+
+/* ---------- 轨迹链接 ---------- */
+.trace-link {
+  display: inline-block;
+  margin-top: 10px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.trace-link:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-dark);
 }
 
 /* ---------- 引用 ---------- */

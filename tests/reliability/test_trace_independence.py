@@ -358,6 +358,15 @@ async def test_rel_29_worker_recovers_the_admitted_trace_id_across_the_process_b
     engine_spans = [s for s in carried_trace["spans"] if s["kind"] == "engine"]
     assert [s["attributes"]["run_id"] for s in engine_spans] == [carried.envelope.run_id]
 
+    # 事件旁路：CommittedEventSink 是三代引擎唯一共同出口，收尾字段挂在 engine
+    # span 上，eval 的失败归因规则（trace_signals）正是读这些字段。
+    rollup = engine_spans[0]["attributes"]
+    assert rollup["finish_reason"] == "COMPLETED"
+    assert rollup["event_counts"] == {"text": 1}
+    assert rollup["had_error"] is False
+    assert rollup["answer_chars"] == 2
+    assert rollup["ttft_ms"] is not None
+
     # 2) 没带 x-trace-id 时回落到 run_id，仍然是每个 Run 一个唯一可查的键。
     fallback_trace = get_trace(anonymous.envelope.run_id)
     assert fallback_trace is not None
@@ -367,8 +376,78 @@ async def test_rel_29_worker_recovers_the_admitted_trace_id_across_the_process_b
 
     # 3) 两个 Run 不得共用一条 trace 或一个文件（旧行为下二者都塌进 "-"）。
     assert get_trace("-") is None
-    assert carried_trace["trace_file"] != fallback_trace["trace_file"]
+    assert carried_trace["trace_files"] != fallback_trace["trace_files"]
     assert len(list(trace_root.rglob("*.jsonl"))) == 2
+
+    configure_tracing(enabled=False, engine="rel-029-cleanup")
+
+
+@pytest.mark.asyncio
+async def test_rel_29_one_trace_id_spanning_a_worker_restart_reads_back_as_one_trace(
+    tmp_path,
+):
+    """Worker 重启后重试同一个 Run，两次 attempt 必须合成一条轨迹读回来。
+
+    trace_id 取自持久化的 Run，跨重启不变；但内存 ring 被清空后会**新开一个文件**。
+    只读最新的那个就会静默丢掉前一次 attempt 的全部 span——恰恰是排查"为什么重试"
+    时最想看的那一段。
+    """
+    runtime_path = tmp_path / "runtime.db"
+    trace_root = tmp_path / "traces"
+    store = SqliteRuntimeStore(RuntimeDatabase(runtime_path))
+    await store.initialize()
+    release = await store.register_release(
+        ReleaseManifest(engine="native_loop", components={"rel-029": "merge-v1"}),
+        activate=True,
+    )
+    clock = FakeClock()
+    run = await _admit(store, clock, trace_id="rel-029-merged", key="rel-029-merged")
+
+    _configure_trace("merge", trace_root)
+    first = RuntimeWorker(
+        store=store,
+        coordinator=RunCoordinator(
+            store, EngineRegistry({"native_loop": CheckpointThenKilledAdapter(release)}),
+            clock=clock, event_flush_bytes=1,
+        ),
+        worker_id="worker-before-restart",
+        release_map={"native_loop": release},
+        concurrency=1, lease_ms=1_000, clock=clock,
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await first.run_once()
+
+    # 模拟进程重启：ring 清空、序号重置，同一个 trace_id 会落到第二个文件。
+    _configure_trace("merge", trace_root)
+    restarted = SqliteRuntimeStore(RuntimeDatabase(runtime_path))
+    await restarted.initialize()
+    clock.advance(1_001)
+    second = RuntimeWorker(
+        store=restarted,
+        coordinator=RunCoordinator(
+            restarted, EngineRegistry({"native_loop": ResumeFromCheckpointAdapter(release)}),
+            clock=clock, event_flush_bytes=1,
+        ),
+        worker_id="worker-after-restart",
+        release_map={"native_loop": release},
+        concurrency=1, lease_ms=1_000, clock=clock,
+    )
+    assert await second.run_once() is True
+
+    files = sorted(trace_root.rglob("*.jsonl"))
+    assert len(files) == 2, "重启后应当写出第二个文件"
+
+    trace = get_trace("rel-029-merged")
+    assert trace is not None
+    assert len(trace["trace_files"]) == 2
+    engine_spans = [s for s in trace["spans"] if s["kind"] == "engine"]
+    # 两次 attempt 都在：被 kill 的那次是 cancelled，恢复的那次 COMPLETED。
+    assert [s["attributes"]["attempt"] for s in engine_spans] == [1, 2]
+    assert engine_spans[0]["status"] == "cancelled"
+    assert engine_spans[1]["attributes"]["finish_reason"] == "COMPLETED"
+    # span_id 去重后不应有重复（内存 ring 与它自己的文件是同一批 span）。
+    ids = [s["span_id"] for s in trace["spans"]]
+    assert len(ids) == len(set(ids))
 
     configure_tracing(enabled=False, engine="rel-029-cleanup")
 

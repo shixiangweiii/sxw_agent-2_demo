@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import uuid
 from types import SimpleNamespace
@@ -13,12 +14,23 @@ from fastapi.responses import JSONResponse
 from agent.runtime.adapters.filesystem_artifact import FilesystemArtifactStore
 from agent.runtime.adapters.scripted_engine import ScriptedEngineAdapter
 from agent.runtime.adapters.sqlite import RuntimeDatabase, SqliteRuntimeStore
+from agent.api.traces import router as traces_router
 from agent.runtime.api.artifacts import router as artifact_router
 from agent.runtime.api.runs import router as run_router, stream_events
 from agent.runtime.application.coordinator import EngineRegistry, RunCoordinator
 from agent.runtime.domain.errors import RuntimeFault
 from agent.runtime.domain.models import EventType, ReleaseManifest, RunStatus
 from agent.runtime.worker.dispatcher import RuntimeWorker
+from common.obs import use_trace_id
+from common.trace import (
+    KIND_ENGINE,
+    KIND_LLM,
+    KIND_TOOL,
+    STATUS_ERROR,
+    STATUS_OK,
+    configure_tracing,
+    start_span,
+)
 
 
 def _build_api(
@@ -37,6 +49,7 @@ def _build_api(
     )
     app.include_router(artifact_router)
     app.include_router(run_router)
+    app.include_router(traces_router)
 
     @app.exception_handler(RuntimeFault)
     async def handle(_request: Request, exc: RuntimeFault):
@@ -436,3 +449,92 @@ async def test_no_active_release_returns_503(tmp_path):
         )
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "NO_ACTIVE_RELEASE"
+
+
+@pytest.mark.asyncio
+async def test_trace_console_api_lists_summaries_and_fetches_one_trace(api_env, tmp_path):
+    """Trace Console 的两个只读出口：列表浏览 + 单条取回。
+
+    列表摘要来自扫描 trace 目录，所以这里直接用真实的 span 写入路径造数据，
+    而不是塞假 JSON——文件名、trace_id 归属和 summary 聚合都要一起被验证。
+    """
+    client, _, _, _ = api_env
+    trace_root = tmp_path / "console-traces"
+    configure_tracing(
+        enabled=True, payload_level="full", trace_dir=str(trace_root),
+        retention_days=7, engine="runtime-worker",
+    )
+    try:
+        for name, status in (("console-ok", STATUS_OK), ("console-bad", STATUS_ERROR)):
+            with use_trace_id(name):
+                with start_span("runtime.engine_attempt", KIND_ENGINE,
+                                run_id=f"run_{name}", engine="native_loop") as root:
+                    root.set_payload("answer", "hello console")
+                    with start_span("native.llm", KIND_LLM, total_tokens=42) as llm:
+                        llm.set_payload("contents", "prompt text")
+                    if status is STATUS_ERROR:
+                        with contextlib.suppress(RuntimeError):
+                            with start_span("tool.broken", KIND_TOOL, tool="broken"):
+                                raise RuntimeError("tool blew up")
+
+        listing = await client.get("/api/v1/traces?limit=10")
+        assert listing.status_code == 200
+        body = listing.json()
+        by_id = {item["trace_id"]: item for item in body["traces"]}
+        assert {"console-ok", "console-bad"} <= set(by_id)
+        assert by_id["console-ok"]["engine"] == "native_loop"
+        assert by_id["console-ok"]["run_id"] == "run_console-ok"
+        assert by_id["console-ok"]["process"] == "runtime-worker"
+        assert by_id["console-ok"]["total_tokens"] == 42
+        assert by_id["console-ok"]["in_flight"] is False
+        assert by_id["console-bad"]["status"] == STATUS_ERROR
+        assert by_id["console-bad"]["error_count"] == 1
+
+        # 过滤器：状态与子串搜索都要真的收窄结果。
+        errors = (await client.get("/api/v1/traces?status=error")).json()["traces"]
+        assert [item["trace_id"] for item in errors] == ["console-bad"]
+        searched = (await client.get("/api/v1/traces?q=console-ok")).json()["traces"]
+        assert [item["trace_id"] for item in searched] == ["console-ok"]
+
+        detail = await client.get("/api/v1/traces/console-ok?level=summary")
+        assert detail.status_code == 200
+        trace = detail.json()
+        assert {span["kind"] for span in trace["spans"]} == {KIND_ENGINE, KIND_LLM}
+        assert len(trace["trace_files"]) == 1
+        # level 只能降级：summary 下 payload 变成 {chars, sha1, head} 摘要。
+        engine_span = next(s for s in trace["spans"] if s["kind"] == KIND_ENGINE)
+        assert set(engine_span["payloads"]["answer"]) == {"chars", "sha1", "head"}
+
+        assert (await client.get("/api/v1/traces/nope")).status_code == 404
+    finally:
+        configure_tracing(enabled=False, engine="test-cleanup")
+
+
+@pytest.mark.asyncio
+async def test_trace_lookup_sanitizes_client_controlled_path(api_env, tmp_path):
+    """trace_id 是客户端可控的，绝不能借它读到 trace 目录以外的文件。"""
+    client, _, _, _ = api_env
+    trace_root = tmp_path / "sanitize-traces"
+    trace_root.mkdir()
+    outside = tmp_path / "secret.jsonl"
+    outside.write_text('{"span_id":"x","trace_id":"secret","kind":"llm"}\n', encoding="utf-8")
+    configure_tracing(
+        enabled=True, payload_level="none", trace_dir=str(trace_root),
+        retention_days=7, engine="runtime-api",
+    )
+    try:
+        for attempt in ("../secret", "../../etc/passwd", "..%2F..%2Fsecret"):
+            response = await client.get(f"/api/v1/traces/{attempt}")
+            assert response.status_code == 404, attempt
+        assert outside.read_text(encoding="utf-8").startswith("{")
+    finally:
+        configure_tracing(enabled=False, engine="test-cleanup")
+
+
+@pytest.mark.asyncio
+async def test_trace_api_is_explicitly_unavailable_when_tracing_is_disabled(api_env):
+    """关闭 tracing 时返回 503 而不是空列表——空列表会被误读成"没有轨迹"。"""
+    client, _, _, _ = api_env
+    configure_tracing(enabled=False, engine="test-disabled")
+    assert (await client.get("/api/v1/traces")).status_code == 503
+    assert (await client.get("/api/v1/traces/whatever")).status_code == 503

@@ -281,7 +281,11 @@ class RunCoordinator:
             engine=run.envelope.engine,
             attempt=activity.attempt,
             fencing_token=activity.fencing_token,
+            release_fingerprint=run.envelope.release_fingerprint,
         ) as span:
+            # 引擎无关的事件旁路：Sink 是三代引擎唯一共同出口，挂在这里产出的
+            # TTFT / event_counts / 工具与引用事件时间线对三代天然对等。
+            io.attach_trace_span(span)
             try:
                 outcome = await adapter.execute(request, io)
             except (TimeoutError, ConnectionError, OSError) as exc:
@@ -301,7 +305,16 @@ class RunCoordinator:
             except Exception as exc:
                 span.set_status("error").set(event_commit_error=type(exc).__name__)
                 raise
-            span.set(outcome=outcome.kind, output_chars=len(io.assistant_text))
+            # `outcome.kind` 是新架构下"为什么结束"的唯一对等字段，沿用旧的
+            # finish_reason 命名，让历史评测报告与 trace_signals 规则保持可比。
+            span.set(
+                outcome=outcome.kind,
+                finish_reason=outcome.kind,
+                output_chars=len(io.assistant_text),
+                **io.trace_rollup(),
+            )
+            if io.assistant_text:
+                span.set_payload("answer", io.assistant_text)
 
         # An engine-internal error event is diagnostic only, but a contradictory
         # COMPLETED outcome fails closed instead of pretending success.

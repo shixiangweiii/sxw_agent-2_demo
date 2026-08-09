@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>sxw Agent Trace Console</title>
+    <link rel="stylesheet" href="/chat-ui/tokens.css">
+    <link rel="stylesheet" href="/trace-ui/console.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m7 14 3-4 3 3 4-6"/></svg>
+        </div>
+        <div class="brand-text">
+          <h1>Trace Console</h1>
+          <p id="scopeHint">诊断轨迹 · 只读</p>
+        </div>
+      </div>
+
+      <div class="topbar-controls">
+        <label class="control">
+          <span>日期</span>
+          <select id="daySelect"></select>
+        </label>
+        <label class="control">
+          <span>引擎</span>
+          <select id="engineSelect">
+            <option value="">全部</option>
+            <option value="native_loop">native_loop</option>
+            <option value="agent_loop">agent_loop</option>
+            <option value="plan_execute">plan_execute</option>
+          </select>
+        </label>
+        <label class="control">
+          <span>状态</span>
+          <select id="statusSelect">
+            <option value="">全部</option>
+            <option value="ok">ok</option>
+            <option value="error">error</option>
+            <option value="cancelled">cancelled</option>
+            <option value="in_flight">进行中</option>
+          </select>
+        </label>
+        <label class="control">
+          <span>Payload</span>
+          <select id="levelSelect" title="只能在落盘级别之上再降级；落盘时若已是 summary，这里选 full 也拿不回来">
+            <option value="summary">summary</option>
+            <option value="full">full</option>
+            <option value="none">none</option>
+          </select>
+        </label>
+        <label class="control control-toggle">
+          <input id="autoRefresh" type="checkbox" checked>
+          <span>自动刷新</span>
+        </label>
+        <a class="link-button" href="/chat-ui/">返回聊天</a>
+      </div>
+    </header>
+
+    <main class="console-shell">
+      <aside class="list-panel" aria-label="轨迹列表">
+        <div class="list-head">
+          <input id="searchInput" type="search" placeholder="按 trace_id 或 run_id 过滤" autocomplete="off">
+          <p id="listMeta" class="list-meta"></p>
+        </div>
+        <div id="traceList" class="trace-list" aria-live="polite"></div>
+      </aside>
+
+      <section class="detail-panel" aria-label="轨迹详情">
+        <div id="rollup" class="rollup" hidden></div>
+        <div id="waterfallWrap" class="waterfall-wrap">
+          <div id="emptyState" class="empty-state">
+            <p>从左侧选择一条轨迹</p>
+            <p class="empty-hint">轨迹由 Runtime Worker 写入 <code>local_storage/traces/</code>，按 trace_id 归档。</p>
+          </div>
+          <div id="waterfall" class="waterfall" hidden></div>
+        </div>
+      </section>
+
+      <aside class="span-panel" aria-label="Span 详情">
+        <div id="spanDetail" class="span-detail">
+          <p class="empty-hint">点击左侧时间条查看单个 Span 的属性、输入输出与事件。</p>
+        </div>
+      </aside>
+    </main>
+
+    <script type="module" src="/trace-ui/console.js"></script>
+  </body>
+</html>

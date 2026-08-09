@@ -42,7 +42,7 @@ def run(cfg: EvalConfig, out_dir: Path, suite: str = "", only_arag_down: bool = 
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "runs").mkdir(exist_ok=True)
     # 入库的是 summary 级轨迹（骨架 + payload 摘要）；完整输入留在 agent 本机的
-    # local_storage/traces/（已 gitignore），由记录里的 trace_file 指过去。
+    # local_storage/traces/（已 gitignore），由记录里的 trace_files 指过去。
     (out_dir / "traces").mkdir(exist_ok=True)
     caps = preflight(cfg)
     (out_dir / "preflight.json").write_text(

@@ -262,12 +262,14 @@ $PY -m eval.harness.report  --out eval/reports/<run>
 
 报告从 summary trace 提取：
 
-- turn 数、Tool 序列、finish reason、token；
+- turn 数、Tool 序列、finish reason、token、TTFT；
 - retrieval degraded；
 - loop hard cap / tool error / no trace；
 - native compact 等补充信号。
 
 只使用各 engine 共有字段做横向归因；engine 特有标签只作解释，不参与公平比较。Trace 可以关闭、采样或缺失，不得用于判定 Run terminal。
+
+轨迹的根是 `runtime.engine_attempt`（kind=`engine`），不再是单进程时代的 `chat.request`：执行搬进 Worker 后，一个 Run 没有单一的进程内请求作用域，重试会跨 Activity、跨进程甚至跨 Worker 重启。`finish_reason`/`ttft_ms`/`event_counts`/`had_error` 由 `CommittedEventSink` 的事件旁路写在它上面，三代引擎共享同一出口因而对等。有多次 attempt 时取最后一次作结论，`attempts` 字段记录次数。人工排查可直接开 Trace Console（`/trace-ui/?trace_id=<id>`）。
 
 ## 11. 历史报告解释
 

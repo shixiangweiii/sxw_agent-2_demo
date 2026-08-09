@@ -28,6 +28,7 @@ const state = {
   imageFile: null,
   imagePreviewUrl: "",
   runId: localStorage.getItem("sxw.run_id") || "",
+  traceId: "",
   lastSeq: Number(localStorage.getItem("sxw.last_seq") || "0"),
   watchController: null,
   watching: false,
@@ -97,6 +98,18 @@ function addProcessItem(messageNode, label, payload) {
   item.append(name, pre);
   panel.querySelector(".process-list").append(item);
   scrollToBottom();
+}
+
+function addTraceLink(messageNode, traceId) {
+  if (!traceId || messageNode.querySelector(".trace-link")) return;
+  const link = document.createElement("a");
+  link.className = "trace-link";
+  link.href = `/trace-ui/?trace_id=${encodeURIComponent(traceId)}`;
+  link.target = "_blank";
+  link.rel = "noopener";
+  link.textContent = "查看轨迹";
+  link.title = `诊断轨迹 ${traceId}`;
+  messageNode.append(link);
 }
 
 function addCitations(messageNode, refs) {
@@ -301,6 +314,8 @@ function handleSseEvent(event, assistant) {
     state.terminal = true;
     state.watching = false;
     setStatus(`运行结束：${envelope.terminal_status}`, envelope.terminal_status === "SUCCEEDED" ? "ok" : "bad");
+    // 轨迹的根 span 在引擎收口时才落盘，所以链接等到终态再挂。
+    addTraceLink(assistant.node, state.traceId);
     refreshControls();
   }
 }
@@ -361,6 +376,9 @@ async function createRun(query, attachmentRefs) {
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error?.message || `Run 创建失败：${response.status}`);
   state.runId = body.run_id;
+  // 服务端把本次请求的诊断轨迹键回显在响应头上（没带 x-trace-id 时由中间件生成）。
+  // 它随 Run 落库，Worker 执行时接回来，因此可以直接拿去 Trace Console 查。
+  state.traceId = response.headers.get("x-trace-id") || "";
   state.lastSeq = 0;
   state.terminal = false;
   el.conversationId.value = body.conversation_id;
@@ -436,6 +454,8 @@ async function resumeStoredRun() {
     if (!response.ok) return;
     const run = await response.json();
     el.conversationId.value = run.conversation_id;
+    // 刷新页面后响应头没了，改从 Run 上取持久化的诊断关联键。
+    state.traceId = run.trace_id || "";
     // localStorage owns only the transport cursor, not a durable rendering of
     // the answer/process DOM.  On a fresh page the old cursor therefore cannot
     // be used as a projection cursor: replay every committed public event to

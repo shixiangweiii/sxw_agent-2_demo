@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import suppress
 from typing import Any
 
@@ -21,6 +22,34 @@ _EVENT_MAP: dict[str, EventType] = {
     "skill_event": EventType.SKILL_UI_FRAME_COMMITTED,
     "retrieval": EventType.RETRIEVAL_COMMITTED,
 }
+
+# 逐条记进轨迹的事件类型。text 走累积（一次回答几百个 delta，逐条记会把 span
+# 撑爆且没有诊断价值），改成 TTFT + 计数 + 一个 answer payload。
+_TRACED_EVENTS = frozenset({
+    "tool_call", "tool_result", "citation", "plan_step", "skill_event", "error",
+})
+
+
+def _traced_fields(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """按事件类型挑出有诊断价值的字段（避免整包 payload 灌进 span）。"""
+    if event_type == "tool_call":
+        return {"tool": payload.get("name"), "call_id": payload.get("id"),
+                "args": payload.get("args")}
+    if event_type == "tool_result":
+        return {"tool": payload.get("name"), "call_id": payload.get("id"),
+                "response": payload.get("response")}
+    if event_type == "citation":
+        refs = payload.get("citations") or []
+        return {"doc_ids": [r.get("doc_id") for r in refs if isinstance(r, dict)]}
+    if event_type == "plan_step":
+        return {"step": payload.get("step"), "total": payload.get("total"),
+                "title": payload.get("title"), "status": payload.get("status")}
+    if event_type == "skill_event":
+        return {"data_type": payload.get("dataType"),
+                "is_thinking": payload.get("isThinking")}
+    if event_type == "error":
+        return {"message": payload.get("message"), "reason": payload.get("reason")}
+    return {"payload": payload}
 
 
 class CommittedEventSink:
@@ -55,6 +84,38 @@ class CommittedEventSink:
         self._closed = False
         self.engine_error: dict[str, Any] | None = None
         self.citations: list[dict[str, Any]] = []
+        # ── 轨迹旁路（诊断，绝不影响提交语义）──────────────────────────────
+        # 这里是三代引擎唯一共同的事件出口，所以一处埋点即产出对等信号——
+        # 评测的失败归因规则正建立在这种对等上，否则"谁埋点更深"会变成引擎
+        # 对比里的假优势。
+        self._span: Any = None
+        self._trace_started = time.monotonic()
+        self.ttft_ms: float | None = None
+        self.event_counts: dict[str, int] = {}
+        self.had_error = False
+
+    def attach_trace_span(self, span: Any) -> None:
+        """绑定本次 attempt 的 engine span（对 tracing 关闭时的空实现安全）。"""
+        self._span = span
+        self._trace_started = time.monotonic()
+
+    def _trace_event(self, event_type: str, payload: dict[str, Any]) -> None:
+        self.event_counts[event_type] = self.event_counts.get(event_type, 0) + 1
+        if event_type == "error":
+            self.had_error = True
+        if self._span is None or event_type not in _TRACED_EVENTS:
+            return
+        self._span.add_event(event_type, **_traced_fields(event_type, payload))
+
+    def trace_rollup(self) -> dict[str, Any]:
+        """收尾属性；由 RunCoordinator 在关闭 engine span 前写入。"""
+        return {
+            "ttft_ms": self.ttft_ms,
+            "total_ms": round((time.monotonic() - self._trace_started) * 1000, 1),
+            "answer_chars": len(self.assistant_text),
+            "event_counts": self.event_counts or None,
+            "had_error": self.had_error,
+        }
 
     @property
     def assistant_text(self) -> str:
@@ -70,6 +131,8 @@ class CommittedEventSink:
         if self._closed:
             raise RuntimeError("event sink is closed")
         self._raise_background_error()
+        # 记在最前面：error / citation 都会提前 return，放后面会漏计。
+        self._trace_event(str(event_type), payload)
         if event_type in {"text", EventType.OUTPUT_DELTA_COMMITTED}:
             await self.emit_text(str(payload.get("delta", "")))
             return
@@ -114,6 +177,8 @@ class CommittedEventSink:
     async def emit_text(self, delta: str) -> None:
         if not delta:
             return
+        if self.ttft_ms is None:
+            self.ttft_ms = round((time.monotonic() - self._trace_started) * 1000, 1)
         async with self._lock:
             self._buffer.append(delta)
             self._full_text.append(delta)
