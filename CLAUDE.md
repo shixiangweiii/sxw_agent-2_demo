@@ -28,6 +28,20 @@ Artifact upload → POST /api/v1/runs → runtime.db
 
 进程：Runtime API(:8000)、Runtime Worker、ARAG(:8100)、skill-center(:8200)、A2A(:8300)。API 只做 admission/status/cancel/signal/Event/Artifact/Web，不能加载 LLM 或远程 Tool 目录；Worker 负责执行并注册三个 immutable engine release。Web 面有两个：`/chat-ui` 会话，`/trace-ui` 只读 Trace Console（列表 + 瀑布图，读 `GET /api/v1/traces[/{id}]`）。
 
+## 代码分层
+
+`agent/runtime/` 是六边形分层，**改行为前先认准该改哪一层**：
+
+| 层 | 职责 |
+|---|---|
+| `domain/` | `models.py` 权威对象与枚举、`artifact.py`、`errors.py`；无 I/O |
+| `ports/` | `store.py`/`engine.py`/`tool.py`/`artifact.py`/`clock.py` 接口定义 |
+| `application/` | 编排：`coordinator.py`（terminal 唯一提交者）、`admission.py`、`events.py`（三代引擎唯一事件出口）、`tool_broker.py` |
+| `adapters/` | `sqlite/store.py` 是全部 SQLite authority（约 4.4k 行，改状态机基本都落在这里）、`filesystem_artifact.py`、`legacy_engines.py` |
+| `api/` `worker/` | 两个进程各自的入口 |
+
+三代引擎的实现在 `agent/engine/{plan_execute,agent_loop,native_loop}/`（内部 `ReasoningEngine`，见 `agent/engine/base.py`），由 `adapters/legacy_engines.py` 桥接成公开的 `EngineAdapter`。**别把 `agent/engine/` 当公开契约**：它是 adapter 内的兼容面。
+
 ## 不变量
 
 - CreateRun 必填 `Idempotency-Key` 与 `engine=plan_execute|agent_loop|native_loop`；engine 是 Run 不可变字段。
@@ -114,6 +128,11 @@ $PY -m uvicorn arag.main:app        --port 8100
 $PY -m agent.runtime.worker.main
 $PY -m uvicorn agent.main:app       --port 8000
 
+# 单个测试 / 一个文件 / 关键字（pyproject 已设 asyncio_mode=auto，无需额外参数）
+$PY -m pytest tests/reliability/test_trace_independence.py -q
+$PY -m pytest "tests/reliability/test_runtime_api.py::test_create_requires_idempotency_key" -q
+$PY -m pytest tests/reliability -q -k trace
+
 # 真实 LLM 行为评测（需环境变量 Key）
 bash eval/run_eval.sh
 ```
@@ -121,6 +140,13 @@ bash eval/run_eval.sh
 `run_all.sh` 必须等待本次 Worker 的新鲜 `ACTIVE` heartbeat，且 release map 与三个 active pointers 完全一致后才能启动 API；不能用旧库中已有的三行 pointer 充当 readiness。脚本保持 macOS Bash 3.2 兼容，并监督全部五个进程。
 
 `scripts/check.sh` 执行 py_compile、`pytest tests/reliability`、schema/checksum 和旧协议扫描。可靠性 PASS 不依赖真实 LLM；smoke/eval 依赖真实 Key，行为得分不能替代可靠性门禁。
+
+门禁里有四条会**静默挂掉**的硬约束，动手前先确认：
+
+- REL/FI 编号在 `check.sh` 里钉死为 `REL-001..030`、`FI-01..12`，且每行必须至少引用一个真实存在的 pytest 节点。新增可靠性测试要挂到**既有编号行**，自造 `REL-031` 会直接失败。
+- 旧协议扫描覆盖 `agent/`、`arag/`、`web/`、`eval/harness/` 与六份根文档的 `.py/.js/.html/.md/.example`，命中任一条已废弃协议/权威的字面量即失败（正则表见 `scripts/check.sh` 末段的 `patterns`：已删除的 chat 端点、启动期引擎选择、旧流结束事件、旧历史/引用/会话所有者）。写前端、注释和文档时最容易误触——**连"说明不要用它"的那句话本身也会被扫到**，要描述就指向 `check.sh`，别把字面量抄进来。
+- `docs/reliability/schemas/` 六份 v1 Schema 是冻结契约且 `additionalProperties: false`，并由 `test_schema_contracts.py` 校验**真实权威对象**的 `model_dump`。给 `RuntimeEnvelope`/`CanonicalEvent`/`WorkingState` 等加字段必须同步 Schema 与 ADR；纯诊断字段应挂在契约之外（例如 `RunRecord.trace_id`，见 ADR-0007）。
+- SQLite migration 是 checksum 校验的**增量叠加**（`agent/runtime/adapters/sqlite/migrations/`），新增 `00N_*.sql` 会自动应用到既有库。不要为了"干净重建"去删 `local_storage/` 下的库——那既没必要，又会毁掉验证升级路径的证据；需要干净库时用 `tmp_path`。
 
 ## 改动要求
 
