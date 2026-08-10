@@ -356,7 +356,7 @@ RETURNING *
 
 ### 3.5 阶段五：RunCoordinator 执行
 
-**文件**: `agent/runtime/application/coordinator.py:74-400`
+**文件**: `agent/runtime/application/coordinator.py:74-527`
 
 ```python
 async def execute_claim(self, claim: Claim, *, worker_id: str) -> RunStatus:
@@ -412,7 +412,7 @@ RunCoordinator.execute_claim() coordinator.py:74
 
 ### 3.6 阶段六：LegacyEngineAdapter 执行引擎
 
-**文件**: `agent/runtime/adapters/legacy_engines.py:46-183`
+**文件**: `agent/runtime/adapters/legacy_engines.py:46-189`
 
 ```python
 class LegacyEngineAdapter:
@@ -571,7 +571,7 @@ class CommittedEventSink(RuntimeIO):
 
 **原因**: 生成器退出（EOF）不能证明引擎成功。每个引擎必须在 `RunContext.engine_outcome` 显式设置结果。如果 EOF 时 `engine_outcome is None`，返回 `TERMINAL_FAILURE`。
 
-**代码位置**: `agent/runtime/adapters/legacy_engines.py:165-175`
+**代码位置**: `agent/runtime/adapters/legacy_engines.py:171-181`
 
 ---
 

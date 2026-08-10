@@ -534,7 +534,7 @@ RunCoordinator.execute_claim(claim) coordinator.py:74
 
 ### 6.2 关键代码
 
-**文件**: `agent/runtime/application/coordinator.py:74-400`
+**文件**: `agent/runtime/application/coordinator.py:74-527`
 
 ```python
 async def execute_claim(self, claim: Claim, *, worker_id: str) -> RunStatus:

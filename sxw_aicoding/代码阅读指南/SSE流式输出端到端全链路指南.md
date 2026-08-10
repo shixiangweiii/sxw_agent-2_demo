@@ -608,8 +608,8 @@ handleSubmit() app.js:401
 |---|---|---|
 | CommittedEventSink | `agent/runtime/application/events.py` | 1 |
 | LegacyEngineAdapter | `agent/runtime/adapters/legacy_engines.py` | 65 |
-| io.emit() | `agent/runtime/adapters/legacy_engines.py` | 162 |
-| io.force_flush() | `agent/runtime/adapters/legacy_engines.py` | 158 |
+| io.emit() | `agent/runtime/adapters/legacy_engines.py` | 168 |
+| io.force_flush() | `agent/runtime/adapters/legacy_engines.py` | 164 |
 
 ---
 
