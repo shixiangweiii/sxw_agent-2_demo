@@ -6,13 +6,13 @@
 
 项目由公司生产链路抽取、简化，用于个人学习、技术方案验证和面试准备；不承担真实线上流量。当前仓库提供可在本机运行的持久化 Agent Runtime、三代推理引擎、Tool/Skill/A2A、混合召回 RAG、SSE 和评测实现，但设计目标不受单机演示形态限制：新增或重构方案必须从真实集群化、分布式部署出发审视状态、并发、故障和恢复边界。
 
-长期决策：不受旧接口、旧数据结构、旧本地数据、旧行为、既有技术债或线上兼容要求约束，不保留 compatibility/shadow/双写层。旧设计不合理时直接替换或删除，优先采用当前先进、优秀且可验证的生产级方案。没有兼容包袱不等于降低质量：边界 case、状态机、并发竞争、幂等、超时、重试、部分失败、恢复和可观测性都必须严谨；四服务五进程、主链路、可选下游降级和与风险相称的测试必须保持完整。
+长期决策：不受既有技术债和历史兼容包袱约束，不需要兼容旧 API、旧行为、旧业务数据或旧本地数据。目标状态不保留 schema migration、compatibility/shadow 层或为旧数据而设的兼容层；不合理的旧设计可直接替换或删除。临时双写或过渡适配只能有明确用途、删除条件和验证方式，不得成为最终状态。新代码不得主动制造缺乏明确收益的技术债。优先采用先进、成熟、可验证且与问题匹配的生产级方案；新增复杂度必须有明确收益。没有兼容包袱不等于降低质量：边界 case、状态机、并发竞争、幂等、超时与重试、部分失败、资源上限、背压、安全、可观测性和故障恢复都必须严谨；四服务五进程、主链路、可选下游降级和与风险相称的测试必须保持完整。
 
-代码应简洁直白，变量、类型、函数、注释和文档的语义必须明确。不要为展示语法技巧而炫技，不滥用语法糖、元编程或设计模式；先进性应体现在方案和不变量上。允许直白的“面条代码”：与为了套用设计模式而制造间接层相比，宁可保留一眼能读懂的顺序逻辑；但仍需封装稳定职责，并只在确有收益时建立层次合适的抽象。组合优于继承，慎用继承，继承链最多两级，即 `Base -> Sub`。
+命名、代码结构、注释和文档应保持简洁直白、语义明确。不要为展示语法技巧而炫技，不滥用语法糖、元编程或设计模式；先进性应体现在方案和不变量上。优先选择可直接阅读的线性流程，不为了套用模式制造无价值的间接层；但不得以此放任失控的长函数、实质性重复或复杂分支，仍需控制函数复杂度、封装稳定职责，并只在确有收益时建立层次合适的抽象。组合优于继承，慎用继承；项目自有类最多两层 `Base -> Sub`，不允许 `Base -> Middle -> Sub`。
 
-生产级设计默认面向多实例和跨节点协作。需要共享的状态、取消信号、租约、锁、幂等记录或进度不能只放在进程内存或单机私有文件中；例如“停止回复”不能依赖某个 API/Worker 进程的内存标志，应由 Redis 等中心化协调组件或等价的持久化权威承载。若目标方案缺少 Redis、消息队列、分布式数据库等必要依赖，应明确指出约束、候选方案和取舍并与用户讨论，不能把单机 workaround 当作最终设计。
+生产目标方案默认面向多实例和跨节点协作。涉及共享状态、任务调度、会话、取消、租约、幂等、副作用或进度管理时，必须明确跨节点的一致性、故障和恢复边界，不能只依赖进程内存或单机私有文件。若目标方案缺少所需中间件依赖，应明确指出约束、候选方案和取舍并与用户讨论。本地开发和测试可以使用单机适配器，但不得把只能在单进程或单节点上保证正确性的实现定义为生产目标方案。
 
-需要对照生产实现时只提炼设计，不机械复制企业内部治理：
+生产项目源码默认只读，仅用于提炼设计；未经明确要求不得修改参考项目，也不得机械复制内部配置和治理代码：
 
 | 方向 | 参考路径 |
 |---|---|
@@ -80,9 +80,9 @@ API 和 Worker 当前共享本机 `runtime.db` 与 Artifact CAS。可选下游�
 - Worker 领取使用 lease/revision/fencing；旧 fencing 结果拒绝，Worker 丢失不直接失败 Run。
 - 所有 SQLite 写使用短 `BEGIN IMMEDIATE`；事务内禁止 LLM、Tool、RAG、Skill、文件系统或等待人工。
 
-Runtime 表由显式 checksum migration 管理。连接必须启用 WAL、`synchronous=FULL`、foreign keys、busy timeout。未知新 schema 或 checksum 改写必须 fail-fast。不要引入 ORM/Alembic 或预留 PostgreSQL backend。
+Runtime 和 RAG 当前仍使用遗留的 checksum migration 实现；它是待独立移除的历史代码，不要求立刻大改，但从现在起不得新增增量 migration。目标是单一的当前 schema 初始化与版本/checksum 校验。数据库仅支持当前 schema：schema 或 checksum 不匹配时必须 fail-fast，并提示用户显式删除或重建对应本地数据库；程序不得静默删除、覆盖或自动迁移旧数据库。连接必须启用 WAL、`synchronous=FULL`、foreign keys、busy timeout。不要引入 ORM/Alembic 或预留 PostgreSQL backend。
 
-以上 SQLite 约束属于当前冻结实现。若新需求必须改变存储或协调架构，先明确分布式需求与中间件依赖，再按 ADR、Schema、migration 和 reliability test 完整替换；不能在现有 SQLite 旁边临时增加第二事实源，也不能退化为进程内状态。
+数据库跨版本升级、滚动发布期间的 schema 兼容和旧数据保留不在本项目范围内。后续通过独立、可验证的重构移除遗留 migration，实现单一当前 schema 初始化和版本/checksum 校验。若新需求改变存储或协调架构，先明确分布式需求与中间件依赖，再按 ADR、current schema、版本/checksum 与 reliability test 完整替换；不能在现有 SQLite 旁边临时增加第二事实源，也不能退化为进程内状态。
 
 ## Engine Adapter 与三代引擎
 
@@ -122,7 +122,7 @@ Artifact 身份等于小写 SHA-256。写入边界为 temp → digest/size → f
 
 ## ARAG
 
-`rag.db` 保存 `documents/document_versions/active_document_versions/chunks/index_jobs/chunk_embeddings/projection_metadata`，显式 migration/checksum。原文位于 `local_storage/arag/documents/sha256/`。
+`rag.db` 保存 `documents/document_versions/active_document_versions/chunks/index_jobs/chunk_embeddings/projection_metadata`。原文位于 `local_storage/arag/documents/sha256/`；其 schema 生命周期遵循上文“仅当前 schema、fail-fast、显式重建”的规则。
 
 入库端点返回 `202 + job_ids`，job 为：
 
@@ -177,14 +177,15 @@ bash eval/run_eval.sh
 
 `run_all.sh` 的 Worker readiness 必须同时验证本次启动后的新鲜 `ACTIVE` heartbeat 与三种 active release pointer 完全一致；只看持久库里已有的三行 active release 会把旧指针误判为当前 Worker ready。脚本须保持 Bash 3.2 兼容，并持续监督五个子进程。
 
-`scripts/check.sh` 应执行 py_compile、`pytest tests/reliability`、SQLite migration/checksum 验证和旧协议字符串扫描。真实 LLM 行为分数不属于可靠性 PASS。
+`scripts/check.sh` 应执行 py_compile、`pytest tests/reliability`、SQLite schema/checksum 验证和旧协议字符串扫描。遗留 migration 尚未移除前，其既有 checksum 检查仍是当前门禁的一部分；不得新增迁移。真实 LLM 行为分数不属于可靠性 PASS。
 
 ## 修改规则
 
 - 搜索文件优先 `rg`/`rg --files`；Python 使用 `.venv`。
 - 先按集群化部署检查设计：共享状态归属、跨节点协调、一致性、幂等、故障恢复和扩缩容必须有明确答案；缺少必要中间件时先提出并讨论。
-- 实现保持直白、语义明确；在直白“面条代码”和滥用设计模式之间选择前者，同时封装稳定职责、只做合适层次的必要抽象；优先组合并慎用继承，继承链不得超过 `Base -> Sub` 两级。
-- 编辑 Runtime 状态/事务/契约前先读 `docs/reliability/`；若改变冻结语义，先 ADR + Schema + reliability test。
+- 实现保持直白、语义明确；优先线性流程而不是模式堆砌，同时控制函数复杂度、封装稳定职责、消除实质重复，只做合适层次的必要抽象；优先组合，项目自有类只允许 `Base -> Sub` 两层继承。
+- 未触及的历史代码不强制改造；新增或实质修改的代码路径必须遵守本规则。不要为了顺手清理而扩大范围；每次小步重构必须独立正确、可测试。
+- 编辑 Runtime 状态/事务/契约前先读 `docs/reliability/`；若改变冻结语义，先 ADR + current schema/版本/checksum + reliability test，禁止新增增量 migration。
 - 改 API、配置、端口、架构、能力边界或评测协议，同步更新 `README.md`、`RUNBOOK.md`、本文件、`CLAUDE.md`、`eval/README.md` 和 `.env.example`。
 - 改共享 prompt/工具面，分别验证两个 loop 引擎；不要用一代引擎结果代替另一代。
 - 新通用工具：在 `agent/tools/builtin_tools.py` 实现并注册；同时给 ToolManifest effect 分类。native 只读并发还需声明安全性。
@@ -192,12 +193,13 @@ bash eval/run_eval.sh
 - 新 Claude SKILL：完整包放 `agent/claude_skill/skills_data/<id>/`，根部 `SKILL.md` 声明并发/独占资源；新条目默认 UNKNOWN_EFFECT，需显式评审。
 - 新 A2A：在 `a2a_service/agents.py` 暴露，并在 skill-center 注册；effect 同样显式评审。
 - 任何大结果先 Artifact 化；敏感 Key 只来自真实环境变量或被忽略 `.env`。
+- 输入需求与本项目背景约束冲突时，主动指出并与用户讨论后再继续。
 - 工作树可能有用户改动，保留无关修改；禁止破坏性 reset。
 
 ## 诚实边界
 
 - 当前实现只支持单机进程级恢复，不是分布式 HA，也不抵御磁盘/主机丢失；这是待演进的能力边界，不能作为新增单机方案的设计依据。
-- 当前没有 Memory、完整 Context Compiler、PostgreSQL/Temporal、Redis 协调层或服务端 Delivery ACK；设计需要这些能力时应显式提出依赖和演进方案。
+- 当前没有 Memory、完整 Context Compiler、PostgreSQL/Temporal、Redis 协调层或服务端 Delivery ACK；当前数据库也不支持跨版本升级、滚动发布期的 schema 兼容或旧数据保留。设计需要相关能力时应显式提出依赖和演进方案。
 - 两个 ADK 引擎没有 mid-turn deterministic replay。
 - Prompt cache 显式断点仅对 Anthropic 生效，默认 DashScope 下为 no-op。
 - GraphStore 未接检索流；AgentBay 不可运行；LocalSandbox 非生产隔离。

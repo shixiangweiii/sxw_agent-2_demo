@@ -6,13 +6,13 @@
 
 项目由公司生产链路抽取、简化，用于个人学习、架构验证和面试准备，不承担真实线上流量。当前仓库是可本机运行的持久化 Agent Runtime 参考实现，但方案设计必须从真实集群化、分布式部署出发，不能把当前单机形态当作目标架构上限。
 
-不受旧接口、旧本地数据、旧状态、旧行为、既有技术债或线上兼容要求约束，不建设 compatibility/shadow/双写层；不合理的旧设计可直接替换或删除。优先采用当前先进、优秀且可验证的生产级方案；边界 case、状态机、并发、幂等、超时、重试、部分失败和恢复必须严谨。改动后仍必须保持四服务五进程、主链路和与风险相称的可靠性测试完整。
+不受既有技术债和历史兼容包袱约束，不需要兼容旧 API、旧行为、旧业务数据或旧本地数据。目标状态不保留 schema migration、compatibility/shadow 层或为旧数据而设的兼容层；不合理的旧设计可直接替换或删除。临时双写或过渡适配必须有明确用途、删除条件和验证方式，不得成为最终状态。新代码不得主动制造缺乏明确收益的技术债。优先采用先进、成熟、可验证且与问题匹配的生产级方案；新增复杂度必须有明确收益。边界 case、状态机、并发竞争、幂等、超时与重试、部分失败、资源上限、背压、安全、可观测性和故障恢复必须严谨。改动后仍必须保持四服务五进程、主链路和与风险相称的可靠性测试完整。
 
-代码保持简洁直白，变量、类型、函数、注释和文档语义明确。不要炫技或滥用语法糖、元编程和设计模式；先进性体现在设计方案而不是语法。允许直白的“面条代码”：比起为套用模式制造间接层，宁可保留一眼能读懂的顺序逻辑；但仍要封装稳定职责，只在确有收益时建立层次合适的抽象。组合优于继承，慎用继承，继承链最多两级：`Base -> Sub`。
+命名、代码结构、注释和文档保持简洁直白、语义明确。不要炫技或滥用语法糖、元编程和设计模式；先进性体现在设计方案而不是语法。优先选择可直接阅读的线性流程，不为了套用模式制造无价值的间接层；但不得以此放任失控的长函数、实质性重复或复杂分支，仍需控制函数复杂度、封装稳定职责，只在确有收益时建立层次合适的抽象。组合优于继承，慎用继承；项目自有类最多两层 `Base -> Sub`，不允许 `Base -> Middle -> Sub`。
 
-共享状态和协调机制默认按多实例、跨节点设计。取消信号、租约、锁、幂等记录或执行进度不能只保存在进程内存或单机私有文件；例如“停止回复”应由 Redis 等中心化协调组件或等价的持久化权威承载。缺少必要的 Redis、消息队列或分布式存储时，明确提出依赖、边界与取舍并和用户讨论，不能用单机 workaround 充当最终方案。
+生产目标方案默认按多实例、跨节点设计。涉及共享状态、任务调度、会话、取消、租约、幂等、副作用或进度管理时，必须明确跨节点的一致性、故障和恢复边界，不能只依赖进程内存或单机私有文件。缺少所需中间件依赖时，明确提出依赖、边界与取舍并与用户讨论。本地开发和测试可使用单机适配器，但不得把只能在单进程或单节点上保证正确性的实现定义为生产目标方案。
 
-生产实现参考（只提炼设计）：
+生产项目源码默认只读，仅用于提炼设计；未经明确要求不得修改参考项目，也不得机械复制内部配置和治理代码：
 
 | 方向 | 路径 |
 |---|---|
@@ -77,9 +77,9 @@ API 与 Worker 当前共享本机 `runtime.db` 和 Artifact CAS。这是实现�
 | `local_storage/demo_effects/effects.db` | 模拟外部副作用，故意独立 |
 | `local_storage/traces/` | 诊断，不是业务事实 |
 
-Runtime/RAG 使用 `aiosqlite + 显式 SQL + checksum migration`，不引入 ORM/Alembic 或第二 backend。Runtime 连接启用 WAL、`synchronous=FULL`、foreign keys、busy timeout；未知 schema/checksum 改写 fail-fast。
+Runtime/RAG 当前仍使用 `aiosqlite + 显式 SQL +` 遗留 checksum migration。该机制是待独立移除的历史代码，不要求立刻大改，但从现在起不得新增增量 migration；目标是单一的当前 schema 初始化与版本/checksum 校验。数据库仅支持当前 schema：schema 或 checksum 不匹配时必须 fail-fast，并提示用户显式删除或重建对应本地数据库；程序不得静默删除、覆盖或自动迁移旧数据库。Runtime 连接启用 WAL、`synchronous=FULL`、foreign keys、busy timeout；不引入 ORM/Alembic 或第二 backend。
 
-这些 SQLite 规则属于当前冻结实现。分布式需求确实需要调整存储或协调架构时，先明确依赖，再通过 ADR、Schema、migration 和 reliability test 完整替换；不得临时增加第二事实源或退回进程内状态。
+数据库跨版本升级、滚动发布期间的 schema 兼容和旧数据保留不在本项目范围内。后续通过独立、可验证的重构移除遗留 migration。分布式需求确实需要调整存储或协调架构时，先明确依赖，再通过 ADR、current schema、版本/checksum 和 reliability test 完整替换；不得临时增加第二事实源或退回进程内状态。
 
 Artifact ID 等于 SHA-256；写入为 temp/fsync/atomic rename/fsync dir，再提交 metadata/ref。非图片附件只给模型已校验的 8KiB preview，`read_artifact` 有界读取默认 32KiB/最大 64KiB；图片从已校验 CAS 物化为 attempt-local 多模态 Part。HTTP Range 单次 1MiB。大结果/read 切片只存 Artifact ref/preview，native 恢复时重新物化。
 
@@ -147,26 +147,28 @@ bash eval/run_eval.sh
 
 `run_all.sh` 必须等待本次 Worker 的新鲜 `ACTIVE` heartbeat，且 release map 与三个 active pointers 完全一致后才能启动 API；不能用旧库中已有的三行 pointer 充当 readiness。脚本保持 macOS Bash 3.2 兼容，并监督全部五个进程。
 
-`scripts/check.sh` 执行 py_compile、`pytest tests/reliability`、schema/checksum 和旧协议扫描。可靠性 PASS 不依赖真实 LLM；smoke/eval 依赖真实 Key，行为得分不能替代可靠性门禁。
+`scripts/check.sh` 执行 py_compile、`pytest tests/reliability`、schema/checksum 和旧协议扫描。遗留 migration 尚未移除前，其既有 checksum 检查仍是当前门禁的一部分；不得新增迁移。可靠性 PASS 不依赖真实 LLM；smoke/eval 依赖真实 Key，行为得分不能替代可靠性门禁。
 
 门禁里有四条会**静默挂掉**的硬约束，动手前先确认：
 
 - REL/FI 编号在 `check.sh` 里钉死为 `REL-001..030`、`FI-01..12`，且每行必须至少引用一个真实存在的 pytest 节点。新增可靠性测试要挂到**既有编号行**，自造 `REL-031` 会直接失败。
 - 旧协议扫描覆盖 `agent/`、`arag/`、`web/`、`eval/harness/` 与六份根文档的 `.py/.js/.html/.md/.example`，命中任一条已废弃协议/权威的字面量即失败（正则表见 `scripts/check.sh` 末段的 `patterns`：已删除的 chat 端点、启动期引擎选择、旧流结束事件、旧历史/引用/会话所有者）。写前端、注释和文档时最容易误触——**连"说明不要用它"的那句话本身也会被扫到**，要描述就指向 `check.sh`，别把字面量抄进来。
 - `docs/reliability/schemas/` 六份 v1 Schema 是冻结契约且 `additionalProperties: false`，并由 `test_schema_contracts.py` 校验**真实权威对象**的 `model_dump`。给 `RuntimeEnvelope`/`CanonicalEvent`/`WorkingState` 等加字段必须同步 Schema 与 ADR；纯诊断字段应挂在契约之外（例如 `RunRecord.trace_id`，见 ADR-0007）。
-- SQLite migration 是 checksum 校验的**增量叠加**（`agent/runtime/adapters/sqlite/migrations/`），新增 `00N_*.sql` 会自动应用到既有库。不要为了"干净重建"去删 `local_storage/` 下的库——那既没必要，又会毁掉验证升级路径的证据；需要干净库时用 `tmp_path`。
+- SQLite 的增量 migration（`agent/runtime/adapters/sqlite/migrations/`）是待移除的历史实现。不得新增 `00N_*.sql` 或依赖它升级旧库；在其移除前，既有 checksum 验证仍须通过。schema/checksum 不匹配的本地数据库必须由用户显式删除或重建，程序不得自动处理；测试需要干净库时用 `tmp_path`。
 
 ## 改动要求
 
 - 设计先按集群化部署检查共享状态归属、跨节点协调、一致性、幂等、故障恢复和扩缩容；缺少必要中间件时先提出并讨论。
-- 代码和抽象保持直白：命名、注释、文档语义明确；在直白“面条代码”和滥用设计模式之间选择前者，同时封装稳定职责、只做合适层次的必要抽象；优先组合并慎用继承，继承链最多 `Base -> Sub` 两级。
-- 改状态机/事务/契约：先读 `docs/reliability/`，同步 ADR、JSON Schema 和 reliability test。
+- 代码和抽象保持直白：优先线性流程而不是模式堆砌，同时控制函数复杂度、封装稳定职责、消除实质重复，只做合适层次的必要抽象；项目自有类只允许 `Base -> Sub` 两层继承。
+- 未触及的历史代码不强制改造；新增或实质修改的代码路径必须遵守本规则。不要为了顺手清理而扩大范围；每次小步重构必须独立正确、可测试。
+- 改状态机/事务/契约：先读 `docs/reliability/`，同步 ADR、current schema/版本/checksum 和 reliability test；禁止新增增量 migration。
 - 改架构、API、配置、端口、能力边界或 eval：同步 `README.md`、`RUNBOOK.md`、`AGENTS.md`、本文件、`eval/README.md`、`.env.example`。
 - 新 Tool 必须注册 effect manifest；新 native 只读 Tool 还要显式并发安全。
 - 新 Claude SKILL 包含根 `SKILL.md`、frontmatter 和全部资源；默认不并行、effect unknown。
 - API Key 只在真实环境变量/被忽略 `.env`，禁止出现在代码、文档、报告和提交。
+- 输入需求与本项目背景约束冲突时，主动指出并与用户讨论后再继续。
 - 工作树可能有用户改动；保留无关修改，不做破坏性 reset。
 
 ## 诚实边界
 
-当前实现没有 Memory、完整 Context Compiler、PostgreSQL/Temporal、Redis 协调层、分布式 HA、磁盘容灾或服务端 Delivery ACK。这些是现状而不是新增单机设计的依据；需要相关能力时应显式提出依赖和演进方案。Prompt cache 显式断点仅 Anthropic 生效；默认 DashScope 是 no-op。Runtime 已有 Artifact/signal 不代表 Claude SKILL/A2A 自动具备跨调用 Artifact 或 HITL。
+当前实现没有 Memory、完整 Context Compiler、PostgreSQL/Temporal、Redis 协调层、分布式 HA、磁盘容灾或服务端 Delivery ACK；当前数据库也不支持跨版本升级、滚动发布期的 schema 兼容或旧数据保留。这些是现状而不是新增单机设计的依据；需要相关能力时应显式提出依赖和演进方案。Prompt cache 显式断点仅 Anthropic 生效；默认 DashScope 是 no-op。Runtime 已有 Artifact/signal 不代表 Claude SKILL/A2A 自动具备跨调用 Artifact 或 HITL。
