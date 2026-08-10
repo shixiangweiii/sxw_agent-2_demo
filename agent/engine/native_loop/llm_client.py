@@ -273,14 +273,14 @@ class NativeLlmClient:
 
     async def _consume(
         self, payload: dict[str, Any], allow_early: bool,
-    ) -> AsyncIterator[StreamItem]:
+    ) -> AsyncIterator[StreamItem]: # 真正的流解析层
         accumulator = _ToolCallAccumulator()
         finish_reason: Optional[str] = None
         usage: Optional[Usage] = None
 
         # AsyncStream 实测**没有 __del__**：客户端断开导致 CancelledError 穿过这里时，
         # 不显式关闭底层 HTTP 响应就不会归还给连接池。async with 保证任何退出路径都关。
-        async with await self._client.chat.completions.create(**payload) as stream:
+        async with await self._client.chat.completions.create(**payload) as stream: # ① OpenAI SSE 流
             async for chunk in stream:
                 chunk_usage = getattr(chunk, "usage", None)
                 if chunk_usage is not None:
@@ -300,19 +300,19 @@ class NativeLlmClient:
 
                 content = getattr(delta, "content", None)
                 if content:
-                    yield TextDelta(content)
+                    yield TextDelta(content) # ② 文本直接出
 
-                for raw in getattr(delta, "tool_calls", None) or []:
+                for raw in getattr(delta, "tool_calls", None) or []: # ③ tool_calls 分片
                     index = getattr(raw, "index", None)
                     function = getattr(raw, "function", None)
                     accumulator.add(
                         0 if index is None else int(index),
-                        getattr(raw, "id", None),
-                        getattr(function, "name", None) if function else None,
-                        getattr(function, "arguments", None) if function else None,
+                        getattr(raw, "id", None), # 首片有，后续片为空
+                        getattr(function, "name", None) if function else None,  # 首片有，后续片为空
+                        getattr(function, "arguments", None) if function else None, # 多片拼接
                     )
                 for call in accumulator.take_ready(allow_early=allow_early):
-                    yield ToolCallReady(call)
+                    yield ToolCallReady(call)  # ④ 凑齐一个就 yield
 
         for call in accumulator.take_remaining():
             yield ToolCallReady(call)

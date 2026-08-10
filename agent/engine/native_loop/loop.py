@@ -174,12 +174,15 @@ class NativeLoop:
                 # 持久化模型 I/O 前的边界；半个 stream 失败时从此重放。
                 await self._checkpoint(state, "MODEL_REQUEST")
 
+                # 组装本次模型请求的消息视图，这里控制LLM能看到的东西，LLM负责决策
+                # _build_request 是 LLM 的"眼睛"——Runtime 通过它控制视野（历史范围、体积上限、临时提醒），但决策权始终在 LLM；
+                # 这是 native_loop 区别于 ADK 框架流程引擎的核心：自研 while 循环 + LLM 自主 tool_call，框架只做视野治理与副作用持久化。
                 request_messages = self._build_request(state)
                 turn_span.set(request_messages=len(request_messages))
 
                 # ── 调模型：边流边产 text，同时累积 tool_call ────────────────
                 text_parts: list[str] = []
-                ready_calls: list[ToolCall] = []
+                ready_calls: list[ToolCall] = [] # ready_calls 在循环外声明，所以整个流迭代期间共享同一个列表，每次 append 都在同一个列表上累积
                 early_tasks: list[tuple[ToolCall, asyncio.Task[executor.ToolOutcome]]] = []
                 deferred_calls: list[ToolCall] = []
                 early_allowed = cfg.streaming_tool_exec
@@ -188,7 +191,7 @@ class NativeLoop:
                 try:
                     async for item in self._client.stream(
                         messages=request_messages,
-                        tools=self._registry.wire_declarations() or None,
+                        tools=self._registry.wire_declarations() or None, # 把 ToolRegistry 里所有注册工具转换成 OpenAI tools 请求体格式的 JSON Schema 列表——告诉 LLM"你可以调用这些工具，签名是这样"。
                         allow_early_tool_dispatch=cfg.streaming_tool_exec,
                     ):
                         if isinstance(item, TextDelta):
@@ -202,8 +205,8 @@ class NativeLoop:
                             item.call.logical_key = (
                                 f"native:turn:{state.iters - 1}:call:{len(ready_calls)}"
                             )
-                            ready_calls.append(item.call)
-                            for ev in self._call_events(item.call):
+                            ready_calls.append(item.call) #  CC 的 streaming tool dispatch（流式工具提前派发） 语义， 虽然每次只追加一个，但因为整个流的多个 ToolCallReady 都走同一分支，流结束时 ready_calls 自然就是本轮所有调用的集合。
+                            for ev in self._call_events(item.call): # item.call 是一个下层已经从 OpenAI 流式分片中拼好、参数已完整可解析的 ToolCall 实例
                                 yield ev
                             # 流式工具执行：只要目前为止的调用全是并发安全的，就立刻开跑。
                             # 一旦出现非安全工具，之后的一律推迟到流结束后按批次串行执行——
