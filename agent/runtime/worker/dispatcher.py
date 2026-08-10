@@ -14,7 +14,7 @@ from common.obs import get_logger, log_kv
 
 logger = get_logger("agent.runtime.worker")
 
-
+# 捞取 api “接客”后持久化的"run"进行执行
 class RuntimeWorker:
     def __init__(
         self,

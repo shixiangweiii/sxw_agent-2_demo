@@ -78,7 +78,7 @@ class SignalBody(BaseModel):
 
 
 def _store(request: Request) -> RuntimeStore:
-    return request.app.state.runtime_store
+    return request.app.state.runtime_store # 原生 SQLite + aiosqlite 框架对象
 
 
 async def _run_json(run: RunRecord, store: RuntimeStore) -> dict[str, Any]:
@@ -135,10 +135,10 @@ async def create_run(
     response: Response,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, Any]:
-    settings: AgentSettings = request.app.state.settings
+    settings: AgentSettings = request.app.state.settings # LLM接口地址、密钥配置，循环次数上限，上下文窗口压缩阙值配置等
     service = AdmissionService(
         _store(request),
-        default_deadline_ms=settings.runtime_default_deadline_seconds * 1000,
+        default_deadline_ms=settings.runtime_default_deadline_seconds * 1000, #  防止 Run 无限期执行，向下传递剩余时间预算， Engine/Tool 执行时检查是否超期，及时取消
     )
     # Admission 应用层幂等校验
     '''

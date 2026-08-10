@@ -45,15 +45,15 @@ async def build_worker() -> RuntimeWorker:
 
     # Only this process loads the LLM and remote tool catalogs.  The API process
     # remains a lightweight durable admission/event service.
-    context = build_agent_context(settings)
-    await attach_skill_tools(context)
-    attach_claude_skill_tools(context)
-    await attach_a2a_agents(context)
+    context = build_agent_context(settings) # llm配置，内置tool，技能执行器
+    await attach_skill_tools(context) # 加载 skills tools
+    attach_claude_skill_tools(context) # 加载本地 claude-skill 包
+    await attach_a2a_agents(context) # 加载 a2a
     artifact_store = FilesystemArtifactStore(settings.artifact_root)
     context.tools.append(build_read_artifact_tool(
         artifact_store, store.get_artifact_metadata,
     ))
-    broker = ToolBroker(store, artifact_store)
+    broker = ToolBroker(store, artifact_store) # ToolBroker "效应感知的持久化工具调度协议"*（Effect-aware durable tool dispatch protocol）
     loaded_catalog_sha256 = tool_catalog_digest(context.tools)
     manifests = {
         engine: build_release_manifest(
@@ -63,7 +63,7 @@ async def build_worker() -> RuntimeWorker:
         )
         for engine in ("plan_execute", "agent_loop", "native_loop")
     }
-    adapters = {}
+    adapters = {} # 打表存放3种引擎的
     for engine, manifest in manifests.items():
         adapters[engine] = LegacyEngineAdapter(
             engine=engine,
@@ -120,7 +120,7 @@ async def _run() -> None:
 
 
 def main() -> None:
-    settings = get_settings()
+    settings = get_settings() # LLM API调用配置等等基础配置信息
     setup_logging(settings.log_level)
     configure_tracing(
         enabled=settings.trace_enabled,

@@ -384,14 +384,14 @@ class SqliteRuntimeStore:
         return {row["engine"]: row["release_fingerprint"] for row in rows}
 
     async def admit(self, command: AdmissionCommand) -> AdmissionResult:
-        try:
-            async with self.db.transaction() as conn:
+        try: # create run 必要的持久化入库操作
+            async with self.db.transaction() as conn: # 实际生产是否可以不用事务提高吞吐？
                 prior = await (await conn.execute(
                     """SELECT request_digest,run_id FROM run_requests
                        WHERE principal_id=? AND agent_id=? AND idempotency_key=?""",
                     (command.principal_id, command.agent_id, command.idempotency_key),
                 )).fetchone()
-                if prior is not None:
+                if prior is not None: # 本次请求传入的幂等键已存在
                     if prior["request_digest"] != command.request_digest:
                         raise conflict(
                             "IDEMPOTENCY_KEY_REUSE",
@@ -402,7 +402,7 @@ class SqliteRuntimeStore:
                     return AdmissionResult(run=_run_from_row(row), reused=True)
 
                 release = await (await conn.execute(
-                    "SELECT release_fingerprint FROM active_releases WHERE engine=?",
+                    "SELECT release_fingerprint FROM active_releases WHERE engine=?", # 查询运行时执行引擎的快照，“engine”源头是前端页面所选择的
                     (command.engine,),
                 )).fetchone()
                 if release is None:
@@ -438,7 +438,7 @@ class SqliteRuntimeStore:
                         (conversation_id, command.principal_id, command.agent_id, 2, 1,
                          command.created_at, command.created_at),
                     )
-                    turn_seq = 1
+                    turn_seq = 1 # 这个序号有用，是后面断线重连重放sse event关键
                 else:
                     if (conversation["principal_id"], conversation["agent_id"]) != (
                         command.principal_id, command.agent_id,

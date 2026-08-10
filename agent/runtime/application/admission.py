@@ -59,7 +59,7 @@ class AdmissionService:
         # The digest covers only the normalized client request.  A server-derived
         # default deadline is frozen in the first RuntimeEnvelope but must not make
         # a later replay of the same request look different.
-        digest = sha256_json(request.digest_payload())
+        digest = sha256_json(request.digest_payload()) # 计算请求paylaod摘要，用来做幂等判断？
         command = AdmissionCommand(
             request_id=new_id("req"),
             client_request_id=request.client_request_id,
@@ -80,4 +80,4 @@ class AdmissionService:
             created_at=now,
             trace_id=request.trace_id,
         )
-        return await self.store.admit(command)
+        return await self.store.admit(command) # Admission 入场/准入，这里就是持久化保存“入场”请求，依赖注入，运行时实际执行逻辑：agent/runtime/adapters/sqlite/store.py:386-547
