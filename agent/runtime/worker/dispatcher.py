@@ -67,9 +67,9 @@ class RuntimeWorker:
         try:
             while not self._stop.is_set():
                 now = self.clock.now_ms()
-                await self._maintenance(now)
+                await self._maintenance(now) # worker任务执行的“后台家务”
                 while len(self._tasks) < self.concurrency and not self._stop.is_set():
-                    claim = await self.store.claim_next(
+                    claim = await self.store.claim_next( # 领取标记任务
                         worker_id=self.worker_id,
                         lease_ms=self.lease_ms,
                         now_ms=self.clock.now_ms(),
@@ -77,7 +77,7 @@ class RuntimeWorker:
                     )
                     if claim is None:
                         break
-                    task = asyncio.create_task(self._execute(claim))
+                    task = asyncio.create_task(self._execute(claim)) # 实际干活，执行具体的activities
                     self._tasks.add(task)
                     task.add_done_callback(self._tasks.discard)
                 try:
@@ -150,7 +150,7 @@ class RuntimeWorker:
         finished = asyncio.Event()
         renewal = asyncio.create_task(self._renew_lease(claim, finished))
         try:
-            await self.coordinator.execute_claim(claim, worker_id=self.worker_id)
+            await self.coordinator.execute_claim(claim, worker_id=self.worker_id) # 协调器执行
         except asyncio.CancelledError:
             raise
         except RuntimeFault as exc:

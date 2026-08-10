@@ -79,6 +79,15 @@ async def build_worker() -> RuntimeWorker:
         effects=DemoEffectsStore(settings.demo_effects_db_path),
     )
     adapters["native_loop"] = RoutedNativeAdapter(adapters["native_loop"], demo)
+    # 最终构造出来的结果：
+    '''
+    adapters["plan_execute"]  = LegacyEngineAdapter(engine="plan_execute")
+    adapters["agent_loop"]    = LegacyEngineAdapter(engine="agent_loop")
+    adapters["native_loop"]   = RoutedNativeAdapter(
+                                    normal = LegacyEngineAdapter(engine="native_loop"),
+                                    demo   = NativeReliabilityDemoAdapter(...)
+                                )
+    '''
     # Publish all active pointers only after every adapter/tool has constructed
     # successfully.  API admissions can never observe a half-new release set.
     await store.register_releases(tuple(manifests.values()), activate=True)

@@ -154,7 +154,7 @@ class NativeLoopEngine(ReasoningEngine):
         # 这里复用它来并发 drain 技能 UI 队列：技能/沙箱在一次工具调用内部推进来的
         # 展示帧因此能实时穿插在 text / tool_call 之间，而不是等工具整体返回才一次性出现。
         async for event in merge_runner_events(
-            loop.run(messages, initial_state=initial_state), lambda e: [e],
+            loop.run(messages, initial_state=initial_state), lambda e: [e], # 真正干活的 while 循环本体的入口
         ):
             yield event
 

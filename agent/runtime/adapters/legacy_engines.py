@@ -63,6 +63,12 @@ class LegacyEngineAdapter:
         self.tool_broker = tool_broker
 
     async def execute(self, request: EngineRunRequest, io: RuntimeIO) -> EngineOutcome:
+        # InMemorySessionService 是 Google ADK（google.adk.sessions）提供的一个会话服务实现，
+        # 顾名思义就是把会话（Session）状态保存在进程内存里，没有任何持久化落盘，进程重启或对象被丢弃后数据就丢失了
+        # 这里用 InMemorySessionService 只是为了满足 ADK 的接口契约，把 canonical history 重放进去（第 74-81 行的 append_event 循环），让 ADK 引擎在这一次 attempt 内能看到完整上下文
+        # 真正跨 attempt/可恢复的历史事实来源始终是数据库里的 committed events，
+        # 这也是为什么 AGENTS.md 里强调"native 不得重新引入进程级历史 store"、ADK 的 session/artifact 适配器"必须每 attempt 创建并销毁"
+        # "canonical history"（规范历史/权威历史）指的是从数据库里已提交事件重新编译出来的、作为事实来源的对话历史，区别于任何进程内、临时、可能不完整的历史副本。
         session_service = InMemorySessionService()
         session_id = request.envelope.run_id
         session = await session_service.create_session(
@@ -111,7 +117,7 @@ class LegacyEngineAdapter:
             session_id=session_id,
             user_message=user_message,
             settings=self.context.settings,
-            canonical_history=tuple(canonical_contents),
+            canonical_history=tuple(canonical_contents), # "canonical history"（规范历史/权威历史）指的是从数据库里已提交事件重新编译出来的、作为事实来源的对话历史，区别于任何进程内、临时、可能不完整的历史副本。
             session_service=session_service,
             artifact_service=InMemoryArtifactService(),
             deadline_at_ms=request.envelope.deadline_at,
