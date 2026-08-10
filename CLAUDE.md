@@ -4,9 +4,13 @@
 
 ## 定位与决策
 
-项目用于个人学习、架构验证和面试准备，不承担真实线上流量。目标是单机持久化可靠 Agent Runtime 参考实现，而不是分布式 HA。
+项目由公司生产链路抽取、简化，用于个人学习、架构验证和面试准备，不承担真实线上流量。当前仓库是可本机运行的持久化 Agent Runtime 参考实现，但方案设计必须从真实集群化、分布式部署出发，不能把当前单机形态当作目标架构上限。
 
-不兼容旧接口、旧本地数据、旧状态或旧行为，不建设兼容层、双写或迁移。优先选择清晰、先进、可验证的设计；改动后仍必须保持四服务五进程、主链路和可靠性测试完整。
+不受旧接口、旧本地数据、旧状态、旧行为、既有技术债或线上兼容要求约束，不建设 compatibility/shadow/双写层；不合理的旧设计可直接替换或删除。优先采用当前先进、优秀且可验证的生产级方案；边界 case、状态机、并发、幂等、超时、重试、部分失败和恢复必须严谨。改动后仍必须保持四服务五进程、主链路和与风险相称的可靠性测试完整。
+
+代码保持简洁直白，变量、类型、函数、注释和文档语义明确。不要炫技或滥用语法糖、元编程和设计模式；先进性体现在设计方案而不是语法。组合优于继承，继承链最多两级：`Base -> Sub`。
+
+共享状态和协调机制默认按多实例、跨节点设计。取消信号、租约、锁、幂等记录或执行进度不能只保存在进程内存或单机私有文件；例如“停止回复”应由 Redis 等中心化协调组件或等价的持久化权威承载。缺少必要的 Redis、消息队列或分布式存储时，明确提出依赖、边界与取舍并和用户讨论，不能用单机 workaround 充当最终方案。
 
 生产实现参考（只提炼设计）：
 
@@ -27,6 +31,8 @@ Artifact upload → POST /api/v1/runs → runtime.db
 ```
 
 进程：Runtime API(:8000)、Runtime Worker、ARAG(:8100)、skill-center(:8200)、A2A(:8300)。API 只做 admission/status/cancel/signal/Event/Artifact/Web，不能加载 LLM 或远程 Tool 目录；Worker 负责执行并注册三个 immutable engine release。Web 面有两个：`/chat-ui` 会话，`/trace-ui` 只读 Trace Console（列表 + 瀑布图，读 `GET /api/v1/traces[/{id}]`）。
+
+API 与 Worker 当前共享本机 `runtime.db` 和 Artifact CAS。这是实现现状和测试基线，不是长期设计准则；新增能力仍须检查多实例一致性、跨节点协调、节点失联和恢复行为。
 
 ## 代码分层
 
@@ -72,6 +78,8 @@ Artifact upload → POST /api/v1/runs → runtime.db
 | `local_storage/traces/` | 诊断，不是业务事实 |
 
 Runtime/RAG 使用 `aiosqlite + 显式 SQL + checksum migration`，不引入 ORM/Alembic 或第二 backend。Runtime 连接启用 WAL、`synchronous=FULL`、foreign keys、busy timeout；未知 schema/checksum 改写 fail-fast。
+
+这些 SQLite 规则属于当前冻结实现。分布式需求确实需要调整存储或协调架构时，先明确依赖，再通过 ADR、Schema、migration 和 reliability test 完整替换；不得临时增加第二事实源或退回进程内状态。
 
 Artifact ID 等于 SHA-256；写入为 temp/fsync/atomic rename/fsync dir，再提交 metadata/ref。非图片附件只给模型已校验的 8KiB preview，`read_artifact` 有界读取默认 32KiB/最大 64KiB；图片从已校验 CAS 物化为 attempt-local 多模态 Part。HTTP Range 单次 1MiB。大结果/read 切片只存 Artifact ref/preview，native 恢复时重新物化。
 
@@ -150,6 +158,8 @@ bash eval/run_eval.sh
 
 ## 改动要求
 
+- 设计先按集群化部署检查共享状态归属、跨节点协调、一致性、幂等、故障恢复和扩缩容；缺少必要中间件时先提出并讨论。
+- 代码和抽象保持直白：命名、注释、文档语义明确，避免炫技与过度设计，优先组合，继承链最多 `Base -> Sub` 两级。
 - 改状态机/事务/契约：先读 `docs/reliability/`，同步 ADR、JSON Schema 和 reliability test。
 - 改架构、API、配置、端口、能力边界或 eval：同步 `README.md`、`RUNBOOK.md`、`AGENTS.md`、本文件、`eval/README.md`、`.env.example`。
 - 新 Tool 必须注册 effect manifest；新 native 只读 Tool 还要显式并发安全。
@@ -159,4 +169,4 @@ bash eval/run_eval.sh
 
 ## 诚实边界
 
-没有 Memory、完整 Context Compiler、PostgreSQL/Temporal、分布式 HA、磁盘容灾或服务端 Delivery ACK。Prompt cache 显式断点仅 Anthropic 生效；默认 DashScope 是 no-op。Runtime 已有 Artifact/signal 不代表 Claude SKILL/A2A 自动具备跨调用 Artifact 或 HITL。
+当前实现没有 Memory、完整 Context Compiler、PostgreSQL/Temporal、Redis 协调层、分布式 HA、磁盘容灾或服务端 Delivery ACK。这些是现状而不是新增单机设计的依据；需要相关能力时应显式提出依赖和演进方案。Prompt cache 显式断点仅 Anthropic 生效；默认 DashScope 是 no-op。Runtime 已有 Artifact/signal 不代表 Claude SKILL/A2A 自动具备跨调用 Artifact 或 HITL。

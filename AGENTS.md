@@ -4,9 +4,13 @@
 
 ## 项目定位
 
-项目由公司生产链路抽取、简化，用于个人学习、技术方案验证和面试准备；不承担真实线上流量。目标是展示单机持久化可靠 Agent Runtime、三代推理引擎、Tool/Skill/A2A、混合召回 RAG、SSE 和评测方法。
+项目由公司生产链路抽取、简化，用于个人学习、技术方案验证和面试准备；不承担真实线上流量。当前仓库提供可在本机运行的持久化 Agent Runtime、三代推理引擎、Tool/Skill/A2A、混合召回 RAG、SSE 和评测实现，但设计目标不受单机演示形态限制：新增或重构方案必须从真实集群化、分布式部署出发审视状态、并发、故障和恢复边界。
 
-长期决策：不考虑旧接口、旧数据结构、旧本地数据和旧行为兼容，不保留 compatibility/shadow/双写层。旧设计不合理时直接替换或删除，以当前清晰、先进、可验证的生产级原则为优先。没有兼容包袱不等于降低质量：四服务五进程、主链路、可选下游降级和与风险相称的测试必须保持完整。
+长期决策：不受旧接口、旧数据结构、旧本地数据、旧行为、既有技术债或线上兼容要求约束，不保留 compatibility/shadow/双写层。旧设计不合理时直接替换或删除，优先采用当前先进、优秀且可验证的生产级方案。没有兼容包袱不等于降低质量：边界 case、状态机、并发竞争、幂等、超时、重试、部分失败、恢复和可观测性都必须严谨；四服务五进程、主链路、可选下游降级和与风险相称的测试必须保持完整。
+
+代码应简洁直白，变量、类型、函数、注释和文档的语义必须明确。不要为展示语法技巧而炫技，不滥用语法糖、元编程或设计模式；先进性应体现在方案和不变量上。组合优于继承，继承链最多两级，即 `Base -> Sub`。
+
+生产级设计默认面向多实例和跨节点协作。需要共享的状态、取消信号、租约、锁、幂等记录或进度不能只放在进程内存或单机私有文件中；例如“停止回复”不能依赖某个 API/Worker 进程的内存标志，应由 Redis 等中心化协调组件或等价的持久化权威承载。若目标方案缺少 Redis、消息队列、分布式数据库等必要依赖，应明确指出约束、候选方案和取舍并与用户讨论，不能把单机 workaround 当作最终设计。
 
 需要对照生产实现时只提炼设计，不机械复制企业内部治理：
 
@@ -17,7 +21,7 @@
 | Skill Center/A2A | `/Users/shixiangweii/IdeaProjects/sxw_work/codes/2026_albert-skill-center_proj/albert-skill-center` |
 | ARAG | `/Users/shixiangweii/PycharmProjects/arag_learn_proj/lippi-arag` |
 
-## 当前架构
+## 当前实现架构
 
 ```text
 Client
@@ -39,7 +43,7 @@ Client
 4. `skillcenter.main:app`，:8200。
 5. `a2a_service.main:app`，:8300。
 
-API 和 Worker 共享本机 `runtime.db` 与 Artifact CAS。可选下游不可用时按既有 best-effort 语义降级；但 Worker 启动时只加载一次远程目录，恢复下游后通常需重启 Worker。
+API 和 Worker 当前共享本机 `runtime.db` 与 Artifact CAS。可选下游不可用时按既有 best-effort 语义降级；但 Worker 启动时只加载一次远程目录，恢复下游后通常需重启 Worker。这是仓库现状和当前测试基线，不是长期架构上限；新增能力不得因为现有部署是单机就忽略多实例一致性和跨节点故障场景。
 
 ## 唯一事实来源
 
@@ -77,6 +81,8 @@ API 和 Worker 共享本机 `runtime.db` 与 Artifact CAS。可选下游不可�
 - 所有 SQLite 写使用短 `BEGIN IMMEDIATE`；事务内禁止 LLM、Tool、RAG、Skill、文件系统或等待人工。
 
 Runtime 表由显式 checksum migration 管理。连接必须启用 WAL、`synchronous=FULL`、foreign keys、busy timeout。未知新 schema 或 checksum 改写必须 fail-fast。不要引入 ORM/Alembic 或预留 PostgreSQL backend。
+
+以上 SQLite 约束属于当前冻结实现。若新需求必须改变存储或协调架构，先明确分布式需求与中间件依赖，再按 ADR、Schema、migration 和 reliability test 完整替换；不能在现有 SQLite 旁边临时增加第二事实源，也不能退化为进程内状态。
 
 ## Engine Adapter 与三代引擎
 
@@ -176,6 +182,8 @@ bash eval/run_eval.sh
 ## 修改规则
 
 - 搜索文件优先 `rg`/`rg --files`；Python 使用 `.venv`。
+- 先按集群化部署检查设计：共享状态归属、跨节点协调、一致性、幂等、故障恢复和扩缩容必须有明确答案；缺少必要中间件时先提出并讨论。
+- 实现保持直白、语义明确；避免炫技和过度抽象，优先组合，继承链不得超过 `Base -> Sub` 两级。
 - 编辑 Runtime 状态/事务/契约前先读 `docs/reliability/`；若改变冻结语义，先 ADR + Schema + reliability test。
 - 改 API、配置、端口、架构、能力边界或评测协议，同步更新 `README.md`、`RUNBOOK.md`、本文件、`CLAUDE.md`、`eval/README.md` 和 `.env.example`。
 - 改共享 prompt/工具面，分别验证两个 loop 引擎；不要用一代引擎结果代替另一代。
@@ -188,8 +196,8 @@ bash eval/run_eval.sh
 
 ## 诚实边界
 
-- 单机进程级恢复，不是分布式 HA，也不抵御磁盘/主机丢失。
-- 没有 Memory、完整 Context Compiler、PostgreSQL/Temporal、服务端 Delivery ACK。
+- 当前实现只支持单机进程级恢复，不是分布式 HA，也不抵御磁盘/主机丢失；这是待演进的能力边界，不能作为新增单机方案的设计依据。
+- 当前没有 Memory、完整 Context Compiler、PostgreSQL/Temporal、Redis 协调层或服务端 Delivery ACK；设计需要这些能力时应显式提出依赖和演进方案。
 - 两个 ADK 引擎没有 mid-turn deterministic replay。
 - Prompt cache 显式断点仅对 Anthropic 生效，默认 DashScope 下为 no-op。
 - GraphStore 未接检索流；AgentBay 不可运行；LocalSandbox 非生产隔离。
