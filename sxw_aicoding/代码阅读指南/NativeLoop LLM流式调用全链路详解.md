@@ -301,7 +301,7 @@ chunk = ChatCompletionChunk(
 
 ## 5. 上层组装：`_build_request` + `wire_declarations`
 
-`loop.py:435-470` + `tools.py:96-97`：
+`loop.py:438-476`（`_build_request` 定义）+ `tools.py:96-97`：
 
 ```python
 # 主循环的每轮迭代
@@ -552,7 +552,7 @@ except ContextOverflowError as exc:
 sequenceDiagram
     autonumber
     participant Loop as NativeLoop.run<br/>loop.py:137
-    participant PC as _maybe_proactive_compact<br/>loop.py:345
+    participant PC as _maybe_proactive_compact<br/>loop.py:348
     participant Client as NativeLlmClient.stream<br/>llm_client.py:191
     participant Consume as _consume<br/>llm_client.py:274
     participant Acc as _ToolCallAccumulator<br/>llm_client.py:120
@@ -650,18 +650,18 @@ agent/engine/native_loop/loop.py:137
      │
      │  每轮迭代：
      │
-     ├─ await self._maybe_proactive_compact(state)              loop.py:345
+     ├─ await self._maybe_proactive_compact(state)              loop.py:173（调用处）/ 348（定义）
      │     └─ （详见 NativeLoop上下文压缩全链路详解.md）
      │
      ├─ await self._checkpoint(state, "MODEL_REQUEST")          loop.py:175
      │
-     ├─ request_messages = self._build_request(state)           loop.py:177, 435
+     ├─ request_messages = self._build_request(state)           loop.py:180（调用处）/ 438（定义）
      │     ├─ clone(messages_after_boundary(state.messages))    messages.py:215
      │     ├─ apply_tool_result_budget(live, max_chars)         messages.py:231
      │     ├─ [Msg(system, self._system), *live]
      │     └─ 按需追加 PLAN_CONTINUATION / FORCE_SUMMARY 提醒
      │
-     └─ async for item in self._client.stream(                  loop.py:192
+     └─ async for item in self._client.stream(                  loop.py:191
               messages=request_messages,
               tools=self._registry.wire_declarations() or None,  tools.py:96
               allow_early_tool_dispatch=cfg.streaming_tool_exec,
@@ -755,7 +755,7 @@ agent/engine/native_loop/loop.py:137
           │         yield ev
           │     if early_allowed and self._is_concurrency_safe(item.call):
           │         early_tasks.append((item.call, asyncio.create_task(
-          │             self._execute(item.call, state),        loop.py:478+
+          │             self._execute(item.call, state),        loop.py:217（调用处）/ 520（定义）
           │         )))
           │     else:
           │         early_allowed = False

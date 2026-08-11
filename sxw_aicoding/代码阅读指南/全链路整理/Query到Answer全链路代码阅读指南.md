@@ -312,7 +312,7 @@ store.admit(command) store.py:386
 
 ### 4.2 关键代码
 
-**文件**: `agent/runtime/adapters/sqlite/store.py:386-547`
+**文件**: `agent/runtime/adapters/sqlite/store.py:386-548`
 
 ```python
 async def admit(self, command: AdmissionCommand) -> AdmissionResult:
@@ -490,10 +490,10 @@ async def claim_next(self, *, worker_id: str, lease_ms: int, now_ms: int, engine
 
 ```text
 [Worker 进程]
-RunCoordinator.execute_claim(claim) coordinator.py:74
+RunCoordinator.execute_claim(claim) coordinator.py:65
 ├─ use_trace_id(claim.run.trace_id or run_id) ← 恢复诊断关联
 │
-└─ _execute_claim() coordinator.py:86
+└─ _execute_claim() coordinator.py:76
     │
     ├─ 1. mark_activity_running() ← CAS + fencing
     │   └─ UPDATE activities SET state='RUNNING' WHERE state='CLAIMED' AND fencing_token=?
@@ -504,15 +504,13 @@ RunCoordinator.execute_claim(claim) coordinator.py:74
     ├─ 3. 检查 cancel 抢占
     │   └─ marker=None + status=CANCEL_REQUESTED → finalize_failure(CANCELLED)
     │
-    ├─ 4. Release 兼容性检查
-    │   ├─ adapter.release_fingerprint != run.envelope.release_fingerprint
-    │   │   ├─ checkpoint=None → 无法升级 → INCOMPATIBLE_RELEASE
-    │   │   ├─ 有 upgrader → 升级 checkpoint
-    │   │   └─ 无 upgrader → INCOMPATIBLE_RELEASE
-    │   └─ 匹配 → 继续
+    ├─ 4. Release 兼容性检查（本项目不提供 checkpoint 跨 release 升级路径，一律 fail closed）
+    │   └─ adapter.release_fingerprint != run.envelope.release_fingerprint
+    │         → 直接 finalize_failure(INCOMPATIBLE_RELEASE)；此判定不读 checkpoint，
+    │           因此发生在拉取 checkpoint 之前
     │
-    ├─ 5. Deadline 检查
-    │   └─ now >= deadline_at → TIMED_OUT
+    ├─ 5. 拉取最新 checkpoint（可能为 None，代表首次执行）
+    │   Deadline 检查：now >= deadline_at → TIMED_OUT
     │
     ├─ 6. compile_history(run_id) ← 从 committed events 重建对话历史
     │
@@ -532,12 +530,15 @@ RunCoordinator.execute_claim(claim) coordinator.py:74
         └─ 其他 → finalize_failure
 ```
 
+> release 不一致曾支持"从旧 checkpoint 升级到新 release"的路径（`ReleaseCompatibilityRegistry` + `CheckpointUpgrade*`），2026-08-12 的迁移机制清理提交（见 `sxw_aicoding/changelog/2026-08-12_移除migration机制与checkpoint-upgrader.md`）已整体删除：release 不一致时不再尝试升级，直接判 `INCOMPATIBLE_RELEASE`。
+
 ### 6.2 关键代码
 
-**文件**: `agent/runtime/application/coordinator.py:74-527`
+**文件**: `agent/runtime/application/coordinator.py:65-443`
 
 ```python
 async def execute_claim(self, claim: Claim, *, worker_id: str) -> RunStatus:
+    """恢复本 Run 的诊断 trace_id，再执行。"""
     with use_trace_id(claim.run.trace_id or claim.run.envelope.run_id):
         return await self._execute_claim(claim, worker_id=worker_id)
 
@@ -561,13 +562,13 @@ async def _execute_claim(self, claim: Claim, *, worker_id: str) -> RunStatus:
     if marker is None and run.status is RunStatus.CANCEL_REQUESTED:
         return (await self.store.finalize_failure(..., terminal_status=RunStatus.CANCELLED)).status
     
-    # 4. Release 兼容性检查
+    # 4. Release 兼容性检查：不一致直接 fail closed，不尝试升级 checkpoint
+    adapter = self.registry.get(run.envelope.engine)
     if adapter.release_fingerprint != run.envelope.release_fingerprint:
-        # 检查 upgrader...
-        if incompatibility is not None:
-            return (await self.store.finalize_failure(..., terminal_status=RunStatus.INCOMPATIBLE_RELEASE)).status
+        return (await self.store.finalize_failure(..., terminal_status=RunStatus.INCOMPATIBLE_RELEASE)).status
     
-    # 5. Deadline 检查
+    # 5. 拉取最新 checkpoint（可能为 None） + Deadline 检查
+    checkpoint = await self.store.latest_checkpoint(run.envelope.run_id)
     if self.clock.now_ms() >= run.envelope.deadline_at:
         return (await self.store.finalize_failure(..., terminal_status=RunStatus.TIMED_OUT)).status
     
@@ -851,7 +852,7 @@ RuntimeWorker.run() dispatcher.py:57
 │       ├─ UPDATE activities SET state=CLAIMED
 │       └─ COMMIT
 │
-└─ RunCoordinator.execute_claim() coordinator.py:74
+└─ RunCoordinator.execute_claim() coordinator.py:65
     ├─ mark_activity_running()
     ├─ compile_history()
     └─ LegacyEngineAdapter.execute() legacy_engines.py:65
@@ -879,7 +880,7 @@ RuntimeWorker.run() dispatcher.py:57
 |---|---|---|
 | Worker 主循环 | `agent/runtime/worker/dispatcher.py` | 57 |
 | claim_next | `agent/runtime/adapters/sqlite/store.py` | 721 |
-| RunCoordinator | `agent/runtime/application/coordinator.py` | 74 |
+| RunCoordinator | `agent/runtime/application/coordinator.py` | 65（`execute_claim`）/ 76（`_execute_claim`） |
 | LegacyEngineAdapter | `agent/runtime/adapters/legacy_engines.py` | 65 |
 | CommittedEventSink | `agent/runtime/application/events.py` | 1 |
 

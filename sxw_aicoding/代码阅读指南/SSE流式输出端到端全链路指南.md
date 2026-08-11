@@ -478,7 +478,7 @@ RuntimeWorker.run() dispatcher.py:57
 ├─ claim_next() store.py:721
 │   └─ UPDATE activities SET state=CLAIMED
 │   └─ UPDATE runs SET state=RUNNING
-└─ RunCoordinator.execute_claim() coordinator.py:74
+└─ RunCoordinator.execute_claim() coordinator.py:65
     └─ LegacyEngineAdapter.execute() legacy_engines.py:65
         └─ engine.run_stream(rc)
             └─ CommittedEventSink.emit() events.py

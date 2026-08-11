@@ -258,10 +258,10 @@ DISPATCH_PENDING ──claim_next──► RUNNING ──┬──► SUCCEEDED
 | Claim 定义 | `agent/runtime/ports/store.py` | 66 |
 | claim_next 方法 | `agent/runtime/adapters/sqlite/store.py` | 721 |
 | Worker 领取循环 | `agent/runtime/worker/dispatcher.py` | 57 |
-| Coordinator 执行 | `agent/runtime/application/coordinator.py` | 74 |
+| Coordinator 执行（`_execute_claim`，`execute_claim` 在 65 行只做 trace_id 恢复后转发） | `agent/runtime/application/coordinator.py` | 76 |
 | mark_activity_running | `agent/runtime/adapters/sqlite/store.py` | 807 |
-| renew_lease | `agent/runtime/adapters/sqlite/store.py` | (搜索) |
-| recover_expired | `agent/runtime/adapters/sqlite/store.py` | (搜索) |
+| renew_lease | `agent/runtime/adapters/sqlite/store.py` | 829 |
+| recover_expired | `agent/runtime/adapters/sqlite/store.py` | 3139 |
 
 ---
 

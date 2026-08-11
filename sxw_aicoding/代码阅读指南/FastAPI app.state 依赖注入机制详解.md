@@ -36,7 +36,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     
     # ② 创建 Store 实例（依赖注入的核心对象）
     store = SqliteRuntimeStore(database)
-    await store.initialize()  # 执行 schema migration
+    await store.initialize()  # 校验/建库当前 schema（无 migration，内部调用 database.ensure_schema()）
     
     # ③ 注入到 app.state（IoC 容器）
     app.state.settings = settings
@@ -283,7 +283,7 @@ async def create_run(
 ### 6.1 资源初始化原则
 
 1. **单例模式**：所有 `app.state` 资源在 `lifespan` 中初始化，保证全局唯一
-2. **异步初始化**：使用 `await store.initialize()` 执行耗时操作（如 schema migration）
+2. **异步初始化**：使用 `await store.initialize()` 执行耗时操作（如 schema 建库/身份校验，见 `common/sqlite_schema.py` 的 `ensure_current_schema`）
 3. **资源清理**：`yield` 之后执行清理逻辑（如关闭连接、刷新缓存）
 
 ```python
@@ -323,24 +323,31 @@ def _artifact_store(request: Request) -> ArtifactStore:
 
 ### 6.3 测试中的依赖注入
 
-测试时需要 Mock `app.state`：
+测试时手工构造 `app.state`（不需要 Mock Store，可靠性测试直接用 `tmp_path` 起一个真实 SQLite 库）：
 
 ```python
-# tests/reliability/test_runtime_api.py:40-50
+# tests/reliability/test_runtime_api.py:36-62（_build_api）+ 65-79（api_env fixture）
+def _build_api(store: SqliteRuntimeStore, artifacts: FilesystemArtifactStore, *, ...) -> FastAPI:
+    app = FastAPI()
+    app.state.runtime_store = store
+    app.state.artifact_store = artifacts
+    app.state.settings = SimpleNamespace(...)  # 模拟配置对象
+    app.include_router(run_router)
+    return app
+
 @pytest.fixture
-def app():
-    test_app = FastAPI()
-    test_app.state.runtime_store = FakeStore()  # 注入测试用实现
-    test_app.state.settings = SimpleNamespace(...)
-    test_app.state.artifact_store = FakeArtifactStore()
-    test_app.include_router(runs_router)
-    return test_app
+async def api_env(tmp_path):
+    store = SqliteRuntimeStore(RuntimeDatabase(tmp_path / "runtime.db"))
+    await store.initialize()
+    ...
+    app = _build_api(store, artifacts)
+    ...
 ```
 
 **关键点**：
-- 使用 `FakeStore` 替代 `SqliteRuntimeStore`，符合依赖倒置原则
-- `SimpleNamespace` 模拟配置对象
-- 测试隔离，不依赖真实数据库
+- 用真实 `SqliteRuntimeStore` + `tmp_path` 临时库，而非 Mock/Fake：可靠性测试要验证真实 SQLite 事务/约束行为，Mock 会掩盖这一层
+- `SimpleNamespace` 只模拟配置对象（`settings`），不模拟 Store
+- `tmp_path` 保证测试隔离，不污染 `local_storage/`
 
 ---
 

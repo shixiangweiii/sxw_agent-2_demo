@@ -51,7 +51,7 @@
                                          ▼
                           ┌─────────────────────────────┐
                           │ _maybe_proactive_compact()  │  ← 主动压缩
-                          │ loop.py:345                 │
+                          │ loop.py:348                 │
                           └──────────────┬──────────────┘
                                          │
                  ┌───────────────────────┴───────────────────────┐
@@ -71,7 +71,7 @@
                   ▼
    ┌──────────────────────────┐
    │ _adopt_compacted()       │  ← 替换 state.messages + 置空 last_usage
-   │ loop.py:412              │
+   │ loop.py:415              │
    └──────────────────────────┘
                   │
                   ▼
@@ -82,7 +82,7 @@
                   ▼
    ┌──────────────────────────┐
    │ _reactive_compact()      │  ← 反应式压缩（兜底）
-   │ loop.py:380              │
+   │ loop.py:383              │
    └──────────────────────────┘
 ```
 
@@ -426,7 +426,7 @@ def _extract_summary(raw: str) -> str:
 
 ## 6. 主动压缩入口：`_maybe_proactive_compact`
 
-`agent/engine/native_loop/loop.py:345-378`
+`agent/engine/native_loop/loop.py:348-381`
 
 ```python
 async def _maybe_proactive_compact(self, state: LoopState) -> None:
@@ -467,7 +467,7 @@ async def _maybe_proactive_compact(self, state: LoopState) -> None:
 **执行位置**：在 `NativeLoop.run` 主循环中，**每次迭代开始**、**模型请求之前**（`loop.py:173`），紧挨着 checkpoint 提交点。
 
 ```python
-# loop.py:171-177
+# loop.py:171-180
 with start_span("native.turn", KIND_TURN, iter=state.iters) as turn_span:
     # ── 主动压缩：估算逼近窗口上限就先摘要，别等真的 413 ─────────
     await self._maybe_proactive_compact(state)
@@ -481,7 +481,7 @@ with start_span("native.turn", KIND_TURN, iter=state.iters) as turn_span:
 
 ## 7. 压缩结果采用：`_adopt_compacted`
 
-`agent/engine/native_loop/loop.py:412-423`
+`agent/engine/native_loop/loop.py:415-424`
 
 ```python
 @staticmethod
@@ -504,7 +504,7 @@ def _adopt_compacted(state: LoopState, compacted: list[Msg]) -> None:
 
 ## 8. 反应式压缩：`_reactive_compact`
 
-`agent/engine/native_loop/loop.py:380-410`
+`agent/engine/native_loop/loop.py:383-413`
 
 ```python
 async def _reactive_compact(self, state: LoopState, *, already_emitted: bool) -> bool:
@@ -552,7 +552,7 @@ async def _reactive_compact(self, state: LoopState, *, already_emitted: bool) ->
 
 ## 9. 冷却机制：`_enter_compact_cooldown`
 
-`agent/engine/native_loop/loop.py:425-431`
+`agent/engine/native_loop/loop.py:428-434`
 
 ```python
 @staticmethod
@@ -578,14 +578,14 @@ def _enter_compact_cooldown(state: LoopState, trigger: str) -> None:
 sequenceDiagram
     autonumber
     participant Loop as NativeLoop.run<br/>loop.py:137
-    participant PC as _maybe_proactive_compact<br/>loop.py:345
+    participant PC as _maybe_proactive_compact<br/>loop.py:348
     participant Decide as compact.decide<br/>compact.py:109
     participant Est as compact.estimate_tokens<br/>compact.py:71
     participant Compact as compact.compact<br/>compact.py:194
     participant Render as render_history<br/>compact.py:143
     participant Chat as AgentChatClient.complete
-    participant Adopt as _adopt_compacted<br/>loop.py:412
-    participant CD as _enter_compact_cooldown<br/>loop.py:425
+    participant Adopt as _adopt_compacted<br/>loop.py:415
+    participant CD as _enter_compact_cooldown<br/>loop.py:428
 
     Loop->>PC: 每轮迭代开始调用
     PC->>PC: 检查 self._chat / state.compact_cooldown
@@ -626,7 +626,7 @@ sequenceDiagram
     autonumber
     participant LLM as LLM Provider
     participant Loop as NativeLoop.run
-    participant RC as _reactive_compact<br/>loop.py:380
+    participant RC as _reactive_compact<br/>loop.py:383
     participant Compact as compact.compact
     participant Adopt as _adopt_compacted
     participant CD as _enter_compact_cooldown
@@ -660,7 +660,7 @@ sequenceDiagram
 
 ```text
 NativeLoop.run()                                              loop.py:137
- └─ await self._maybe_proactive_compact(state)                loop.py:345   ★ 入口
+ └─ await self._maybe_proactive_compact(state)                loop.py:348   ★ 入口
      ├─ if self._chat is None → return
      ├─ if state.compact_cooldown > 0 → cooldown -= 1; return
      ├─ compact.decide(                                        compact.py:109  ★ 触发判定
@@ -711,12 +711,12 @@ NativeLoop.run()                                              loop.py:137
 
     回到 _maybe_proactive_compact：
      ├─ 若 compacted is None
-     │    └─ self._enter_compact_cooldown(state, "proactive")  loop.py:425
+     │    └─ self._enter_compact_cooldown(state, "proactive")  loop.py:428
      │        └─ state.compact_failures += 1
      │        └─ state.compact_cooldown = 3
      │
      └─ 否则
-          └─ self._adopt_compacted(state, compacted)           loop.py:412
+          └─ self._adopt_compacted(state, compacted)           loop.py:415
               ├─ state.messages = compacted
               └─ state.last_usage = None  ★ 关键：防止旧 usage 顶回估算值
 ```
@@ -726,7 +726,7 @@ NativeLoop.run()                                              loop.py:137
 ```text
 NativeLoop.run()                                              loop.py:137
  └─ except ContextOverflowError:
-     └─ if await self._reactive_compact(state, already_emitted):   loop.py:380
+     └─ if await self._reactive_compact(state, already_emitted):   loop.py:383
             continue (transition=T_REACTIVE_COMPACT)
          ├─ if self._chat is None or already_emitted → False
          ├─ if state.attempted_reactive_compact >= max_reactive_compacts → False

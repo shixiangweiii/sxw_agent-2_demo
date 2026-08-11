@@ -429,7 +429,7 @@ CREATE TABLE runs (
     terminal_status TEXT,
     terminal_payload_json TEXT,
     pending_input_json TEXT,
-    trace_id TEXT NOT NULL DEFAULT '',
+    trace_id TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     
@@ -560,7 +560,7 @@ CREATE TABLE tool_executions (
     error_json TEXT,
     external_object_id TEXT,
     reconcile_state TEXT,
-    supports_reconcile INTEGER NOT NULL DEFAULT 0,
+    supports_reconcile INTEGER NOT NULL CHECK (supports_reconcile IN (0,1)),
     revision INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
@@ -631,7 +631,7 @@ BEGIN IMMEDIATE
 |---|---|---|
 | 领域模型 | `agent/runtime/domain/models.py` | 所有 Record/Event/State 定义 |
 | 状态枚举 | `agent/runtime/domain/models.py:17-126` | RunStatus/ActivityStatus/EventType 等 |
-| 表结构 | `agent/runtime/adapters/sqlite/migrations/001_runtime.sql` | 完整建表语句 |
+| 表结构 | `agent/runtime/adapters/sqlite/schema.sql` | 完整建表语句（单一当前 schema，无 migration） |
 | 状态机规格 | `docs/reliability/state-machines.md` | 冻结的邻接表与错误码 |
 | Store 接口 | `agent/runtime/ports/store.py` | Protocol 定义 |
 | SQLite 实现 | `agent/runtime/adapters/sqlite/store.py` | 具体实现 |

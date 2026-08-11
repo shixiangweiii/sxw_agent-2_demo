@@ -233,7 +233,7 @@ AdmissionService.create() admission.py:50
 
 ### 3.3 阶段三：SQLite 事务层（原子提交）
 
-**文件**: `agent/runtime/adapters/sqlite/store.py:386-547`
+**文件**: `agent/runtime/adapters/sqlite/store.py:386-548`
 
 ```python
 async def admit(self, command: AdmissionCommand) -> AdmissionResult:
@@ -356,10 +356,11 @@ RETURNING *
 
 ### 3.5 阶段五：RunCoordinator 执行
 
-**文件**: `agent/runtime/application/coordinator.py:74-527`
+**文件**: `agent/runtime/application/coordinator.py:65-443`
 
 ```python
 async def execute_claim(self, claim: Claim, *, worker_id: str) -> RunStatus:
+    """恢复本 Run 的诊断 trace_id，再执行。"""
     with use_trace_id(claim.run.trace_id or claim.run.envelope.run_id):
         return await self._execute_claim(claim, worker_id=worker_id)
 ```
@@ -367,9 +368,9 @@ async def execute_claim(self, claim: Claim, *, worker_id: str) -> RunStatus:
 **调用栈**:
 
 ```text
-RunCoordinator.execute_claim() coordinator.py:74
-├─ use_trace_id()  ← 恢复诊断关联键
-└─ _execute_claim() coordinator.py:86
+RunCoordinator.execute_claim() coordinator.py:65
+├─ use_trace_id()  ← 恢复诊断关联键（Worker 进程没有 TraceMiddleware，需要显式重建 contextvar）
+└─ _execute_claim() coordinator.py:76
    │
    ├─ 1. mark_activity_running()  ← CAS + fencing
    │     UPDATE activities SET state='RUNNING' WHERE state='CLAIMED' AND fencing_token=?
@@ -380,14 +381,13 @@ RunCoordinator.execute_claim() coordinator.py:74
    ├─ 3. 检查 cancel 抢占
    │     └─ marker=None + status=CANCEL_REQUESTED → finalize_failure(CANCELLED)
    │
-   ├─ 4. Release 兼容性检查
-   │     ├─ adapter.release_fingerprint != run.envelope.release_fingerprint
-   │     │   ├─ checkpoint=None → 无法升级 → INCOMPATIBLE_RELEASE
-   │     │   ├─ 有 upgrader → 升级 checkpoint
-   │     │   └─ 无 upgrader → INCOMPATIBLE_RELEASE
-   │     └─ 匹配 → 继续
+   ├─ 4. Release 兼容性检查（本项目不提供 checkpoint 跨 release 升级路径，一律 fail closed）
+   │     └─ adapter.release_fingerprint != run.envelope.release_fingerprint
+   │           → 直接 finalize_failure(INCOMPATIBLE_RELEASE)，此判定不读 checkpoint，
+   │             因此发生在拉取 checkpoint 之前
    │
-   ├─ 5. Deadline 检查
+   ├─ 5. 拉取最新 checkpoint（可能为 None，代表首次执行）
+   │     Deadline 检查：claim/恢复准备可能耗时，进引擎前再校一次
    │     └─ now >= deadline_at → TIMED_OUT
    │
    ├─ 6. compile_history(run_id)  ← 从 committed events 重建对话历史
@@ -407,6 +407,8 @@ RunCoordinator.execute_claim() coordinator.py:74
          ├─ RETRYABLE_FAILURE + attempt<max → schedule_retry
          └─ 其他 → finalize_failure
 ```
+
+> release 不一致曾经支持"从旧 checkpoint 升级到新 release"的路径（`ReleaseCompatibilityRegistry` + `CheckpointUpgrade*`），2026-08-12 的迁移机制清理提交（见 `sxw_aicoding/changelog/2026-08-12_移除migration机制与checkpoint-upgrader.md`）已整体删除：release 不一致时不再尝试升级，直接判 `INCOMPATIBLE_RELEASE`。
 
 ---
 
@@ -478,16 +480,16 @@ class CommittedEventSink(RuntimeIO):
 
 | 功能 | 文件 | 行号 |
 |---|---|---|
-| HTTP 入口 | `agent/runtime/api/runs.py` | 131 |
+| HTTP 入口 | `agent/runtime/api/runs.py` | 131 (装饰器) / 132 (函数) |
 | Pydantic 校验 | `agent/runtime/api/runs.py` | 34-78 |
-| SSE 流 | `agent/runtime/api/runs.py` | 254 |
+| SSE 流 | `agent/runtime/api/runs.py` | 273（`stream_events`；254 是内部 `_sse()` 序列化辅助函数） |
 
 ### 4.2 应用层
 
 | 功能 | 文件 | 行号 |
 |---|---|---|
 | Admission 服务 | `agent/runtime/application/admission.py` | 50 |
-| RunCoordinator | `agent/runtime/application/coordinator.py` | 74 |
+| RunCoordinator | `agent/runtime/application/coordinator.py` | 65（`execute_claim`）/ 76（`_execute_claim`） |
 | CommittedEventSink | `agent/runtime/application/events.py` | 1 |
 | ToolBroker | `agent/runtime/application/tool_broker.py` | 1 |
 
@@ -499,8 +501,8 @@ class CommittedEventSink(RuntimeIO):
 | claim_next | `agent/runtime/adapters/sqlite/store.py` | 721 |
 | mark_activity_running | `agent/runtime/adapters/sqlite/store.py` | 807 |
 | append_events | `agent/runtime/adapters/sqlite/store.py` | 582 |
-| finalize_success | `agent/runtime/adapters/sqlite/store.py` | (搜索) |
-| finalize_failure | `agent/runtime/adapters/sqlite/store.py` | (搜索) |
+| finalize_success | `agent/runtime/adapters/sqlite/store.py` | 973 |
+| finalize_failure | `agent/runtime/adapters/sqlite/store.py` | 1110 |
 
 ### 4.4 Worker 调度
 

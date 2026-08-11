@@ -316,14 +316,14 @@ CreateRun:
 
 | 功能 | 文件 | 行号 |
 |---|---|---|
-| Conversation 表定义 | `agent/runtime/adapters/sqlite/migrations/001_runtime.sql` | 1 |
-| Run 表定义 | `agent/runtime/adapters/sqlite/migrations/001_runtime.sql` | 25 |
-| Activity 表定义 | `agent/runtime/adapters/sqlite/migrations/001_runtime.sql` | 77 |
-| 活跃 Run 唯一约束 | `agent/runtime/adapters/sqlite/migrations/001_runtime.sql` | 63 |
-| Conversation 创建逻辑 | `agent/runtime/adapters/sqlite/store.py` | 427 |
-| Run 创建逻辑 | `agent/runtime/adapters/sqlite/store.py` | 458 |
-| Activity 创建逻辑 | `agent/runtime/adapters/sqlite/store.py` | 476 |
-| CONVERSATION_BUSY 错误 | `agent/runtime/adapters/sqlite/store.py` | 541 |
+| Conversation 表定义 | `agent/runtime/adapters/sqlite/schema.sql` | 10 |
+| Run 表定义 | `agent/runtime/adapters/sqlite/schema.sql` | 34 |
+| Activity 表定义 | `agent/runtime/adapters/sqlite/schema.sql` | 87 |
+| 活跃 Run 唯一约束 | `agent/runtime/adapters/sqlite/schema.sql` | 73 |
+| Conversation 创建逻辑（`admit()` 内） | `agent/runtime/adapters/sqlite/store.py` | 435 |
+| Run 创建逻辑（`admit()` 内） | `agent/runtime/adapters/sqlite/store.py` | 459 |
+| Activity 创建逻辑（`admit()` 内） | `agent/runtime/adapters/sqlite/store.py` | 478 |
+| CONVERSATION_BUSY 错误 | `agent/runtime/adapters/sqlite/store.py` | 543 |
 
 ---
 

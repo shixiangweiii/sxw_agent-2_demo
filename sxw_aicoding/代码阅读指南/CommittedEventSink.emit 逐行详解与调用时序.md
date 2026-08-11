@@ -76,7 +76,7 @@ class RuntimeIO(Protocol):
 
 ### 2.2 绑定位置
 
-`agent/runtime/application/coordinator.py:329`：
+`agent/runtime/application/coordinator.py:241`：
 
 ```python
 io = CommittedEventSink(
@@ -91,7 +91,7 @@ io = CommittedEventSink(
 )
 ```
 
-随后在 377 行传入适配器：
+随后在 289 行传入适配器：
 
 ```python
 outcome = await adapter.execute(request, io)
@@ -440,8 +440,8 @@ Worker 领取 Activity 时获得 `fencing_token`，后续所有事件写入都�
 | `emit_text` 方法 | `agent/runtime/application/events.py` | 180 |
 | `_flush_locked` 方法 | `agent/runtime/application/events.py` | 222 |
 | `_flush_after_delay` 方法 | `agent/runtime/application/events.py` | 211 |
-| `CommittedEventSink` 实例化 | `agent/runtime/application/coordinator.py` | 329 |
-| `adapter.execute(request, io)` 调用 | `agent/runtime/application/coordinator.py` | 377 |
+| `CommittedEventSink` 实例化 | `agent/runtime/application/coordinator.py` | 241 |
+| `adapter.execute(request, io)` 调用 | `agent/runtime/application/coordinator.py` | 289 |
 | `io.emit(event.event, event.data)` 调用 | `agent/runtime/adapters/legacy_engines.py` | 168 |
 | `_EVENT_MAP` 事件映射 | `agent/runtime/application/events.py` | 18 |
 | `_TRACED_EVENTS` 诊断事件集合 | `agent/runtime/application/events.py` | 28 |
