@@ -280,7 +280,7 @@ class NativeLlmClient:
 
         # AsyncStream 实测**没有 __del__**：客户端断开导致 CancelledError 穿过这里时，
         # 不显式关闭底层 HTTP 响应就不会归还给连接池。async with 保证任何退出路径都关。
-        async with await self._client.chat.completions.create(**payload) as stream: # ① OpenAI SSE 流
+        async with await self._client.chat.completions.create(**payload) as stream: # ① OpenAI SSE 流，真正发起模型调用
             async for chunk in stream:
                 chunk_usage = getattr(chunk, "usage", None)
                 if chunk_usage is not None:
@@ -305,7 +305,7 @@ class NativeLlmClient:
                 for raw in getattr(delta, "tool_calls", None) or []: # ③ tool_calls 分片
                     index = getattr(raw, "index", None)
                     function = getattr(raw, "function", None)
-                    accumulator.add(
+                    accumulator.add( # 交给 _ToolCallAccumulator.add
                         0 if index is None else int(index),
                         getattr(raw, "id", None), # 首片有，后续片为空
                         getattr(function, "name", None) if function else None,  # 首片有，后续片为空
