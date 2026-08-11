@@ -5,21 +5,14 @@ from collections.abc import Mapping
 from typing import Any
 
 from agent.runtime.application.events import CommittedEventSink
-from agent.runtime.application.release_compatibility import ReleaseCompatibilityRegistry
 from agent.runtime.domain.errors import RuntimeFault
 from agent.runtime.domain.models import (
-    SCHEMA_VERSION,
     EngineOutcome,
     EngineOutcomeKind,
     RunStatus,
 )
 from agent.runtime.ports.clock import Clock, RandomSource, SystemClock, SystemRandomSource
 from agent.runtime.ports.engine import EngineAdapter, EngineRunRequest
-from agent.runtime.ports.release_compatibility import (
-    CheckpointUpgradeKey,
-    CheckpointUpgradeRequest,
-    CheckpointUpgradeResult,
-)
 from agent.runtime.ports.store import Claim, RuntimeStore
 from agent.runtime.ports.tool import (
     RECONCILIATION_MARKER_KIND,
@@ -58,7 +51,6 @@ class RunCoordinator:
         event_flush_ms: int = 100,
         event_flush_bytes: int = 2048,
         max_model_attempts: int = 2,
-        release_compatibility: ReleaseCompatibilityRegistry | None = None,
         tool_reconciler: ToolReconciliationExecutor | None = None,
     ) -> None:
         self.store = store
@@ -68,7 +60,6 @@ class RunCoordinator:
         self.event_flush_ms = event_flush_ms
         self.event_flush_bytes = event_flush_bytes
         self.max_model_attempts = max_model_attempts
-        self.release_compatibility = release_compatibility or ReleaseCompatibilityRegistry()
         self.tool_reconciler = tool_reconciler
 
     async def execute_claim(self, claim: Claim, *, worker_id: str) -> RunStatus:
@@ -193,109 +184,30 @@ class RunCoordinator:
             )
             return settled.status
         # 以下进入正常的引擎执行路径。
-        # 第 4 步：按 Run 声明的 engine 名字取出适配器，并拉出最新一份 checkpoint
-        # （可能为 None，说明是首次执行而不是恢复）。
+        # 第 4 步：按 Run 声明的 engine 名字取出适配器。
         adapter = self.registry.get(run.envelope.engine)
-        checkpoint = await self.store.latest_checkpoint(run.envelope.run_id)
-        # 分支 4：Worker 当前 release 与 Run 生效的 release 不一致（典型场景：代码升级
-        # 重启 Worker 后，要接手一个旧版本留下的未终态 Run）。
-        # incompatibility 充当一个"为何不能接手"的累积原因：全程只要被赋值过，
-        # 最后就把 Run 判为 INCOMPATIBLE_RELEASE；保持 None 才能继续往下跑。
+        # 分支 4：Worker 当前 release 与 Run 冻结的 release 不一致（典型场景：代码升级
+        # 重启 Worker 后，要接手一个旧版本留下的未终态 Run）。本项目不提供 checkpoint
+        # 跨 release 升级路径，此处一律 fail closed。INCOMPATIBLE_RELEASE 是一个独立
+        # 终态，与普通 FAILED 区分开，便于运维识别版本问题。
+        # 该判定不需要 checkpoint，因此放在加载 checkpoint 之前。
         if adapter.release_fingerprint != run.envelope.release_fingerprint:
-            incompatibility: str | None = None
-            # 子分支 4a：根本没有 checkpoint 可升级。没有状态基准就无法证明新 release
-            # 能安全接续，直接判不兼容。
-            if checkpoint is None:
-                incompatibility = "release mismatch has no committed checkpoint to upgrade"
-            # 子分支 4b：checkpoint 自带的 release 跟 Run 生效 release 对不上。升级必须从
-            # 确定的起点出发，起点本身就不一致时只能 fail closed。
-            elif checkpoint.release_fingerprint != run.envelope.release_fingerprint:
-                incompatibility = "latest checkpoint release does not match the Run effective release"
-            else:
-                # 起点干净，尝试找一个从（旧 release + 旧 schema）到（新 release + 新 schema）
-                # 的精确升级器。四个字段全部参与匹配，不做模糊降级。
-                key = CheckpointUpgradeKey(
-                    engine=run.envelope.engine,
-                    from_release_fingerprint=run.envelope.release_fingerprint,
-                    from_schema_version=checkpoint.schema_version,
-                    to_release_fingerprint=adapter.release_fingerprint,
-                    to_schema_version=SCHEMA_VERSION,
-                )
-                upgrader = self.release_compatibility.get(key)
-                # 子分支 4c：没注册对应升级器。不猜、不自动迁移，判不兼容。
-                if upgrader is None:
-                    incompatibility = "no exact checkpoint upgrader is registered"
-                else:
-                    try:
-                        # Explicitly outside every Store transaction.  The port is
-                        # synchronous to exclude awaitable model/tool/network work.
-                        # 传入 deep copy，避免升级器就地改动这份已提交的 checkpoint。
-                        upgraded = upgrader.upgrade(CheckpointUpgradeRequest(
-                            key=key,
-                            checkpoint=checkpoint.model_copy(deep=True),
-                        ))
-                        # 子分支 4d：升级器返回了非约定类型。主动抛错让外层 except 接住，
-                        # 把它当成升级失败，不允许脏数据继续往下流。
-                        if not isinstance(upgraded, CheckpointUpgradeResult):
-                            raise TypeError("upgrader returned an invalid result type")
-                    except Exception as exc:
-                        # 升级器自身抛任何异常都视为不兼容（fail closed），而不是重试。
-                        incompatibility = f"checkpoint upgrader failed closed: {type(exc).__name__}"
-                    else:
-                        try:
-                            # 升级结果必须先以新 checkpoint 的形式落库（带 revision CAS），
-                            # 之后引擎才能在新 release 下恢复。
-                            checkpoint = await self.store.publish_checkpoint_upgrade(
-                                run_id=run.envelope.run_id,
-                                activity_id=activity.activity_id,
-                                fencing_token=activity.fencing_token,
-                                source_checkpoint_id=checkpoint.checkpoint_id,
-                                expected_revision=checkpoint.revision,
-                                from_release_fingerprint=key.from_release_fingerprint,
-                                from_schema_version=key.from_schema_version,
-                                to_release_fingerprint=key.to_release_fingerprint,
-                                to_schema_version=key.to_schema_version,
-                                working_state=upgraded.working_state,
-                                engine_state=upgraded.engine_state,
-                                engine_state_ref=upgraded.engine_state_ref,
-                                now_ms=self.clock.now_ms(),
-                            )
-                        except RuntimeFault as exc:
-                            # A lost fence or checkpoint CAS is ownership loss, not
-                            # evidence that this Run is incompatible.  The stale
-                            # worker must never be allowed to terminalize it.
-                            # 子分支 4e：必须区分两类失败。丢 fence / CAS 冲突意味着"我已不再
-                            # 拥有这个 Run"，必须原样抛出去，绝不能由陈旧 Worker 把 Run 判终态；
-                            # 其余错误才是真的升级失败，计入 incompatibility。
-                            if exc.code in {
-                                "STALE_FENCING_TOKEN",
-                                "CHECKPOINT_REVISION_CONFLICT",
-                            }:
-                                raise
-                            incompatibility = (
-                                f"checkpoint upgrade publication failed closed: {exc.code}"
-                            )
-                        else:
-                            # 升级已落库，Run 的生效 release 等字段被改写了，
-                            # 重读一次以免后续拿到陈旧的 envelope。
-                            run = await self.store.get_run(run.envelope.run_id)
-            # 子分支 4f：上面任何一条路径写了原因，就把 Run 终止为 INCOMPATIBLE_RELEASE。
-            # 注意这是一个独立的终态，与普通 FAILED 区分开，便于运维识别版本问题。
-            if incompatibility is not None:
-                terminal = await self.store.finalize_failure(
-                    run_id=run.envelope.run_id,
-                    activity_id=activity.activity_id,
-                    fencing_token=activity.fencing_token,
-                    code="INCOMPATIBLE_RELEASE",
-                    message=(
-                        f"Run release {run.envelope.release_fingerprint} cannot be resumed by "
-                        f"worker release {adapter.release_fingerprint}: {incompatibility}"
-                    ),
-                    terminal_status=RunStatus.INCOMPATIBLE_RELEASE,
-                    now_ms=self.clock.now_ms(),
-                )
-                return terminal.status
-        # 分支 5：升级判定可能消耗了不少时间，所以在真正进引擎前再校一次 deadline。
+            terminal = await self.store.finalize_failure(
+                run_id=run.envelope.run_id,
+                activity_id=activity.activity_id,
+                fencing_token=activity.fencing_token,
+                code="INCOMPATIBLE_RELEASE",
+                message=(
+                    f"Run release {run.envelope.release_fingerprint} cannot be resumed by "
+                    f"worker release {adapter.release_fingerprint}"
+                ),
+                terminal_status=RunStatus.INCOMPATIBLE_RELEASE,
+                now_ms=self.clock.now_ms(),
+            )
+            return terminal.status
+        # 拉出最新一份 checkpoint（可能为 None，说明是首次执行而不是恢复）。
+        checkpoint = await self.store.latest_checkpoint(run.envelope.run_id)
+        # 分支 5：认领和恢复准备可能消耗了不少时间，所以在真正进引擎前再校一次 deadline。
         # 宁可在这里直接超时结束，也不要发起一个注定超时的模型调用。
         if self.clock.now_ms() >= run.envelope.deadline_at:
             terminal = await self.store.finalize_failure(

@@ -1,3 +1,12 @@
+-- The single current Runtime schema.  This project does not migrate databases:
+-- a mismatching local database must be deleted and recreated by the operator.
+CREATE TABLE schema_meta (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    schema_version TEXT NOT NULL,
+    schema_checksum TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+) STRICT;
+
 CREATE TABLE conversations (
     conversation_id TEXT PRIMARY KEY,
     principal_id TEXT NOT NULL,
@@ -53,6 +62,7 @@ CREATE TABLE runs (
     )),
     terminal_payload_json TEXT,
     pending_input_json TEXT,
+    trace_id TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     CHECK ((terminal_status IS NULL) = (terminal_payload_json IS NULL)),
@@ -162,6 +172,7 @@ CREATE TABLE tool_executions (
     effect_class TEXT NOT NULL CHECK (effect_class IN (
       'READ_ONLY','IDEMPOTENT_EFFECT','NON_IDEMPOTENT_EFFECT','UNKNOWN_EFFECT'
     )),
+    supports_reconcile INTEGER NOT NULL CHECK (supports_reconcile IN (0,1)),
     effect_status TEXT NOT NULL CHECK (effect_status IN (
       'PREPARED','DISPATCHED','COMMITTED','FAILED','UNKNOWN','RECONCILING','MANUAL_REQUIRED'
     )),

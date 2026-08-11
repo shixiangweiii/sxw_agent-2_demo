@@ -77,9 +77,9 @@ API 与 Worker 当前共享本机 `runtime.db` 和 Artifact CAS。这是实现�
 | `local_storage/demo_effects/effects.db` | 模拟外部副作用，故意独立 |
 | `local_storage/traces/` | 诊断，不是业务事实 |
 
-Runtime/RAG 当前仍使用 `aiosqlite + 显式 SQL +` 遗留 checksum migration。该机制是待独立移除的历史代码，不要求立刻大改，但从现在起不得新增增量 migration；目标是单一的当前 schema 初始化与版本/checksum 校验。数据库仅支持当前 schema：schema 或 checksum 不匹配时必须 fail-fast，并提示用户显式删除或重建对应本地数据库；程序不得静默删除、覆盖或自动迁移旧数据库。Runtime 连接启用 WAL、`synchronous=FULL`、foreign keys、busy timeout；不引入 ORM/Alembic 或第二 backend。
+Runtime/RAG 使用 `aiosqlite + 显式 SQL`，各有一份当前 schema 文件（`agent/runtime/adapters/sqlite/schema.sql`、`arag/persistence/schema.sql`），没有 migration 机制也没有 `ALTER` 路径。启动时 `common/sqlite_schema.py` 的 `ensure_current_schema` 在单个 `BEGIN IMMEDIATE` 内建库或校验 `schema_meta` 的 version + checksum。数据库仅支持当前 schema：不匹配必须 fail-fast，并提示用户显式删除或重建对应本地数据库；程序不得静默删除、覆盖或自动迁移旧数据库。Runtime 连接启用 WAL、`synchronous=FULL`、foreign keys、busy timeout；不引入 ORM/Alembic 或第二 backend。
 
-数据库跨版本升级、滚动发布期间的 schema 兼容和旧数据保留不在本项目范围内。后续通过独立、可验证的重构移除遗留 migration。分布式需求确实需要调整存储或协调架构时，先明确依赖，再通过 ADR、current schema、版本/checksum 和 reliability test 完整替换；不得临时增加第二事实源或退回进程内状态。
+数据库跨版本升级、滚动发布期间的 schema 兼容和旧数据保留不在本项目范围内：要换 schema 就删库重建，也不存在 checkpoint 升级路径。分布式需求确实需要调整存储或协调架构时，先明确依赖，再通过 ADR、current schema 和 reliability test 完整替换；不得临时增加第二事实源或退回进程内状态。
 
 Artifact ID 等于 SHA-256；写入为 temp/fsync/atomic rename/fsync dir，再提交 metadata/ref。非图片附件只给模型已校验的 8KiB preview，`read_artifact` 有界读取默认 32KiB/最大 64KiB；图片从已校验 CAS 物化为 attempt-local 多模态 Part。HTTP Range 单次 1MiB。大结果/read 切片只存 Artifact ref/preview，native 恢复时重新物化。
 
@@ -147,21 +147,21 @@ bash eval/run_eval.sh
 
 `run_all.sh` 必须等待本次 Worker 的新鲜 `ACTIVE` heartbeat，且 release map 与三个 active pointers 完全一致后才能启动 API；不能用旧库中已有的三行 pointer 充当 readiness。脚本保持 macOS Bash 3.2 兼容，并监督全部五个进程。
 
-`scripts/check.sh` 执行 py_compile、`pytest tests/reliability`、schema/checksum 和旧协议扫描。遗留 migration 尚未移除前，其既有 checksum 检查仍是当前门禁的一部分；不得新增迁移。可靠性 PASS 不依赖真实 LLM；smoke/eval 依赖真实 Key，行为得分不能替代可靠性门禁。
+`scripts/check.sh` 执行 py_compile、`pytest tests/reliability`、schema identity 和旧协议扫描。可靠性 PASS 不依赖真实 LLM；smoke/eval 依赖真实 Key，行为得分不能替代可靠性门禁。
 
 门禁里有四条会**静默挂掉**的硬约束，动手前先确认：
 
 - REL/FI 编号在 `check.sh` 里钉死为 `REL-001..030`、`FI-01..12`，且每行必须至少引用一个真实存在的 pytest 节点。新增可靠性测试要挂到**既有编号行**，自造 `REL-031` 会直接失败。
 - 旧协议扫描覆盖 `agent/`、`arag/`、`web/`、`eval/harness/` 与六份根文档的 `.py/.js/.html/.md/.example`，命中任一条已废弃协议/权威的字面量即失败（正则表见 `scripts/check.sh` 末段的 `patterns`：已删除的 chat 端点、启动期引擎选择、旧流结束事件、旧历史/引用/会话所有者）。写前端、注释和文档时最容易误触——**连"说明不要用它"的那句话本身也会被扫到**，要描述就指向 `check.sh`，别把字面量抄进来。
 - `docs/reliability/schemas/` 六份 v1 Schema 是冻结契约且 `additionalProperties: false`，并由 `test_schema_contracts.py` 校验**真实权威对象**的 `model_dump`。给 `RuntimeEnvelope`/`CanonicalEvent`/`WorkingState` 等加字段必须同步 Schema 与 ADR；纯诊断字段应挂在契约之外（例如 `RunRecord.trace_id`，见 ADR-0007）。
-- SQLite 的增量 migration（`agent/runtime/adapters/sqlite/migrations/`）是待移除的历史实现。不得新增 `00N_*.sql` 或依赖它升级旧库；在其移除前，既有 checksum 验证仍须通过。schema/checksum 不匹配的本地数据库必须由用户显式删除或重建，程序不得自动处理；测试需要干净库时用 `tmp_path`。
+- SQLite 只有单一当前 schema，改表就直接改 `schema.sql`，不得重新引入增量 migration。改动会让已有本地库的 checksum 失配并 fail-fast，这是预期行为：必须由用户显式删除或重建，程序不得自动处理；测试需要干净库时用 `tmp_path`。
 
 ## 改动要求
 
 - 设计先按集群化部署检查共享状态归属、跨节点协调、一致性、幂等、故障恢复和扩缩容；缺少必要中间件时先提出并讨论。
 - 代码和抽象保持直白：优先线性流程而不是模式堆砌，同时控制函数复杂度、封装稳定职责、消除实质重复，只做合适层次的必要抽象；项目自有类只允许 `Base -> Sub` 两层继承。
 - 未触及的历史代码不强制改造；新增或实质修改的代码路径必须遵守本规则。不要为了顺手清理而扩大范围；每次小步重构必须独立正确、可测试。
-- 改状态机/事务/契约：先读 `docs/reliability/`，同步 ADR、current schema/版本/checksum 和 reliability test；禁止新增增量 migration。
+- 改状态机/事务/契约：先读 `docs/reliability/`，同步 ADR、current schema 和 reliability test；禁止新增增量 migration。
 - 改架构、API、配置、端口、能力边界或 eval：同步 `README.md`、`RUNBOOK.md`、`AGENTS.md`、本文件、`eval/README.md`、`.env.example`。
 - 新 Tool 必须注册 effect manifest；新 native 只读 Tool 还要显式并发安全。
 - 新 Claude SKILL 包含根 `SKILL.md`、frontmatter 和全部资源；默认不并行、effect unknown。

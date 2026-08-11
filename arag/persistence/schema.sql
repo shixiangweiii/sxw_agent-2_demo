@@ -1,24 +1,12 @@
-"""Checksum-verified explicit SQL migrations for ``rag.db``."""
-from __future__ import annotations
+-- The single current ARAG schema.  This project does not migrate databases:
+-- a mismatching local database must be deleted and recreated by the operator.
+CREATE TABLE schema_meta (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    schema_version TEXT NOT NULL,
+    schema_checksum TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
 
-import hashlib
-from dataclasses import dataclass
-
-
-@dataclass(frozen=True, slots=True)
-class Migration:
-    version: int
-    sql: str
-
-    @property
-    def checksum(self) -> str:
-        return hashlib.sha256(self.sql.encode("utf-8")).hexdigest()
-
-
-MIGRATIONS: tuple[Migration, ...] = (
-    Migration(
-        1,
-        """
 CREATE TABLE documents (
     document_id TEXT PRIMARY KEY,
     dataset_id TEXT NOT NULL,
@@ -97,9 +85,3 @@ CREATE TRIGGER chunks_no_update
 BEFORE UPDATE ON chunks BEGIN
     SELECT RAISE(ABORT, 'chunks are immutable');
 END;
-""".strip(),
-    ),
-)
-
-
-LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version

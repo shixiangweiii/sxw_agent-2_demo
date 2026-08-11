@@ -36,7 +36,7 @@
 | [ADR-0002：流式提交](adr/0002-streaming-commit.md) | committed delta、聚合、flush 和 SSE 发布顺序 |
 | [ADR-0003：SQLite 权威](adr/0003-sqlite-authority.md) | SQLite 事实范围、PRAGMA、并发和 fail-fast 原则 |
 | [ADR-0004：引擎恢复等级](adr/0004-engine-recovery.md) | Engine Adapter 契约和三代引擎的恢复粒度 |
-| [ADR-0005：Release/Schema 兼容](adr/0005-release-compatibility.md) | 不可变 release、migration checksum 和恢复兼容裁决 |
+| [ADR-0005：Release/Schema 兼容](adr/0005-release-compatibility.md) | 不可变 release、schema identity 校验和恢复兼容裁决 |
 | [ADR-0006：权威序列化边界](adr/0006-authority-serialization-contracts.md) | 真实 model/Broker 形状、compact UUID 与 epoch/RFC3339 边界 |
 | [ADR-0007：跨进程 trace 关联](adr/0007-cross-process-trace-correlation.md) | `runs.trace_id` 承载入口轨迹键，Worker 侧恢复绑定，冻结 envelope 不变 |
 | [`schemas/`](schemas/) | RuntimeEnvelope、Canonical Event、WorkingState、ToolResult、Artifact、Evidence JSON Schema v1 |

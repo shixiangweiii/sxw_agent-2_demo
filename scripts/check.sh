@@ -42,22 +42,23 @@ from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 
 from agent.runtime.adapters.sqlite import RuntimeDatabase
-from arag.persistence.migrations import LATEST_SCHEMA_VERSION
 from arag.persistence.repository import RagRepository
 
 
 async def main(root: Path) -> None:
+    # The first pass creates the current schema; the second one takes the
+    # identity verification branch instead of touching the database again.
     runtime = RuntimeDatabase(root / "runtime" / "runtime.db")
-    await runtime.migrate()
-    await runtime.verify()
-    # A second pass exercises recorded migration checksums rather than only creation.
-    await runtime.verify()
+    await runtime.ensure_schema()
+    await runtime.ensure_schema()
+    async with runtime.read() as conn:
+        row = await (await conn.execute("PRAGMA integrity_check")).fetchone()
+        if row is None or row[0] != "ok":
+            raise RuntimeError("runtime.db integrity_check failed")
 
     rag = RagRepository(root / "arag" / "rag.db", root / "arag")
     await rag.initialize()
     await rag.initialize()
-    if await rag.schema_version() != LATEST_SCHEMA_VERSION:
-        raise RuntimeError("rag.db did not reach the latest schema version")
     with sqlite3.connect(root / "arag" / "rag.db") as conn:
         if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise RuntimeError("rag.db integrity_check failed")

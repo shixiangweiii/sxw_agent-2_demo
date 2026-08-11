@@ -17,7 +17,7 @@
 
 ## 决策
 
-1. `runs` 新增 `trace_id` 列（migration `003_run_trace_id.sql`，`NOT NULL DEFAULT ''`），承载 admission 时观察到的 `x-trace-id`。
+1. `runs.trace_id`（`NOT NULL`，属于当前 schema `agent/runtime/adapters/sqlite/schema.sql`）承载 admission 时观察到的 `x-trace-id`。
 2. 该字段**不进入 `RuntimeEnvelope`**。`runtime-envelope-v1` 是 R0 冻结的入口身份契约，而 trace 只诊断；诊断字段挂在 `RunRecord` 上，与 `status`/`input_text` 同层，冻结的六份 Schema 一字不改。
 3. 该字段**不参与 `request_digest`**。否则同一请求换个 `trace_id` 重放会被误判成 409 digest 冲突，破坏幂等语义。
 4. `RunCoordinator.execute_claim` 在执行前用 `common.obs.use_trace_id` 绑定 `run.trace_id`，缺失时回落 `run_id`，保证每个 Run 始终有唯一且可查的轨迹键。

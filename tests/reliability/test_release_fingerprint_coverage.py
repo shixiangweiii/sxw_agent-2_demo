@@ -77,7 +77,7 @@ def test_release_registry_covers_engine_and_recoverable_shared_semantics(
         "agent/runtime/adapters/brokered_tools.py",
         "agent/runtime/adapters/releases.py",
         "agent/runtime/adapters/sqlite/store.py",
-        "agent/runtime/adapters/sqlite/migrations/001_runtime.sql",
+        "agent/runtime/adapters/sqlite/schema.sql",
         "agent/runtime/worker/dispatcher.py",
     } <= runtime
 

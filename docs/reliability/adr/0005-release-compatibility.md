@@ -33,50 +33,34 @@ manifest 按字段排序、UTF-8、无多余空白的规范 JSON 计算 SHA-256 
 
 ### 2. Admission freeze
 
-CreateRun 必须找到请求 engine 的 active release，否则返回 `503 NO_ACTIVE_RELEASE`，不创建 Run。Admission 将 release fingerprint 写入 RuntimeEnvelope、Run、首 checkpoint/event；运行中 active pointer 变化不影响该 Run。唯一例外是下述显式 checkpoint upgrade：它不是 active pointer 自动覆盖，而是由精确注册的 upgrader 和 fenced/CAS 事务将该 Run 的**有效 release**从已知源版本切到已知目标版本。
+CreateRun 必须找到请求 engine 的 active release，否则返回 `503 NO_ACTIVE_RELEASE`，不创建 Run。Admission 将 release fingerprint 写入 RuntimeEnvelope、Run、首 checkpoint/event。`runs.release_fingerprint` 自 admission 起不可变，与 `engine` 同级冻结：运行中 active pointer 变化不影响该 Run，也没有任何代码路径改写它。
 
 ### 3. Resume matrix
 
 | Run/checkpoint 与 Worker | 结论 |
 |---|---|
 | fingerprint/schema 完全一致 | 继续执行 |
-| schema/release 不同，但存在显式、版本对版本的已测试 checkpoint upgrader | 先原子追加升级后的 checkpoint，再继续；保留旧 checkpoint |
-| 不同且无 upgrader | Coordinator 提交 `INCOMPATIBLE_RELEASE` terminal |
-| DB migration 含未知新版本或 checksum 改写 | API/Worker 启动 fail-fast，不领取 Run |
+| 任何不一致 | Coordinator 提交 `INCOMPATIBLE_RELEASE` terminal |
+| DB schema identity 不符（version/checksum 不匹配或缺失 `schema_meta`） | API/Worker 启动 fail-fast，不领取 Run |
 | manifest fingerprint 相同但规范内容不同 | 启动 fail-fast，视为 release registry corruption |
 
 禁止 silently best-effort 解析未知字段、把 active release 覆盖到已有 Run，或用新 Prompt/Tool catalog 重放旧 stable tool slot。
 
-### 4. 显式 checkpoint upgrader 协议
+### 4. 不提供 checkpoint 升级路径
 
-upgrader 只能按以下完整 key 精确注册，不做通配、猜测、自动串链或传递闭包：
+数据库跨版本升级和滚动发布期间的 schema 兼容不在本项目范围内，因此**不存在** checkpoint upgrader：没有升级注册表、没有转换端口，也没有切换 Run 有效 release 的事务。release 不一致时 Coordinator 只有一个结论，即 `INCOMPATIBLE_RELEASE`。
 
-```text
-(engine, from_release, from_schema, to_release, to_schema)
-```
+这个判定不读 checkpoint，因此发生在加载 checkpoint 之前。它仍受 Activity lease/fencing token 保护：陈旧 Worker 无法把 Run 裁决为终态。
 
-Coordinator 只把该 Run 的最新 committed checkpoint 交给 upgrader，且 checkpoint 的 `release_fingerprint/schema_version` 必须与 key 和 Run 当前有效 release 完全一致。没有 checkpoint、没有精确 key、转换异常或转换结果不符合目标 release 时，一律 fail closed 为 `INCOMPATIBLE_RELEASE`。
-
-转换端口是同步纯函数：不得读写数据库/文件、调用模型/Tool/网络或依赖进程临时状态。转换发生在 SQLite 事务外。Store 发布转换结果时使用一个短 `BEGIN IMMEDIATE` 事务，并在同一事务内完成：
-
-1. 校验当前 Activity lease/fencing token；
-2. 用 checkpoint id + revision + source release/schema 重新验证它仍是最新 checkpoint；
-3. 校验目标 release manifest 已注册、engine 一致、manifest schema 与目标 checkpoint schema 一致；
-4. 追加新 revision 的 checkpoint，保留旧 checkpoint；
-5. 将 Run 有效 release 切换为目标 release；
-6. 追加带 source/target release、schema、checkpoint revision 的 `CHECKPOINT_COMMITTED` upgrade 审计事件。
-
-任一步失败全部回滚。旧 fencing token 或 checkpoint revision CAS 冲突只表示当前 Worker 已失去写所有权，必须拒绝该 Worker 的升级；不能由 stale Worker 把 Run 裁决为 incompatible。
-
-Admission 时返回的 RuntimeEnvelope 值对象仍是不可变快照；显式升级事务后，从 Store 重新读取的 Run envelope 会显示新的有效 release。除这一经过审计的字段切换外，admission envelope 字段不变；旧 checkpoint/event 继续保留原 release，从而完整记录解释边界。
+Admission 时返回的 RuntimeEnvelope 值对象是不可变快照，且没有任何代码路径改写 `runs.release_fingerprint`；旧 checkpoint/event 永远保留其原始 release，完整记录解释边界。
 
 ### 5. 无历史迁移的准确含义
 
-R4 可以停服并清理旧 `local_storage`，初始化新 runtime/rag schema，不迁移旧 Session、embedding 或 History。这不等于忽略新 Runtime 内已 accepted Run 的兼容性。要升级开发 schema，可以显式清空整个本地新库；只要库保留，就必须遵守 migration checksum 和 Run release freeze。
+可以随时停服、删除整个 `local_storage`、用当前 schema 重新初始化 runtime/rag 库，不迁移任何旧数据。这不等于忽略新 Runtime 内已 accepted Run 的兼容性：只要库保留，就必须遵守 schema identity 校验和 Run release freeze。要换 schema，就删库重建，程序不会替你迁移。
 
 ## Consequences
 
 - 可重复演示和故障恢复拥有明确代码/Prompt/Tool 解释边界。
 - 开发期不背旧格式兼容包袱，但不能静默误解释仍存在的 durable Run。
 - Worker 启动注册 release 成为 API admission 前置条件。
-- upgrader 是逐版本显式代码与可靠性测试资产；发布新 codec 时若不提供精确 upgrader，旧 active Run 会明确终止为 incompatible，而不会自动迁移。
+- 发布新 codec 时，旧 active Run 会明确终止为 `INCOMPATIBLE_RELEASE`，不会被自动迁移或猜测解释。开发期要避免这个终态，就在没有未终态 Run 时再升级代码。

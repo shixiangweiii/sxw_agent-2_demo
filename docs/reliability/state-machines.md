@@ -36,7 +36,7 @@ REJECTED | INCOMPATIBLE_RELEASE
 | `DISPATCH_PENDING` | `CANCELLED` | cancel CAS 先提交，且无 unresolved effect |
 | `DISPATCH_PENDING` | `CANCEL_REQUESTED` | cancel CAS 先提交，但已有 `DISPATCHED/UNKNOWN/RECONCILING/MANUAL_REQUIRED` effect；不得直接宣称无副作用取消 |
 | `DISPATCH_PENDING` | `TIMED_OUT` | deadline 到且无 unresolved effect |
-| `DISPATCH_PENDING` | `INCOMPATIBLE_RELEASE` | Worker release 与冻结 release/schema 不匹配，且无显式 upgrader |
+| `DISPATCH_PENDING` | `INCOMPATIBLE_RELEASE` | Worker release 与冻结 release/schema 不匹配 |
 | `RUNNING` | `WAITING_RETRY` | Outcome 为 retryable，attempt 未耗尽；已创建唯一 retry timer |
 | `RUNNING` | `WAITING_INPUT` | Outcome 为 `WAITING_INPUT`/`INTERRUPT`；pending input 已 checkpoint，Activity 不占 lease |
 | `RUNNING` | `CANCEL_REQUESTED` | cancel CAS 先提交，且存在正在执行或 `DISPATCHED/UNKNOWN/RECONCILING/MANUAL_REQUIRED` effect，必须等待安全边界/reconcile |
@@ -269,6 +269,6 @@ Canonical Event committed → AVAILABLE
 | `SIGNAL_REPLAY_MISMATCH` | 409 | 同 signal_id 的规范化 digest 不同 |
 | `SIGNAL_REJECTED_LATE` | 409 | terminal Run 的 signal；仍写 `REJECTED_LATE` 审计行 |
 | `TIMER_ALREADY_FIRED` | 内部幂等成功 | timer CAS 已由其他执行者完成 |
-| `RELEASE_INCOMPATIBLE` | terminal | 冻结 release/schema 无 upgrader，Run 收口 `INCOMPATIBLE_RELEASE` |
+| `RELEASE_INCOMPATIBLE` | terminal | 冻结 release/schema 与 Worker 不一致，Run 收口 `INCOMPATIBLE_RELEASE` |
 
 未知或未列出的迁移一律 fail closed，不通过日志警告后继续。

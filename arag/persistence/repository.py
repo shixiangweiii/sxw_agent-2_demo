@@ -18,7 +18,6 @@ from typing import Any
 
 import aiosqlite
 
-from arag.persistence.migrations import LATEST_SCHEMA_VERSION, MIGRATIONS
 from arag.persistence.models import (
     DocumentVersion,
     IndexJob,
@@ -28,6 +27,10 @@ from arag.persistence.models import (
     SubmittedDocument,
 )
 from arag.store.base import Chunk
+from common.sqlite_schema import SchemaIdentityError, ensure_current_schema
+
+# ARAG owns its schema version; it deliberately does not import from ``agent``.
+SCHEMA_VERSION = "1"
 
 
 class RagPersistenceError(RuntimeError):
@@ -85,51 +88,23 @@ class RagRepository:
             await conn.close()
 
     async def initialize(self) -> None:
-        async with self.connection() as conn:
-            await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS schema_migrations (
-                    version INTEGER PRIMARY KEY,
-                    checksum TEXT NOT NULL,
-                    applied_at INTEGER NOT NULL
-                )
-                """
-            )
-            await conn.commit()
-            rows = await self._fetchall(
-                conn, "SELECT version, checksum FROM schema_migrations ORDER BY version"
-            )
-            applied = {int(row["version"]): str(row["checksum"]) for row in rows}
-            if applied and max(applied) > LATEST_SCHEMA_VERSION:
-                raise RagSchemaError(
-                    f"rag.db schema {max(applied)} is newer than supported {LATEST_SCHEMA_VERSION}"
-                )
-            known = {migration.version: migration for migration in MIGRATIONS}
-            for version, checksum in applied.items():
-                migration = known.get(version)
-                if migration is None or migration.checksum != checksum:
-                    raise RagSchemaError(f"migration checksum mismatch at version {version}")
-            for migration in MIGRATIONS:
-                if migration.version in applied:
-                    continue
-                await conn.execute("BEGIN IMMEDIATE")
-                try:
-                    for statement in _split_sql_script(migration.sql):
-                        await conn.execute(statement)
-                    await conn.execute(
-                        "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(?,?,?)",
-                        (migration.version, migration.checksum, utc_epoch_ms()),
-                    )
-                except BaseException:
-                    await conn.rollback()
-                    raise
-                else:
-                    await conn.commit()
+        """Install the current schema on an empty file, or verify an existing one.
 
-    async def schema_version(self) -> int:
+        There is no migration path: a database carrying anything other than the
+        current schema is rejected and must be deleted by the operator.
+        """
+        schema_path = Path(__file__).with_name("schema.sql")
         async with self.connection() as conn:
-            row = await self._fetchone(conn, "SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations")
-            return int(row["version"]) if row else 0
+            try:
+                await ensure_current_schema(
+                    conn,
+                    schema_sql=schema_path.read_text(encoding="utf-8"),
+                    schema_version=SCHEMA_VERSION,
+                    db_path=self.db_path,
+                    label="rag",
+                )
+            except SchemaIdentityError as exc:
+                raise RagSchemaError(str(exc)) from exc
 
     async def submit_document(
         self,
@@ -788,26 +763,3 @@ def encode_vector(values: Sequence[float]) -> tuple[bytes, int, str]:
         raise ValueError("embedding must be a non-empty 1D vector")
     blob = array.tobytes(order="C")
     return blob, int(array.size), sha256_hex(blob)
-
-
-def _split_sql_script(script: str) -> list[str]:
-    """Split this repository's simple migration script, preserving trigger bodies."""
-    statements: list[str] = []
-    buffer: list[str] = []
-    in_trigger = False
-    for line in script.splitlines():
-        stripped = line.strip()
-        if stripped.upper().startswith("CREATE TRIGGER"):
-            in_trigger = True
-        buffer.append(line)
-        if in_trigger:
-            if stripped.upper() == "END;":
-                statements.append("\n".join(buffer).strip())
-                buffer = []
-                in_trigger = False
-        elif stripped.endswith(";"):
-            statements.append("\n".join(buffer).strip())
-            buffer = []
-    if any(line.strip() for line in buffer):
-        statements.append("\n".join(buffer).strip())
-    return statements

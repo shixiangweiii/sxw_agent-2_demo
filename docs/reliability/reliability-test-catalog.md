@@ -35,7 +35,7 @@
 | `REL-025` | R2B | 删除/corrupt vector 与 BM25 投影后，从 active Document/chunks truth 可重建等价 snapshot |
 | `REL-026` | R2B | Retrieval `HIT/MISS/DEGRADED/DENIED/ERROR` 在双路结果、ACL 与 transport 组合下稳定判定 |
 | `REL-027` | R2B | 每个 citation 可经 evidence_id 追溯到 document version、index version、chunk hash、page/span、scope 与 query |
-| `REL-028` | R1/R3 | release/schema 完全匹配可恢复；显式 upgrader 可升级；无 upgrader 收口 `INCOMPATIBLE_RELEASE` |
+| `REL-028` | R1/R3 | release/schema 完全匹配才可恢复；任何不一致一律收口 `INCOMPATIBLE_RELEASE` |
 | `REL-029` | R1–R4 | trace disabled、trace writer 失败或 trace 文件缺失时，所有对应恢复测试结果不变；且 Worker 从持久化的 `runs.trace_id` 接力 admission 观察到的轨迹键（缺失回落 run_id），不串到默认 `-` 上；同一 trace_id 跨 Worker 重启写出的多个文件合并成一条轨迹读回；轨迹查询对客户端可控 trace_id 做白名单净化，关闭 tracing 时显式 503 |
 | `REL-030` | R1/R4 | `plan_execute/agent_loop/native_loop` 三个 Adapter 均通过公共 Run/terminal/event 契约；无 Tool 文本 smoke 不靠 EOF/done 成功 |
 
@@ -74,7 +74,7 @@
 ```text
 py_compile
 pytest tests/reliability
-SQLite schema/checksum verification
+SQLite schema identity verification
 文档/API 过时字符串扫描
 ```
 

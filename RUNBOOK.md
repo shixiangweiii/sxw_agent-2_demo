@@ -437,7 +437,7 @@ bash scripts/check.sh
 ```text
 py_compile
 pytest tests/reliability
-SQLite migration/schema checksum verification
+SQLite schema identity verification
 旧协议/旧权威路径扫描
 ```
 
@@ -475,7 +475,7 @@ ARAG-down pass 需要手动停 :8100 后单独执行。真实 LLM smoke/行为�
 | A2A 调用失败 | 错误作为 ToolResult 返回模型 | 检查 agent-card 与 :8300 |
 | projection 损坏/缺 embedding | 检索标记 `DEGRADED`，BM25 继续可用，后台自动重嵌入 | 检查 ARAG health/repair 日志与 embedding provider；通常无需手工改库 |
 | Artifact 被篡改 | 所有读取拒绝 | 从可信源重新上传，不要覆盖既有 digest 身份 |
-| release 不匹配 | Run=`INCOMPATIBLE_RELEASE`（无 upgrader） | 使用匹配 release 或明确清理开发数据 |
+| release 不匹配 | Run=`INCOMPATIBLE_RELEASE` | 使用匹配 release 或明确清理开发数据 |
 | trace 写失败 | Runtime 恢复不受影响 | 单独修复权限/空间 |
 
 ## 14. 常见排障

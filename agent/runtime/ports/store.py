@@ -123,14 +123,6 @@ class RuntimeStore(Protocol):
         working_state: WorkingState, engine_state: dict[str, Any] | None = None,
         engine_state_ref: str | None = None, now_ms: int,
     ) -> CheckpointRecord: ...
-    async def publish_checkpoint_upgrade(
-        self, *, run_id: str, activity_id: str, fencing_token: int,
-        source_checkpoint_id: str, expected_revision: int,
-        from_release_fingerprint: str, from_schema_version: str,
-        to_release_fingerprint: str, to_schema_version: str,
-        working_state: WorkingState, engine_state: dict[str, Any] | None = None,
-        engine_state_ref: str | None = None, now_ms: int,
-    ) -> CheckpointRecord: ...
     async def latest_checkpoint(self, run_id: str) -> CheckpointRecord | None: ...
     async def compile_history(self, run_id: str) -> list[dict[str, Any]]: ...
     async def finalize_success(

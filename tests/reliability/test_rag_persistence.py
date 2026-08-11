@@ -120,14 +120,13 @@ async def test_same_document_content_reuses_version_and_job(tmp_path: Path) -> N
     )
     job = await coordinator.process_job(first.job_id)
     assert job.state == IndexJobState.ACTIVATED
-    assert await repository.schema_version() == 1
 
 
 @pytest.mark.asyncio
-async def test_migration_checksum_rewrite_fails_fast(tmp_path: Path) -> None:
+async def test_schema_identity_rewrite_fails_fast(tmp_path: Path) -> None:
     repository, _projections, _coordinator = await build_stack(tmp_path)
     async with repository.connection() as conn:
-        await conn.execute("UPDATE schema_migrations SET checksum='tampered' WHERE version=1")
+        await conn.execute("UPDATE schema_meta SET schema_checksum='tampered'")
         await conn.commit()
     with pytest.raises(RagSchemaError, match="checksum mismatch"):
         await repository.initialize()

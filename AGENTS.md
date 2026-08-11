@@ -80,9 +80,9 @@ API 和 Worker 当前共享本机 `runtime.db` 与 Artifact CAS。可选下游�
 - Worker 领取使用 lease/revision/fencing；旧 fencing 结果拒绝，Worker 丢失不直接失败 Run。
 - 所有 SQLite 写使用短 `BEGIN IMMEDIATE`；事务内禁止 LLM、Tool、RAG、Skill、文件系统或等待人工。
 
-Runtime 和 RAG 当前仍使用遗留的 checksum migration 实现；它是待独立移除的历史代码，不要求立刻大改，但从现在起不得新增增量 migration。目标是单一的当前 schema 初始化与版本/checksum 校验。数据库仅支持当前 schema：schema 或 checksum 不匹配时必须 fail-fast，并提示用户显式删除或重建对应本地数据库；程序不得静默删除、覆盖或自动迁移旧数据库。连接必须启用 WAL、`synchronous=FULL`、foreign keys、busy timeout。不要引入 ORM/Alembic 或预留 PostgreSQL backend。
+Runtime 和 RAG 各有一份当前 schema 文件（`agent/runtime/adapters/sqlite/schema.sql`、`arag/persistence/schema.sql`），没有 migration 机制，也没有 `ALTER` 路径；不得重新引入增量迁移。启动时由 `common/sqlite_schema.py` 的 `ensure_current_schema` 在单个 `BEGIN IMMEDIATE` 内完成：空库建全表并写 `schema_meta`，已有库校验 version + checksum。数据库仅支持当前 schema：不匹配时必须 fail-fast，并提示用户显式删除或重建对应本地数据库；程序不得静默删除、覆盖或自动迁移旧数据库。连接必须启用 WAL、`synchronous=FULL`、foreign keys、busy timeout。不要引入 ORM/Alembic 或预留 PostgreSQL backend。
 
-数据库跨版本升级、滚动发布期间的 schema 兼容和旧数据保留不在本项目范围内。后续通过独立、可验证的重构移除遗留 migration，实现单一当前 schema 初始化和版本/checksum 校验。若新需求改变存储或协调架构，先明确分布式需求与中间件依赖，再按 ADR、current schema、版本/checksum 与 reliability test 完整替换；不能在现有 SQLite 旁边临时增加第二事实源，也不能退化为进程内状态。
+数据库跨版本升级、滚动发布期间的 schema 兼容和旧数据保留不在本项目范围内。要换 schema 就删库重建，没有 checkpoint 升级路径。若新需求改变存储或协调架构，先明确分布式需求与中间件依赖，再按 ADR、current schema、版本/checksum 与 reliability test 完整替换；不能在现有 SQLite 旁边临时增加第二事实源，也不能退化为进程内状态。
 
 ## Engine Adapter 与三代引擎
 
@@ -177,7 +177,7 @@ bash eval/run_eval.sh
 
 `run_all.sh` 的 Worker readiness 必须同时验证本次启动后的新鲜 `ACTIVE` heartbeat 与三种 active release pointer 完全一致；只看持久库里已有的三行 active release 会把旧指针误判为当前 Worker ready。脚本须保持 Bash 3.2 兼容，并持续监督五个子进程。
 
-`scripts/check.sh` 应执行 py_compile、`pytest tests/reliability`、SQLite schema/checksum 验证和旧协议字符串扫描。遗留 migration 尚未移除前，其既有 checksum 检查仍是当前门禁的一部分；不得新增迁移。真实 LLM 行为分数不属于可靠性 PASS。
+`scripts/check.sh` 应执行 py_compile、`pytest tests/reliability`、SQLite schema identity 验证和旧协议字符串扫描。真实 LLM 行为分数不属于可靠性 PASS。
 
 ## 修改规则
 
@@ -185,7 +185,7 @@ bash eval/run_eval.sh
 - 先按集群化部署检查设计：共享状态归属、跨节点协调、一致性、幂等、故障恢复和扩缩容必须有明确答案；缺少必要中间件时先提出并讨论。
 - 实现保持直白、语义明确；优先线性流程而不是模式堆砌，同时控制函数复杂度、封装稳定职责、消除实质重复，只做合适层次的必要抽象；优先组合，项目自有类只允许 `Base -> Sub` 两层继承。
 - 未触及的历史代码不强制改造；新增或实质修改的代码路径必须遵守本规则。不要为了顺手清理而扩大范围；每次小步重构必须独立正确、可测试。
-- 编辑 Runtime 状态/事务/契约前先读 `docs/reliability/`；若改变冻结语义，先 ADR + current schema/版本/checksum + reliability test，禁止新增增量 migration。
+- 编辑 Runtime 状态/事务/契约前先读 `docs/reliability/`；若改变冻结语义，先 ADR + current schema + reliability test。改 schema 就直接改 `schema.sql`，禁止引入增量 migration。
 - 改 API、配置、端口、架构、能力边界或评测协议，同步更新 `README.md`、`RUNBOOK.md`、本文件、`CLAUDE.md`、`eval/README.md` 和 `.env.example`。
 - 改共享 prompt/工具面，分别验证两个 loop 引擎；不要用一代引擎结果代替另一代。
 - 新通用工具：在 `agent/tools/builtin_tools.py` 实现并注册；同时给 ToolManifest effect 分类。native 只读并发还需声明安全性。

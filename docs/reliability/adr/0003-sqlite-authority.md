@@ -32,7 +32,15 @@ PRAGMA busy_timeout = 5000;
 
 ### 3. Schema authority
 
-`schema_migrations` 保存 version、SQL checksum、applied_at。启动时顺序应用已知 migration；发现数据库含未知新版本、同版本 checksum 被改写或缺失中间版本，必须 fail-fast。禁止自动猜测/修补。
+每个数据库只有一份当前 schema 文件（`agent/runtime/adapters/sqlite/schema.sql`、`arag/persistence/schema.sql`），没有增量 migration，也没有任何 `ALTER` 路径。启动时在单个 `BEGIN IMMEDIATE` 内完成判定：
+
+- 库里没有任何用户表 → 执行整份 schema，并写入 `schema_meta(id=1, schema_version, schema_checksum)`；
+- 已有 `schema_meta` 且 version + checksum 与当前代码一致 → 通过；
+- 其余情况（version 或 checksum 不符、有表但没有 `schema_meta`）→ fail-fast，打印库路径和删除命令，由使用者显式删除重建。
+
+程序绝不静默删除、覆盖或迁移数据库。API 与 Worker 可以并发 bootstrap 同一个空库：写锁串行化，后到者直接走校验分支。
+
+`schema_checksum` 取 schema 文件字节的 SHA-256，检出的是"当前代码的 schema 与建库时的 schema 不一致"。它**不**检测有人手工 `ALTER` 活库导致的漂移——本项目已经没有任何 ALTER 路径，为此再记一份 `sqlite_master` 摘要属于收益不明确的额外复杂度，故明确不做。
 
 `run_events` 由唯一约束和触发器禁止 update/delete。`projection_cursors` 只在真实物化投影存在时创建；不创建空表。明确不创建 `delivery_cursors`，SSE 读取不写数据库。
 

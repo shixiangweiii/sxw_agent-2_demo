@@ -91,8 +91,8 @@
 | vector/BM25 丢失或 checksum 坏 | Document/chunks truth 仍在 | Retrieval=`DEGRADED` | 从 active truth 重建后原子换 snapshot | 把索引当权威或返回正常 MISS |
 | 一路召回失败、另一路成功 | committed EvidenceSet | `DEGRADED`，保留有效 hits | 主 Agent best-effort 继续 | 标 `HIT` 隐藏失败或标 `MISS` |
 | scope/ACL 失败 | 无可授权 evidence | `DENIED` | 主 Agent按策略继续 | 当 MISS/ERROR |
-| Run release 与 Worker 不匹配 | frozen fingerprint | 有 upgrader则升级；否则 `INCOMPATIBLE_RELEASE` | 不领取/不执行未知 checkpoint | 静默用当前 active release |
-| migration checksum 改写/未知新版本 | DB 启动检查失败 | API/Worker fail-fast | 显式清库或合法 migration | 自动修补后运行 |
+| Run release 与 Worker 不匹配 | frozen fingerprint | 一律 `INCOMPATIBLE_RELEASE` | 不领取/不执行未知 checkpoint | 静默用当前 active release |
+| DB schema identity 不符 | 启动期 schema 校验失败 | API/Worker fail-fast | 由使用者显式删库重建 | 自动迁移或修补后运行 |
 
 ## 6. Deadline 的统一规则
 

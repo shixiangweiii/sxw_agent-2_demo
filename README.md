@@ -216,7 +216,7 @@ ARAG 会周期校验 active chunk 的 embedding model、维度与 checksum。向
 | `local_storage/demo_effects/effects.db` | 模拟外部副作用系统，故意不与 Runtime 做跨库原子事务 |
 | `local_storage/traces/` | 诊断轨迹，不参与恢复 |
 
-Runtime SQLite 每连接启用 WAL、`synchronous=FULL`、foreign keys 和 busy timeout；migration 版本/checksum 异常会 fail-fast。该方案只承诺本机正常进程崩溃恢复，不承诺磁盘损坏、主机丢失、多机 HA 或共享盘部署。
+Runtime SQLite 每连接启用 WAL、`synchronous=FULL`、foreign keys 和 busy timeout；数据库只支持当前 schema，identity（版本/checksum）不符会 fail-fast 并提示显式删库重建。该方案只承诺本机正常进程崩溃恢复，不承诺磁盘损坏、主机丢失、多机 HA 或共享盘部署。
 
 ## RAG、Skill 与 A2A
 
