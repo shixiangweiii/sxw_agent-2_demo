@@ -128,6 +128,9 @@ class CommittedEventSink:
         self._full_text.append(text)
 
     async def emit(self, event_type: str, payload: dict[str, Any]) -> None:
+        '''
+        拿到锁 → flush text buffer → store.append_events()
+        '''
         if self._closed:
             raise RuntimeError("event sink is closed")
         self._raise_background_error()
@@ -136,8 +139,8 @@ class CommittedEventSink:
         if event_type in {"text", EventType.OUTPUT_DELTA_COMMITTED}:
             await self.emit_text(str(payload.get("delta", "")))
             return
-        async with self._lock:
-            await self._flush_locked()
+        async with self._lock: # 拿到锁，非 text 事件（tool_call、plan_step、error 等）走锁保护的同步写入路径。锁保证 flush text buffer 和写入新事件之间的顺序——模型流输出必须在 ToolCall 事实之前完成持久化
+            await self._flush_locked() # 先把积攒的 text delta 刷入 DB（OUTPUT_DELTA_COMMITTED），确保 100ms/2KiB 聚合的文本在后续 ToolCall/ToolResult 之前有序提交
             if event_type == "error":
                 # Engine diagnostics are not a public delivery event and never
                 # decide terminal status by themselves.  Coordinator considers
@@ -158,12 +161,12 @@ class CommittedEventSink:
                 )
                 return
             if event_type == "citation":
-                self.citations.extend(payload.get("citations") or [])
+                self.citations.extend(payload.get("citations") or []) # 引用信息只收集到内存，不立即写 DB。最终由 terminal 提交时一起落库（final assistant + citation + success terminal 同一事务）
                 return
-            canonical = _EVENT_MAP.get(event_type)
+            canonical = _EVENT_MAP.get(event_type) # 通过 _EVENT_MAP 将引擎内部事件名映射为规范 EventType
             if canonical is None:
                 canonical = EventType(event_type)
-            await self.store.append_events(
+            await self.store.append_events( # 调用 store.append_events() 写入 run_events 表，带 fencing_token 做所有权校验
                 self.run_id,
                 [EventDraft(
                     canonical, dict(payload), activity_id=self.activity_id,
