@@ -14,7 +14,8 @@ from arag.api.index import router as index_router
 from arag.api.retrieve import router as retrieve_router
 from arag.components.retriever import HybridRetriever
 from arag.persistence.models import IndexJobState
-from arag.persistence.repository import RagRepository, RagSchemaError
+from arag.persistence.repository import RagRepository
+from common.sqlite_schema import SchemaIdentityError
 from arag.persistence.service import IndexCoordinator
 from arag.projection.snapshot import ProjectionManager, ProjectionUnavailableError
 from arag.store.base import Chunk, Document
@@ -126,9 +127,9 @@ async def test_same_document_content_reuses_version_and_job(tmp_path: Path) -> N
 async def test_schema_identity_rewrite_fails_fast(tmp_path: Path) -> None:
     repository, _projections, _coordinator = await build_stack(tmp_path)
     async with repository.connection() as conn:
-        await conn.execute("UPDATE schema_meta SET schema_checksum='tampered'")
+        await conn.execute("UPDATE schema_meta SET schema_digest=?", ("0" * 64,))
         await conn.commit()
-    with pytest.raises(RagSchemaError, match="checksum mismatch"):
+    with pytest.raises(SchemaIdentityError, match="schema digest mismatch"):
         await repository.initialize()
 
 

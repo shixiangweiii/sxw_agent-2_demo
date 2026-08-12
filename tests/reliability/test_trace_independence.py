@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.reliability.support.runtime_releases import activate_test_release
+
 import asyncio
 import uuid
 from dataclasses import dataclass
@@ -54,7 +56,6 @@ class CheckpointThenKilledAdapter:
             WorkingState(
                 goal="trace-independent recovery",
                 confirmed_facts=[{"fact": "checkpoint survived", "source": "runtime"}],
-                release_fingerprint=request.envelope.release_fingerprint,
             ),
             expected_revision=0,
             engine_state={"phase": "MODEL_RESPONSE_COMMITTED", "slot": 0},
@@ -114,9 +115,8 @@ async def _snapshot_recovered_run(
     trace_root = tmp_path / "traces"
     store = SqliteRuntimeStore(RuntimeDatabase(runtime_path))
     await store.initialize()
-    release = await store.register_release(
+    release = await activate_test_release(store,
         ReleaseManifest(engine="native_loop", components={"rel-029": "recovery-v1"}),
-        activate=True,
     )
     clock = FakeClock()
     run = (await AdmissionService(
@@ -316,9 +316,8 @@ async def test_rel_29_worker_recovers_the_admitted_trace_id_across_the_process_b
     trace_root = tmp_path / "traces"
     store = SqliteRuntimeStore(RuntimeDatabase(runtime_path))
     await store.initialize()
-    release = await store.register_release(
+    release = await activate_test_release(store,
         ReleaseManifest(engine="native_loop", components={"rel-029": "propagation-v1"}),
-        activate=True,
     )
     clock = FakeClock()
 
@@ -396,9 +395,8 @@ async def test_rel_29_one_trace_id_spanning_a_worker_restart_reads_back_as_one_t
     trace_root = tmp_path / "traces"
     store = SqliteRuntimeStore(RuntimeDatabase(runtime_path))
     await store.initialize()
-    release = await store.register_release(
+    release = await activate_test_release(store,
         ReleaseManifest(engine="native_loop", components={"rel-029": "merge-v1"}),
-        activate=True,
     )
     clock = FakeClock()
     run = await _admit(store, clock, trace_id="rel-029-merged", key="rel-029-merged")

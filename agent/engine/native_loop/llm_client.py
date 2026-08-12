@@ -24,6 +24,7 @@ import openai
 from agent.config import AgentSettings
 from agent.engine.native_loop.messages import CHARS_PER_TOKEN, Msg, ToolCall, Usage, to_wire
 from agent.llm.exceptions import CONTEXT_OVERFLOW, classify_llm_error
+from agent.runtime.domain.errors import RuntimeFault
 from common.obs import get_logger, log_kv
 from common.trace import (
     KIND_LLM,
@@ -96,10 +97,22 @@ class _PartialCall:
     def merge(self, call_id: Any, name: Any, arguments: Any) -> None:
         # id/name 取首次非空值：标准分片下它们只在首片出现，
         # 后续片的空值不能把已拿到的值覆盖掉。
-        if call_id and not self.id:
-            self.id = str(call_id)
-        if name and not self.name:
-            self.name = str(name)
+        if call_id:
+            normalized_id = str(call_id)
+            if self.id and normalized_id != self.id:
+                raise NativeLlmError(
+                    "provider changed a ToolCall id across fragments",
+                    "MODEL_PROTOCOL_INVALID",
+                )
+            self.id = normalized_id
+        if name:
+            normalized_name = str(name)
+            if self.name and normalized_name != self.name:
+                raise NativeLlmError(
+                    "provider changed a ToolCall name across fragments",
+                    "MODEL_PROTOCOL_INVALID",
+                )
+            self.name = normalized_name
         if arguments:
             self.arguments += str(arguments)
 
@@ -118,21 +131,59 @@ class _PartialCall:
 
 
 class _ToolCallAccumulator:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        max_calls: int,
+        max_argument_bytes: int,
+        max_batch_argument_bytes: int,
+    ) -> None:
         self._calls: dict[int, _PartialCall] = {}
         self._max_index: int = -1
+        self._max_calls = max_calls
+        self._max_argument_bytes = max_argument_bytes
+        self._max_batch_argument_bytes = max_batch_argument_bytes
+        self._batch_argument_bytes = 0
 
     def add(self, index: int, call_id: Any, name: Any, arguments: Any) -> None:
+        if index < 0:
+            raise NativeLlmError(
+                "provider emitted a negative ToolCall index",
+                "MODEL_PROTOCOL_INVALID",
+            )
         partial = self._calls.get(index)
         if partial is None:
+            if len(self._calls) >= self._max_calls:
+                raise NativeLlmError(
+                    "provider exceeded the per-turn ToolCall limit",
+                    "TOOL_CALL_LIMIT_EXCEEDED",
+                )
             partial = _PartialCall(index=index)
             self._calls[index] = partial
-        if partial.emitted and arguments:
-            # 已判定就绪后又收到该 index 的新分片：说明上游是交错分片，
-            # 提前就绪的判断在这种形态下不成立。响亮记一条，便于排障。
-            log_kv(logger, logging.WARNING, "NativeLlm",
-                   "fragment arrived after tool call was emitted", index=index)
+        argument_fragment = str(arguments) if arguments else ""
+        argument_fragment_bytes = len(argument_fragment.encode("utf-8"))
+        if len((partial.arguments + argument_fragment).encode("utf-8")) > self._max_argument_bytes:
+            raise NativeLlmError(
+                "one ToolCall argument exceeded the configured byte limit",
+                "TOOL_ARGUMENTS_TOO_LARGE",
+            )
+        if self._batch_argument_bytes + argument_fragment_bytes > self._max_batch_argument_bytes:
+            raise NativeLlmError(
+                "ToolCall batch arguments exceeded the configured byte limit",
+                "TOOL_BATCH_TOO_LARGE",
+            )
+        if partial.emitted and (call_id or name or arguments):
+            # The experimental heuristic already authorized a stable Runtime
+            # slot. Any later fragment means the provider's block was not in
+            # fact complete; never reinterpret the completed read as a new call.
+            raise RuntimeFault(
+                "TOOL_REPLAY_MISMATCH",
+                "provider changed a ToolCall after experimental early dispatch",
+                409,
+                {"tool_index": index},
+            )
         partial.merge(call_id, name, arguments)
+        self._batch_argument_bytes += argument_fragment_bytes
         self._max_index = max(self._max_index, index)
 
     def take_ready(self, *, allow_early: bool) -> list[ToolCall]:
@@ -148,15 +199,31 @@ class _ToolCallAccumulator:
             if partial.emitted:
                 continue
             # 仅当"已出现更高 index"且"参数已能解析"时才判定就绪。
-            if index < self._max_index and partial.name and partial.is_parseable():
+            if (
+                index < self._max_index
+                and partial.id
+                and partial.name
+                and partial.is_parseable()
+            ):
                 partial.emitted = True
                 ready.append(partial.to_call())
         return ready
 
     def take_remaining(self) -> list[ToolCall]:
+        indexes = sorted(self._calls)
+        if indexes and indexes != list(range(len(indexes))):
+            raise NativeLlmError(
+                "provider ToolCall indices are not contiguous from zero",
+                "MODEL_PROTOCOL_INVALID",
+            )
         remaining: list[ToolCall] = []
-        for index in sorted(self._calls):
+        for index in indexes:
             partial = self._calls[index]
+            if not partial.id or not partial.name:
+                raise NativeLlmError(
+                    "provider emitted a ToolCall without id or name",
+                    "MODEL_PROTOCOL_INVALID",
+                )
             if partial.emitted:
                 continue
             partial.emitted = True
@@ -188,12 +255,20 @@ class NativeLlmClient:
     def model(self) -> str:
         return self._model
 
+    @property
+    def tool_call_block_complete(self) -> bool:
+        """OpenAI-compatible delta streams expose no explicit block boundary."""
+        return False
+
     async def stream(
         self,
         *,
         messages: list[Msg],
         tools: Optional[list[dict[str, Any]]] = None,
         allow_early_tool_dispatch: bool = True,
+        max_tool_calls: int = 64,
+        max_tool_argument_bytes: int = 64 * 1024,
+        max_tool_batch_argument_bytes: int = 256 * 1024,
         temperature: float = 0.2,
     ) -> AsyncIterator[StreamItem]:
         """流式调用模型，产出 TextDelta / ToolCallReady / TurnEnd。"""
@@ -235,7 +310,13 @@ class NativeLlmClient:
         try:
             emitted = False
             try:
-                async for item in self._consume(payload, allow_early_tool_dispatch):
+                async for item in self._consume(
+                    payload,
+                    allow_early_tool_dispatch,
+                    max_tool_calls=max_tool_calls,
+                    max_tool_argument_bytes=max_tool_argument_bytes,
+                    max_tool_batch_argument_bytes=max_tool_batch_argument_bytes,
+                ):
                     emitted = True
                     yield _observe(span, item)
                 return
@@ -251,13 +332,23 @@ class NativeLlmClient:
                 span.set(stream_options_downgraded=True)
                 log_kv(logger, logging.WARNING, "NativeLlm",
                        "stream_options unsupported, retrying without usage")
+            except (NativeLlmError, RuntimeFault):
+                raise
             except Exception as exc:  # noqa: BLE001 - 统一分类后上抛
                 raise self._classify(exc, request_chars) from exc
 
             # 降级重试（不带 usage）。这次失败不再兜底。
             try:
-                async for item in self._consume(payload, allow_early_tool_dispatch):
+                async for item in self._consume(
+                    payload,
+                    allow_early_tool_dispatch,
+                    max_tool_calls=max_tool_calls,
+                    max_tool_argument_bytes=max_tool_argument_bytes,
+                    max_tool_batch_argument_bytes=max_tool_batch_argument_bytes,
+                ):
                     yield _observe(span, item)
+            except (NativeLlmError, RuntimeFault):
+                raise
             except Exception as exc:  # noqa: BLE001
                 raise self._classify(exc, request_chars) from exc
         except GeneratorExit:
@@ -272,11 +363,23 @@ class NativeLlmClient:
             close_span(span, status)
 
     async def _consume(
-        self, payload: dict[str, Any], allow_early: bool,
+        self,
+        payload: dict[str, Any],
+        allow_early: bool,
+        *,
+        max_tool_calls: int = 64,
+        max_tool_argument_bytes: int = 64 * 1024,
+        max_tool_batch_argument_bytes: int = 256 * 1024,
     ) -> AsyncIterator[StreamItem]: # 真正的流解析层
-        accumulator = _ToolCallAccumulator()
+        accumulator = _ToolCallAccumulator(
+            max_calls=max_tool_calls,
+            max_argument_bytes=max_tool_argument_bytes,
+            max_batch_argument_bytes=max_tool_batch_argument_bytes,
+        )
         finish_reason: Optional[str] = None
         usage: Optional[Usage] = None
+        saw_choice = False
+        finish_seen = False
 
         # AsyncStream 实测**没有 __del__**：客户端断开导致 CancelledError 穿过这里时，
         # 不显式关闭底层 HTTP 响应就不会归还给连接池。async with 保证任何退出路径都关。
@@ -289,31 +392,83 @@ class NativeLlmClient:
                 choices = getattr(chunk, "choices", None) or []
                 if not choices:
                     continue
+                if len(choices) != 1:
+                    raise NativeLlmError(
+                        "native provider protocol accepts exactly one choice",
+                        "MODEL_PROTOCOL_INVALID",
+                    )
+                if finish_seen:
+                    raise NativeLlmError(
+                        "provider emitted choice data after the finish marker",
+                        "MODEL_PROTOCOL_INVALID",
+                    )
+                saw_choice = True
                 choice = choices[0]
+                choice_index = getattr(choice, "index", 0)
+                if choice_index not in (None, 0):
+                    raise NativeLlmError(
+                        "native provider protocol accepts only choice index zero",
+                        "MODEL_PROTOCOL_INVALID",
+                    )
                 reason = getattr(choice, "finish_reason", None)
-                if reason:
-                    finish_reason = reason
 
                 delta = getattr(choice, "delta", None)
-                if delta is None:
-                    continue
+                if delta is not None:
+                    content = getattr(delta, "content", None)
+                    if content:
+                        if not isinstance(content, str):
+                            raise NativeLlmError(
+                                "provider text delta must be a string",
+                                "MODEL_PROTOCOL_INVALID",
+                            )
+                        yield TextDelta(content) # ② 文本直接出
 
-                content = getattr(delta, "content", None)
-                if content:
-                    yield TextDelta(content) # ② 文本直接出
-
-                for raw in getattr(delta, "tool_calls", None) or []: # ③ tool_calls 分片
-                    index = getattr(raw, "index", None)
-                    function = getattr(raw, "function", None)
-                    accumulator.add( # 交给 _ToolCallAccumulator.add
-                        0 if index is None else int(index),
-                        getattr(raw, "id", None), # 首片有，后续片为空
-                        getattr(function, "name", None) if function else None,  # 首片有，后续片为空
-                        getattr(function, "arguments", None) if function else None, # 多片拼接
-                    )
+                    for raw in getattr(delta, "tool_calls", None) or []: # ③ tool_calls 分片
+                        index = getattr(raw, "index", None)
+                        if isinstance(index, bool) or not isinstance(index, int):
+                            raise NativeLlmError(
+                                "provider ToolCall fragment requires an integer index",
+                                "MODEL_PROTOCOL_INVALID",
+                            )
+                        function = getattr(raw, "function", None)
+                        call_id = getattr(raw, "id", None)
+                        name = getattr(function, "name", None) if function else None
+                        arguments = (
+                            getattr(function, "arguments", None) if function else None
+                        )
+                        if call_id is not None and not isinstance(call_id, str):
+                            raise NativeLlmError(
+                                "provider ToolCall id must be a string",
+                                "MODEL_PROTOCOL_INVALID",
+                            )
+                        if name is not None and not isinstance(name, str):
+                            raise NativeLlmError(
+                                "provider ToolCall name must be a string",
+                                "MODEL_PROTOCOL_INVALID",
+                            )
+                        if arguments is not None and not isinstance(arguments, str):
+                            raise NativeLlmError(
+                                "provider ToolCall arguments fragment must be a string",
+                                "MODEL_PROTOCOL_INVALID",
+                            )
+                        accumulator.add( # 交给 _ToolCallAccumulator.add
+                            index,
+                            call_id, # 首片有，后续片为空
+                            name,  # 首片有，后续片为空
+                            arguments, # 多片拼接
+                        )
                 for call in accumulator.take_ready(allow_early=allow_early):
                     yield ToolCallReady(call)  # ④ 凑齐一个就 yield
 
+                if reason is not None:
+                    finish_reason = str(getattr(reason, "value", reason))
+                    finish_seen = True
+
+        if not saw_choice or not finish_seen or finish_reason is None:
+            raise NativeLlmError(
+                "provider stream ended without an explicit complete finish marker",
+                "MODEL_STREAM_INCOMPLETE",
+            )
         for call in accumulator.take_remaining():
             yield ToolCallReady(call)
         yield TurnEnd(finish_reason=finish_reason, usage=usage)

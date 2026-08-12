@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 
 from agent.runtime.domain.models import (
     ActivityRecord,
@@ -96,9 +96,8 @@ class ToolExecutionPreparation:
 
 class RuntimeStore(Protocol):
     async def initialize(self) -> None: ...
-    async def register_release(self, manifest: ReleaseManifest, *, activate: bool = True) -> str: ...
-    async def register_releases(
-        self, manifests: Sequence[ReleaseManifest], *, activate: bool = True,
+    async def activate_current_releases(
+        self, manifests: Sequence[ReleaseManifest],
     ) -> dict[str, str]: ...
     async def admit(self, command: AdmissionCommand) -> AdmissionResult: ...
     async def get_run(self, run_id: str) -> RunRecord: ...
@@ -113,7 +112,7 @@ class RuntimeStore(Protocol):
     ) -> list[CanonicalEvent]: ...
     async def claim_next(
         self, *, worker_id: str, lease_ms: int, now_ms: int,
-        engines: Sequence[str] = ("plan_execute", "agent_loop", "native_loop"),
+        release_map: Mapping[str, str],
     ) -> Claim | None: ...
     async def mark_activity_running(self, activity_id: str, *, worker_id: str, fencing_token: int, now_ms: int) -> ActivityRecord: ...
     async def renew_lease(self, activity_id: str, *, worker_id: str, fencing_token: int, lease_expires_at: int, now_ms: int) -> bool: ...
@@ -121,13 +120,14 @@ class RuntimeStore(Protocol):
     async def save_checkpoint(
         self, *, run_id: str, activity_id: str, fencing_token: int, expected_revision: int,
         working_state: WorkingState, engine_state: dict[str, Any] | None = None,
-        engine_state_ref: str | None = None, now_ms: int,
+        now_ms: int, events: Sequence[EventDraft] = (),
     ) -> CheckpointRecord: ...
     async def latest_checkpoint(self, run_id: str) -> CheckpointRecord | None: ...
     async def compile_history(self, run_id: str) -> list[dict[str, Any]]: ...
     async def finalize_success(
         self, *, run_id: str, activity_id: str, fencing_token: int, assistant_text: str,
         citations: list[dict[str, Any]], now_ms: int,
+        message_id: str | None = None, generation_id: str | None = None,
     ) -> RunRecord: ...
     async def finalize_failure(
         self, *, run_id: str, activity_id: str, fencing_token: int, code: str,

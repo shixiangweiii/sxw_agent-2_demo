@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import aiosqlite
@@ -18,7 +18,6 @@ from pydantic import ValidationError
 from agent.runtime.adapters.sqlite.database import RuntimeDatabase
 from agent.runtime.domain.errors import RuntimeFault, conflict, not_found, unavailable
 from agent.runtime.domain.models import (
-    SCHEMA_VERSION,
     ACTIVITY_TRANSITIONS,
     ActivityRecord,
     ActivityStatus,
@@ -247,7 +246,6 @@ async def _register_artifact_metadata_in_tx(
 
 def _run_from_row(row: aiosqlite.Row) -> RunRecord:
     envelope = RuntimeEnvelope(
-        schema_version=row["schema_version"],
         request_id=row["request_id"],
         client_request_id=row["client_request_id"],
         idempotency_key=row["idempotency_key"],
@@ -303,7 +301,6 @@ def _activity_from_row(row: aiosqlite.Row) -> ActivityRecord:
 def _event_from_row(row: aiosqlite.Row) -> CanonicalEvent:
     return CanonicalEvent(
         event_id=row["event_id"],
-        schema_version=row["schema_version"],
         run_id=row["run_id"],
         turn_id=row["turn_id"],
         activity_id=row["activity_id"],
@@ -317,7 +314,7 @@ def _event_from_row(row: aiosqlite.Row) -> CanonicalEvent:
         sensitivity=Sensitivity(row["sensitivity"]),
         occurred_at=row["occurred_at"],
         terminal_status=RunStatus(row["terminal_status"]) if row["terminal_status"] else None,
-        release_fingerprint=row["release_fingerprint"],
+        release_fingerprint=row["derived_release_fingerprint"],
     )
 
 
@@ -328,19 +325,17 @@ class SqliteRuntimeStore:
     async def initialize(self) -> None:
         await self.db.ensure_schema()
 
-    async def register_release(self, manifest: ReleaseManifest, *, activate: bool = True) -> str:
-        return (await self.register_releases((manifest,), activate=activate))[manifest.engine]
-
-    async def register_releases(
+    async def activate_current_releases(
         self,
         manifests: Sequence[ReleaseManifest],
-        *,
-        activate: bool = True,
     ) -> dict[str, str]:
-        if not manifests:
-            return {}
-        if len({manifest.engine for manifest in manifests}) != len(manifests):
-            raise ValueError("release batch contains duplicate engine names")
+        expected_engines = {"plan_execute", "agent_loop", "native_loop"}
+        actual_engines = {manifest.engine for manifest in manifests}
+        if len(manifests) != len(expected_engines) or actual_engines != expected_engines:
+            raise ValueError(
+                "current release activation requires exactly plan_execute, "
+                "agent_loop and native_loop"
+            )
         import time
 
         now = int(time.time() * 1000)
@@ -352,28 +347,48 @@ class SqliteRuntimeStore:
                 fingerprint = fingerprints[manifest.engine]
                 payload = canonical_json(manifest.model_dump(mode="json"))
                 existing = await (await conn.execute(
-                    "SELECT manifest_json FROM release_manifests WHERE release_fingerprint=?",
+                    """SELECT engine,manifest_json FROM release_manifests
+                       WHERE release_fingerprint=?""",
                     (fingerprint,),
                 )).fetchone()
-                if existing is not None and existing["manifest_json"] != payload:
+                if existing is not None and (
+                    existing["engine"] != manifest.engine
+                    or existing["manifest_json"] != payload
+                ):
                     raise conflict(
                         "RELEASE_FINGERPRINT_COLLISION", "release fingerprint collision"
                     )
                 await conn.execute(
                     """INSERT OR IGNORE INTO release_manifests
-                       (release_fingerprint,engine,manifest_json,schema_version,created_at)
-                       VALUES (?,?,?,?,?)""",
-                    (fingerprint, manifest.engine, payload, manifest.schema_version, now),
+                       (release_fingerprint,engine,manifest_json,created_at)
+                       VALUES (?,?,?,?)""",
+                    (fingerprint, manifest.engine, payload, now),
                 )
-            if activate:
-                for manifest in manifests:
-                    await conn.execute(
-                        """INSERT INTO active_releases(engine,release_fingerprint,activated_at)
-                           VALUES (?,?,?) ON CONFLICT(engine) DO UPDATE SET
-                           release_fingerprint=excluded.release_fingerprint,
-                           activated_at=excluded.activated_at""",
-                        (manifest.engine, fingerprints[manifest.engine], now),
+            for manifest in manifests:
+                blocked = await (await conn.execute(
+                    """SELECT run_id,release_fingerprint FROM runs
+                       WHERE engine=? AND terminal_status IS NULL
+                         AND release_fingerprint<>?
+                       ORDER BY created_at,run_id LIMIT 1""",
+                    (manifest.engine, fingerprints[manifest.engine]),
+                )).fetchone()
+                if blocked is not None:
+                    raise conflict(
+                        "ACTIVE_RUNS_BLOCK_RELEASE_ACTIVATION",
+                        "a nonterminal Run is frozen to another release",
+                        engine=manifest.engine,
+                        run_id=blocked["run_id"],
+                        active_run_release=blocked["release_fingerprint"],
+                        requested_release=fingerprints[manifest.engine],
                     )
+            for manifest in manifests:
+                await conn.execute(
+                    """INSERT INTO active_releases(engine,release_fingerprint,activated_at)
+                       VALUES (?,?,?) ON CONFLICT(engine) DO UPDATE SET
+                       release_fingerprint=excluded.release_fingerprint,
+                       activated_at=excluded.activated_at""",
+                    (manifest.engine, fingerprints[manifest.engine], now),
+                )
         return fingerprints
 
     async def active_releases(self) -> dict[str, str]:
@@ -457,15 +472,15 @@ class SqliteRuntimeStore:
                 fingerprint = release["release_fingerprint"]
                 await conn.execute(
                     """INSERT INTO runs (
-                      run_id,schema_version,request_id,client_request_id,idempotency_key,
+                      run_id,request_id,client_request_id,idempotency_key,
                       conversation_id,turn_seq,turn_id,principal_id,agent_id,engine,deadline_at,
                       cancel_token_id,release_fingerprint,input_event_id,attachment_refs_json,
                       input_text,state,revision,next_seq,current_activity_id,terminal_status,
                       terminal_payload_json,pending_input_json,created_at,updated_at,trace_id
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
-                        command.run_id, SCHEMA_VERSION, command.request_id,
-                        command.client_request_id, command.idempotency_key, conversation_id,
+                        command.run_id, command.request_id, command.client_request_id,
+                        command.idempotency_key, conversation_id,
                         turn_seq, command.turn_id, command.principal_id, command.agent_id, command.engine,
                         command.deadline_at, command.cancel_token_id, fingerprint,
                         command.input_event_id, canonical_json(list(command.attachment_refs)),
@@ -569,12 +584,16 @@ class SqliteRuntimeStore:
     ) -> list[CanonicalEvent]:
         async with self.db.read() as conn:
             await self._require_run_row(conn, run_id)
-            sql = "SELECT * FROM run_events WHERE run_id=? AND seq>?"
+            sql = (
+                "SELECT e.*,r.release_fingerprint AS derived_release_fingerprint "
+                "FROM run_events e JOIN runs r ON r.run_id=e.run_id "
+                "WHERE e.run_id=? AND e.seq>?"
+            )
             params: list[Any] = [run_id, after_seq]
             if visibility is not None:
-                sql += " AND visibility=?"
+                sql += " AND e.visibility=?"
                 params.append(visibility)
-            sql += " ORDER BY seq LIMIT ?"
+            sql += " ORDER BY e.seq LIMIT ?"
             params.append(max(1, min(limit, 5000)))
             rows = await (await conn.execute(sql, params)).fetchall()
         return [_event_from_row(row) for row in rows]
@@ -642,17 +661,16 @@ class SqliteRuntimeStore:
             )
             await conn.execute(
                 """INSERT INTO run_events (
-                  event_id,schema_version,run_id,turn_id,activity_id,tool_execution_id,seq,
+                  event_id,run_id,turn_id,activity_id,tool_execution_id,seq,
                   event_type,producer,payload_json,payload_ref,visibility,sensitivity,
-                  occurred_at,terminal_status,release_fingerprint
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  occurred_at,terminal_status
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    event.event_id, event.schema_version, event.run_id, event.turn_id,
-                    event.activity_id, event.tool_execution_id, event.seq, event.event_type,
-                    event.producer,
+                    event.event_id, event.run_id, event.turn_id, event.activity_id,
+                    event.tool_execution_id, event.seq, event.event_type, event.producer,
                     canonical_json(event.payload) if event.payload is not None else None,
                     event.payload_ref, event.visibility, event.sensitivity, event.occurred_at,
-                    event.terminal_status, event.release_fingerprint,
+                    event.terminal_status,
                 ),
             )
             events.append(event)
@@ -724,11 +742,19 @@ class SqliteRuntimeStore:
         worker_id: str,
         lease_ms: int,
         now_ms: int,
-        engines: Sequence[str] = ("plan_execute", "agent_loop", "native_loop"),
+        release_map: Mapping[str, str],
     ) -> Claim | None:
-        if not engines:
+        if not release_map:
             return None
-        placeholders = ",".join("?" for _ in engines)
+        release_pairs = tuple(sorted(release_map.items()))
+        if any(not engine or not fingerprint for engine, fingerprint in release_pairs):
+            raise ValueError("release_map requires non-empty engine/fingerprint pairs")
+        release_predicate = " OR ".join(
+            "(r.engine=? AND r.release_fingerprint=?)" for _ in release_pairs
+        )
+        release_params = tuple(
+            value for pair in release_pairs for value in pair
+        )
         async with self.db.transaction() as conn:
             cursor = await conn.execute(
                 f"""UPDATE activities SET
@@ -749,13 +775,13 @@ class SqliteRuntimeStore:
                            )
                          )
                          AND r.deadline_at>?
-                         AND r.engine IN ({placeholders})
+                         AND ({release_predicate})
                        ORDER BY a.available_at,a.created_at,a.activity_id LIMIT 1
                      ) AND state='PENDING'
                      RETURNING *""",
                 (
                     worker_id, now_ms + lease_ms, now_ms, now_ms,
-                    RECONCILIATION_MARKER_KIND, now_ms, *engines,
+                    RECONCILIATION_MARKER_KIND, now_ms, *release_params,
                 ),
             )
             activity_row = await cursor.fetchone()
@@ -853,11 +879,20 @@ class SqliteRuntimeStore:
         expected_revision: int,
         working_state: WorkingState,
         engine_state: dict[str, Any] | None = None,
-        engine_state_ref: str | None = None,
         now_ms: int,
+        events: Sequence[EventDraft] = (),
     ) -> CheckpointRecord:
-        if engine_state is not None and engine_state_ref is not None:
-            raise RuntimeFault("CHECKPOINT_STATE_AMBIGUOUS", "inline state and state ref are exclusive")
+        forbidden = sorted({
+            str(draft.event_type)
+            for draft in events
+            if draft.event_type in _STORE_OWNED_EVENT_TYPES
+        })
+        if forbidden:
+            raise conflict(
+                "EVENT_AUTHORITY_VIOLATION",
+                "Store-owned canonical events cannot be committed with a checkpoint",
+                event_types=forbidden,
+            )
         async with self.db.transaction() as conn:
             await self._assert_fencing(
                 conn, activity_id, fencing_token, run_id=run_id, now_ms=now_ms,
@@ -874,25 +909,21 @@ class SqliteRuntimeStore:
                     "CHECKPOINT_REVISION_CONFLICT", "checkpoint CAS revision did not match",
                     expected=expected_revision, actual=actual,
                 )
-            if working_state.release_fingerprint != run["release_fingerprint"]:
-                raise conflict(
-                    "CHECKPOINT_RELEASE_MISMATCH", "checkpoint release does not match the Run",
-                )
             revision = actual + 1
             checkpoint_id = stable_id("ckpt", run_id, f"checkpoint:{revision}")
             await conn.execute(
                 """INSERT INTO checkpoints (
                    checkpoint_id,run_id,activity_id,revision,working_state_json,
-                   engine_state_json,engine_state_ref,release_fingerprint,schema_version,created_at
-                   ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                   engine_state_json,created_at
+                   ) VALUES (?,?,?,?,?,?,?)""",
                 (
                     checkpoint_id, run_id, activity_id, revision,
                     canonical_json(working_state.model_dump(mode="json")),
                     canonical_json(engine_state) if engine_state is not None else None,
-                    engine_state_ref, run["release_fingerprint"], SCHEMA_VERSION, now_ms,
+                    now_ms,
                 ),
             )
-            drafts = [EventDraft(
+            drafts = [*events, EventDraft(
                 EventType.CHECKPOINT_COMMITTED,
                 {"checkpoint_id": checkpoint_id, "revision": revision},
                 activity_id=activity_id, occurred_at=now_ms,
@@ -927,7 +958,6 @@ class SqliteRuntimeStore:
             return CheckpointRecord(
                 checkpoint_id=checkpoint_id, run_id=run_id, activity_id=activity_id,
                 revision=revision, working_state=working_state, engine_state=engine_state,
-                engine_state_ref=engine_state_ref, release_fingerprint=run["release_fingerprint"],
                 created_at=now_ms,
             )
 
@@ -944,8 +974,7 @@ class SqliteRuntimeStore:
             checkpoint_id=row["checkpoint_id"], run_id=row["run_id"],
             activity_id=row["activity_id"], revision=row["revision"],
             working_state=WorkingState.model_validate_json(row["working_state_json"]),
-            engine_state=_loads(row["engine_state_json"]), engine_state_ref=row["engine_state_ref"],
-            release_fingerprint=row["release_fingerprint"], schema_version=row["schema_version"],
+            engine_state=_loads(row["engine_state_json"]),
             created_at=row["created_at"],
         )
 
@@ -979,7 +1008,11 @@ class SqliteRuntimeStore:
         assistant_text: str,
         citations: list[dict[str, Any]],
         now_ms: int,
+        message_id: str | None = None,
+        generation_id: str | None = None,
     ) -> RunRecord:
+        if (message_id is None) != (generation_id is None):
+            raise ValueError("message_id and generation_id must be provided together")
         async with self.db.transaction() as conn:
             await self._assert_fencing(
                 conn, activity_id, fencing_token, run_id=run_id, now_ms=now_ms,
@@ -1031,9 +1064,15 @@ class SqliteRuntimeStore:
 
             # The complete semantic assistant message, citation set and successful
             # terminal are deliberately one atomic transaction.
+            assistant_payload = {"text": assistant_text}
+            if message_id is not None:
+                assistant_payload.update({
+                    "message_id": message_id,
+                    "generation_id": generation_id,
+                })
             await self._append_in_tx(conn, run_id, [
                 EventDraft(
-                    EventType.ASSISTANT_MESSAGE_COMMITTED, {"text": assistant_text},
+                    EventType.ASSISTANT_MESSAGE_COMMITTED, assistant_payload,
                     activity_id=activity_id, occurred_at=now_ms,
                 ),
                 EventDraft(

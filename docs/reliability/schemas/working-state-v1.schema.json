@@ -14,8 +14,7 @@
     "pending_input",
     "budget",
     "artifact_refs",
-    "evidence_refs",
-    "release_fingerprint"
+    "evidence_refs"
   ],
   "properties": {
     "goal": { "type": "string", "maxLength": 32768 },
@@ -60,8 +59,7 @@
       "type": "array",
       "maxItems": 4096,
       "items": { "type": "string", "minLength": 1, "maxLength": 255 }
-    },
-    "release_fingerprint": { "$ref": "#/$defs/sha256" }
+    }
   },
   "$defs": {
     "artifactId": {

@@ -18,25 +18,48 @@ class AgentSettings(BaseSettings):
     embedding_model: str = "text-embedding-v3"
 
     # --- Engine Runtime（引擎由每个 Run 选择，不再由启动期 ENGINE 选型）---
-    max_loop_iters: int = 8
+    max_loop_iters: int = Field(default=8, gt=0)
     # 子代理 / 子 Runner（researcher、Claude SKILL 子 Runner）用哪一代循环。
     # auto = 跟随主引擎（plan_execute 视同 adk）。A2A **不受本项影响**：
     # 远端跑在 a2a_service 自己的 ADK 上，agent 侧开关改不了它。
     sub_agent_engine: Literal["auto", "adk", "native"] = "auto"
 
     # --- native_loop（自研 Tool-Use 循环，不依赖 Agent 框架）---
-    # 流式工具执行（CC 行为）：一轮内除最后一个之外的 tool_call 可提前开跑——完整性信号是
-    # "出现了更高 index"，所以末个调用必然等到流结束，单工具调用轮没有提速收益。
-    # 关掉即退化为"模型流结束后再统一跑工具"，
-    # 出问题时用它一键回退定位——两条路径共用同一套分批规则，只是投递时机不同。
-    native_streaming_tool_exec: bool = True
+    # 工具提前派发只改变“何时开始工具”，不影响模型正文或 Skill UI 的流式展示。
+    # production 默认 off；experimental_heuristic 保留现有启发式实验机制；当前
+    # OpenAI-compatible provider 不提供 block-complete 信号，第三种模式启动失败。
+    native_early_tool_dispatch: Literal[
+        "off", "experimental_heuristic", "provider_block_complete"
+    ] = "off"
     native_max_tool_concurrency: int = Field(default=10, gt=0)   # 对齐 CC 默认
+    native_max_tool_calls_per_turn: int = Field(default=64, gt=0)
+    native_max_tool_calls_per_run: int = Field(default=256, gt=0)
+    native_max_tool_argument_bytes: int = Field(default=64 * 1024, gt=0)
+    native_max_tool_batch_argument_bytes: int = Field(default=256 * 1024, gt=0)
+    native_max_model_output_bytes: int = Field(default=1024 * 1024, gt=0)
+    native_max_checkpoint_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
+    native_max_tool_catalog_bytes: int = Field(default=1024 * 1024, gt=0)
+    native_max_skill_event_bytes: int = Field(default=64 * 1024, gt=0)
+    native_max_skill_events_per_run: int = Field(default=2000, gt=0)
+    native_max_skill_event_bytes_per_run: int = Field(default=8 * 1024 * 1024, gt=0)
     native_tool_result_max_chars: int = Field(default=8000, gt=0)
     # 上下文压缩（CC 式）：阈值 = 窗口 − buffer。buffer 取值对齐 CC 的 13k。
     # 注意 context_window_tokens 需与实际所用模型匹配；估算逼近该值即触发摘要压缩。
     context_window_tokens: int = Field(default=128000, gt=0)
     compact_buffer_tokens: int = Field(default=13000, gt=0)
     compact_preserve_units: int = Field(default=6, gt=0)          # 压缩后保留的尾部原子单元数
+
+    def model_post_init(self, __context: object) -> None:
+        if self.compact_buffer_tokens >= self.context_window_tokens:
+            raise ValueError("compact_buffer_tokens must be smaller than context_window_tokens")
+        if self.native_max_tool_concurrency > self.native_max_tool_calls_per_turn:
+            raise ValueError(
+                "native_max_tool_concurrency cannot exceed native_max_tool_calls_per_turn"
+            )
+        if self.native_max_tool_batch_argument_bytes < self.native_max_tool_argument_bytes:
+            raise ValueError(
+                "native_max_tool_batch_argument_bytes cannot be smaller than the per-call limit"
+            )
 
     # --- Services ---
     agent_port: int = 8000
@@ -57,11 +80,11 @@ class AgentSettings(BaseSettings):
     skill_result_max_chars: int = Field(default=8000, gt=0)
 
     # --- trace 可观测（结构化轨迹，供评测结合轨迹定位失败原因）---
-    # payload_level=full 会把每轮模型的完整输入落盘，是**本 demo 的调试取向默认值**；
-    # 生产姿势应默认 summary + 采样。图片/二进制在落盘前一律替换为占位摘要
-    # （见 common/trace.py::redact），否则单条多模态轨迹会冲到数 MB。
+    # production 默认 summary。full 会把非敏感用户原文和模型输入落盘，只能在
+    # 明确的本机诊断窗口临时开启；结构化字段、嵌套 JSON 字符串与图片/二进制
+    # 仍先经 common.trace.redact 脱敏/摘要。
     trace_enabled: bool = True
-    trace_payload_level: Literal["none", "summary", "full"] = "full"
+    trace_payload_level: Literal["none", "summary", "full"] = "summary"
     trace_dir: str = "local_storage/traces"
     trace_max_field_chars: int = Field(default=20000, gt=0)   # 单字段截断，防巨型工具结果
     trace_retention_days: int = Field(default=7, ge=0)        # 0 = 不清理
@@ -69,7 +92,6 @@ class AgentSettings(BaseSettings):
     # --- Canonical Runtime / Worker ---
     runtime_db_path: str = "local_storage/runtime/runtime.db"
     artifact_root: str = "local_storage/artifacts"
-    demo_effects_db_path: str = "local_storage/demo_effects/effects.db"
     runtime_worker_id: str = "runtime-worker-local"
     runtime_worker_concurrency: int = Field(default=4, gt=0)
     runtime_worker_poll_ms: int = Field(default=250, gt=0)

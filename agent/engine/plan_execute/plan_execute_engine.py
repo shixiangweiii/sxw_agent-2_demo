@@ -41,7 +41,6 @@ class PlanExecuteEngine(ReasoningEngine):
                             {"step": i + 1, "title": step, "status": "planned"}
                             for i, step in enumerate(plan)
                         ],
-                        release_fingerprint=ctx.release_fingerprint,
                     ),
                     expected_revision=checkpoint.revision if checkpoint else 0,
                     engine_state={"phase": "EXECUTING_PLAN", "plan": plan},

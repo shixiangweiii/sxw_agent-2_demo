@@ -22,16 +22,19 @@ import aiosqlite
 class SchemaIdentityError(RuntimeError):
     """The on-disk database is not the current schema and must not be touched."""
 
+    code = "CURRENT_SCHEMA_MISMATCH"
 
-def schema_checksum(schema_sql: str) -> str:
-    return hashlib.sha256(schema_sql.encode("utf-8")).hexdigest()
+
+def schema_digest(schema_bytes: bytes) -> str:
+    """Return the identity of the exact current ``schema.sql`` bytes."""
+
+    return hashlib.sha256(schema_bytes).hexdigest()
 
 
 async def ensure_current_schema(
     conn: aiosqlite.Connection,
     *,
-    schema_sql: str,
-    schema_version: str,
+    schema_bytes: bytes,
     db_path: Path,
     label: str,
 ) -> None:
@@ -45,22 +48,27 @@ async def ensure_current_schema(
     connection's ``isolation_level``, because callers use different connection
     policies.
     """
-    expected = schema_checksum(schema_sql)
+    expected = schema_digest(schema_bytes)
+    try:
+        schema_sql = schema_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SchemaIdentityError(
+            "CURRENT_SCHEMA_MISMATCH: schema.sql must be valid UTF-8"
+        ) from exc
     await conn.execute("BEGIN IMMEDIATE")
     try:
-        if await _user_table_count(conn) == 0:
+        if await _user_object_count(conn) == 0:
             for statement in _split_sql(schema_sql):
                 await conn.execute(statement)
             await conn.execute(
-                """INSERT INTO schema_meta(id,schema_version,schema_checksum,created_at)
-                   VALUES (1,?,?,?)""",
-                (schema_version, expected, int(time.time() * 1000)),
+                """INSERT INTO schema_meta(id,schema_digest,created_at)
+                   VALUES (1,?,?)""",
+                (expected, int(time.time() * 1000)),
             )
         else:
             _verify(
                 await _read_meta(conn),
-                schema_version=schema_version,
-                expected_checksum=expected,
+                expected_digest=expected,
                 db_path=db_path,
                 label=label,
             )
@@ -70,31 +78,35 @@ async def ensure_current_schema(
     await conn.commit()
 
 
-async def _user_table_count(conn: aiosqlite.Connection) -> int:
+async def _user_object_count(conn: aiosqlite.Connection) -> int:
+    """Count every caller-owned schema object, not just tables.
+
+    A database containing only a view or trigger is still non-empty and must
+    never be adopted as a fresh current database.
+    """
     row = await (await conn.execute(
         """SELECT count(*) FROM sqlite_master
-           WHERE type='table' AND name NOT LIKE 'sqlite_%'"""
+           WHERE name NOT LIKE 'sqlite_%'"""
     )).fetchone()
     return int(row[0])
 
 
-async def _read_meta(conn: aiosqlite.Connection) -> tuple[str, str] | None:
-    """Return the recorded (version, checksum), or None when unreadable."""
+async def _read_meta(conn: aiosqlite.Connection) -> str | None:
+    """Return the recorded current schema digest, or ``None`` when unreadable."""
     try:
         row = await (await conn.execute(
-            "SELECT schema_version,schema_checksum FROM schema_meta WHERE id=1"
+            "SELECT schema_digest FROM schema_meta WHERE id=1"
         )).fetchone()
     except sqlite3.OperationalError:
         # No schema_meta table at all: some other database owns this file.
         return None
-    return (str(row[0]), str(row[1])) if row is not None else None
+    return str(row[0]) if row is not None else None
 
 
 def _verify(
-    meta: tuple[str, str] | None,
+    meta: str | None,
     *,
-    schema_version: str,
-    expected_checksum: str,
+    expected_digest: str,
     db_path: Path,
     label: str,
 ) -> None:
@@ -102,18 +114,14 @@ def _verify(
         found = "schema_meta is absent"
         reason = "schema_meta is missing"
     else:
-        found_version, found_checksum = meta
-        found = f"schema_version={found_version} checksum={found_checksum}"
-        if found_version != schema_version:
-            reason = "schema_version mismatch"
-        elif found_checksum != expected_checksum:
-            reason = "checksum mismatch"
-        else:
+        found = f"schema_digest={meta}"
+        if meta == expected_digest:
             return
+        reason = "schema digest mismatch"
     path = db_path.resolve()
     raise SchemaIdentityError(
-        f"{label} database {reason}: {path}\n"
-        f"  expected: schema_version={schema_version} checksum={expected_checksum}\n"
+        f"CURRENT_SCHEMA_MISMATCH: {label} database {reason}: {path}\n"
+        f"  expected: schema_digest={expected_digest}\n"
         f"  found:    {found}\n"
         "This project does not migrate databases. Delete it and restart:\n"
         f"  rm -f {path} {path}-wal {path}-shm"

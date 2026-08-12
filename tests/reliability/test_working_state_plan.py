@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.reliability.support.runtime_releases import activate_test_release
+
 import sqlite3
 import uuid
 
@@ -14,9 +16,8 @@ from agent.runtime.domain.models import EventType, ReleaseManifest, WorkingState
 async def test_model_plan_and_checkpoint_are_atomic_and_unchanged_plan_is_not_republished(tmp_path):
     store = SqliteRuntimeStore(RuntimeDatabase(tmp_path / "runtime.db"))
     await store.initialize()
-    await store.register_release(
+    await activate_test_release(store,
         ReleaseManifest(engine="agent_loop", components={"test": "plan-v1"}),
-        activate=True,
     )
     run = (await AdmissionService(store).create(
         CreateRunInput(
@@ -32,6 +33,7 @@ async def test_model_plan_and_checkpoint_are_atomic_and_unchanged_plan_is_not_re
         idempotency_key="working-plan",
     )).run
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="plan-worker",
         lease_ms=30_000,
         now_ms=run.envelope.created_at,
@@ -55,7 +57,6 @@ async def test_model_plan_and_checkpoint_are_atomic_and_unchanged_plan_is_not_re
         working_state=WorkingState(
             goal="make a plan",
             model_plan=plan,
-            release_fingerprint=run.envelope.release_fingerprint,
         ),
         now_ms=run.envelope.created_at,
     )

@@ -1,8 +1,8 @@
-"""Recoverable native-loop reliability demonstration.
+"""Test-only deterministic adapter for Runtime recovery fault injection.
 
-Trigger with a prompt starting ``/reliability-demo``.  The normal native engine
-remains unchanged; this explicit scenario makes retry/checkpoint/HITL/external
-idempotency boundaries deterministic and demoable without relying on model luck.
+This fixture intentionally does not participate in Worker assembly.  It keeps
+the WAITING_INPUT, idempotent external effect, and Artifact recovery scenario
+deterministic without reserving a magic production prompt.
 """
 from __future__ import annotations
 
@@ -21,11 +21,11 @@ from agent.runtime.domain.models import (
     ToolResultStatus,
     WorkingState,
 )
-from agent.runtime.ports.engine import EngineAdapter, EngineRunRequest, RuntimeIO
+from agent.runtime.ports.engine import EngineRunRequest, RuntimeIO
 
 
 class DemoEffectsStore:
-    """A deliberately separate SQLite database that mimics an external system."""
+    """A separate test database that mimics an external idempotent system."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -60,13 +60,19 @@ class DemoEffectsStore:
                     """INSERT OR IGNORE INTO demo_tasks
                        (task_id,business_key,idempotency_key,payload_json)
                        VALUES (?,?,?,?)""",
-                    (task_id, business_key, idempotency_key,
-                     json.dumps(payload, ensure_ascii=False, sort_keys=True)),
+                    (
+                        task_id,
+                        business_key,
+                        idempotency_key,
+                        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                    ),
                 )
-                row = await (await conn.execute(
-                    "SELECT * FROM demo_tasks WHERE idempotency_key=?",
-                    (idempotency_key,),
-                )).fetchone()
+                row = await (
+                    await conn.execute(
+                        "SELECT * FROM demo_tasks WHERE idempotency_key=?",
+                        (idempotency_key,),
+                    )
+                ).fetchone()
                 await conn.commit()
             except BaseException:
                 await conn.rollback()
@@ -76,13 +82,13 @@ class DemoEffectsStore:
             "business_key": row["business_key"],
             "idempotency_key": row["idempotency_key"],
             "created": row["task_id"] == task_id,
-            # Make the result Artifact-backed so the demo exercises bounded
-            # event/checkpoint payloads instead of copying a large result.
             "evidence": "demo-side-effect-confirmed\n" * 600,
         }
 
 
 class NativeReliabilityDemoAdapter:
+    """A deterministic adapter used only by the reliability test process."""
+
     name = "native_loop"
 
     def __init__(
@@ -98,28 +104,48 @@ class NativeReliabilityDemoAdapter:
         self._register_tools()
 
     def _register_tools(self) -> None:
-        async def slow_lookup(_arguments: dict[str, Any], context: ToolCallContext) -> dict[str, Any]:
+        async def slow_lookup(
+            _arguments: dict[str, Any], context: ToolCallContext,
+        ) -> dict[str, Any]:
             if context.attempt < 3:
                 raise TimeoutError(f"simulated retryable lookup failure #{context.attempt}")
-            return {"status": "ready", "attempt": context.attempt, "fact": "lookup-confirmed"}
+            return {
+                "status": "ready",
+                "attempt": context.attempt,
+                "fact": "lookup-confirmed",
+            }
 
-        async def create_demo_task(arguments: dict[str, Any], context: ToolCallContext) -> dict[str, Any]:
+        async def create_demo_task(
+            arguments: dict[str, Any], context: ToolCallContext,
+        ) -> dict[str, Any]:
             return await self.effects.create_task(
                 business_key=context.run_id,
                 idempotency_key=context.idempotency_key,
                 payload=arguments,
             )
 
-        self.broker.register(ToolManifest(
-            name="slow_lookup", release_digest="demo-v1",
-            effect_class=ToolEffectClass.READ_ONLY,
-            timeout_seconds=5, max_attempts=3, concurrency_safe=True,
-        ), slow_lookup)
-        self.broker.register(ToolManifest(
-            name="create_demo_task", release_digest="demo-v1",
-            effect_class=ToolEffectClass.IDEMPOTENT_EFFECT,
-            timeout_seconds=5, max_attempts=2, supports_idempotency=True,
-        ), create_demo_task)
+        self.broker.register(
+            ToolManifest(
+                name="slow_lookup",
+                release_digest="demo-v1",
+                effect_class=ToolEffectClass.READ_ONLY,
+                timeout_seconds=5,
+                max_attempts=3,
+                concurrency_safe=True,
+            ),
+            slow_lookup,
+        )
+        self.broker.register(
+            ToolManifest(
+                name="create_demo_task",
+                release_digest="demo-v1",
+                effect_class=ToolEffectClass.IDEMPOTENT_EFFECT,
+                timeout_seconds=5,
+                max_attempts=2,
+                supports_idempotency=True,
+            ),
+            create_demo_task,
+        )
 
     async def execute(self, request: EngineRunRequest, io: RuntimeIO) -> EngineOutcome:
         current_revision = request.checkpoint.revision if request.checkpoint else 0
@@ -141,12 +167,16 @@ class NativeReliabilityDemoAdapter:
             if lookup is None or lookup.status is not ToolResultStatus.SUCCESS:
                 return EngineOutcome(
                     kind=EngineOutcomeKind.RETRYABLE_FAILURE,
-                    error_code="SLOW_LOOKUP_EXHAUSTED", message="slow lookup did not recover",
+                    error_code="SLOW_LOOKUP_EXHAUSTED",
+                    message="slow lookup did not recover",
                 )
             pending = {
                 "type": "APPROVAL",
-                "schema": {"type": "object", "required": ["approved"],
-                           "properties": {"approved": {"type": "boolean"}}},
+                "schema": {
+                    "type": "object",
+                    "required": ["approved"],
+                    "properties": {"approved": {"type": "boolean"}},
+                },
                 "prompt": "Approve creation of the idempotent demo task?",
             }
             await io.checkpoint(
@@ -154,25 +184,36 @@ class NativeReliabilityDemoAdapter:
                     goal="complete the native reliability demonstration",
                     confirmed_facts=[{"fact": "lookup-confirmed"}],
                     pending_input=pending,
-                    release_fingerprint=request.envelope.release_fingerprint,
                 ),
                 expected_revision=current_revision,
-                engine_state={"phase": "WAITING_APPROVAL", "lookup": lookup.model_dump(mode="json")},
+                engine_state={
+                    "phase": "WAITING_APPROVAL",
+                    "lookup": lookup.model_dump(mode="json"),
+                },
             )
-            await io.emit("tool_call", {
-                "id": "demo-request-input", "name": "request_input", "args": pending,
-            })
-            await io.emit("tool_result", {
-                "id": "demo-request-input", "name": "request_input",
-                "response": {"status": "INTERRUPT", "pending_input": pending},
-            })
-            return EngineOutcome(kind=EngineOutcomeKind.WAITING_INPUT, pending_input=pending)
+            await io.emit(
+                "tool_call",
+                {"id": "demo-request-input", "name": "request_input", "args": pending},
+            )
+            await io.emit(
+                "tool_result",
+                {
+                    "id": "demo-request-input",
+                    "name": "request_input",
+                    "response": {"status": "INTERRUPT", "pending_input": pending},
+                },
+            )
+            return EngineOutcome(
+                kind=EngineOutcomeKind.WAITING_INPUT,
+                pending_input=pending,
+            )
 
         approved = bool((signal.get("payload") or {}).get("approved"))
         if not approved:
             return EngineOutcome(
                 kind=EngineOutcomeKind.TERMINAL_FAILURE,
-                error_code="APPROVAL_REJECTED", message="demo task creation was not approved",
+                error_code="APPROVAL_REJECTED",
+                message="demo task creation was not approved",
             )
         created = await self.broker.execute(
             run_id=request.envelope.run_id,
@@ -193,34 +234,23 @@ class NativeReliabilityDemoAdapter:
         await io.checkpoint(
             WorkingState(
                 goal="complete the native reliability demonstration",
-                confirmed_facts=[{"fact": "lookup-confirmed"}, {"fact": "demo-task-created"}],
+                confirmed_facts=[
+                    {"fact": "lookup-confirmed"},
+                    {"fact": "demo-task-created"},
+                ],
                 artifact_refs=artifact_refs,
-                release_fingerprint=request.envelope.release_fingerprint,
             ),
             expected_revision=current_revision,
-            engine_state={"phase": "FINALIZING", "tool_result_ref": created.result_ref},
+            engine_state={
+                "phase": "FINALIZING",
+                "tool_result_ref": created.result_ref,
+            },
         )
-        await io.emit("text", {
-            "delta": "可靠性演示已完成：只读查询在两次可重试失败后成功，"
-                     "approval signal 仅消费一次，幂等副作用已提交，完整证据保存为 Artifact。"
-        })
+        await io.emit(
+            "text",
+            {
+                "delta": "可靠性演示已完成：只读查询在两次可重试失败后成功，"
+                "approval signal 仅消费一次，幂等副作用已提交，完整证据保存为 Artifact。"
+            },
+        )
         return EngineOutcome(kind=EngineOutcomeKind.COMPLETED)
-
-
-class RoutedNativeAdapter:
-    """Route only the explicit demo prompt; all other runs use the real engine."""
-
-    name = "native_loop"
-
-    def __init__(self, normal: EngineAdapter, demo: NativeReliabilityDemoAdapter) -> None:
-        self.normal = normal
-        self.demo = demo
-        self.release_fingerprint = normal.release_fingerprint
-        if demo.release_fingerprint != self.release_fingerprint:
-            raise ValueError("normal/demo native adapters must share one release")
-
-    async def execute(self, request: EngineRunRequest, io: RuntimeIO) -> EngineOutcome:
-        if request.input_text.strip().startswith("/reliability-demo"):
-            return await self.demo.execute(request, io)
-        return await self.normal.execute(request, io)
-

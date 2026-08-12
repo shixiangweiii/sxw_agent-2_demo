@@ -297,7 +297,12 @@ function handleSseEvent(event, assistant) {
     state.lastSeq = Math.max(state.lastSeq, event.id);
     localStorage.setItem("sxw.last_seq", String(state.lastSeq));
   }
-  if (event.type === "text") {
+  if (event.type === "text_start") {
+    // A retry/recovery is a new generation of the same semantic message.
+    // Reset only the answer body; tool/Skill/plan process cards remain intact.
+    assistant.body.textContent = "";
+    scrollToBottom();
+  } else if (event.type === "text") {
     assistant.body.textContent += payload.delta || "";
     scrollToBottom();
   } else if (event.type === "assistant_message") {

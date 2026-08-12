@@ -14,15 +14,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import logging
 import re
 import typing
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
-from common.obs import get_logger, log_kv
-
-logger = get_logger("agent.native")
+from jsonschema import Draft202012Validator
 
 # ADK 用类型注解把 tool_context 排除在 schema 之外；我们按**参数名**排除。
 # 漏掉它会把内部上下文当成模型可填参数暴露出去。
@@ -63,6 +60,8 @@ class ToolSpec:
     run: Callable[[dict[str, Any], NativeToolContext], Awaitable[Any]]
     concurrency_safe: bool = False                   # → executor 分批依据
     exclusive_resources: tuple[str, ...] = ()        # 同名独占资源跨调用互斥
+    result_protocol: str = "plain"
+    implementation: str = ""
 
     def to_wire(self) -> dict[str, Any]:
         """转成 OpenAI ``tools`` 声明。"""
@@ -82,9 +81,29 @@ class ToolRegistry:
     def __init__(self, specs: list[ToolSpec]) -> None:
         self._by_name: dict[str, ToolSpec] = {}
         for spec in specs:
+            if not spec.name or not spec.description.strip():
+                raise ValueError("tool name and description must be non-empty")
+            if spec.parameters.get("type") != "object" or not isinstance(
+                spec.parameters.get("properties"), dict,
+            ):
+                raise ValueError(f"{spec.name}: parameters must be an object JSON Schema")
+            Draft202012Validator.check_schema(spec.parameters)
             if spec.name in self._by_name:
-                log_kv(logger, logging.WARNING, "ToolRegistry", "duplicate tool name, last wins",
-                       tool=spec.name)
+                raise ValueError(f"duplicate tool name: {spec.name}")
+            if not spec.implementation:
+                spec = ToolSpec(
+                    name=spec.name,
+                    description=spec.description,
+                    parameters=spec.parameters,
+                    run=spec.run,
+                    concurrency_safe=spec.concurrency_safe,
+                    exclusive_resources=spec.exclusive_resources,
+                    result_protocol=spec.result_protocol,
+                    implementation=(
+                        f"{getattr(spec.run, '__module__', type(spec.run).__module__)}."
+                        f"{getattr(spec.run, '__qualname__', type(spec.run).__qualname__)}"
+                    ),
+                )
             self._by_name[spec.name] = spec
 
     def get(self, name: str) -> Optional[ToolSpec]:
@@ -108,10 +127,7 @@ def from_function(fn: Callable[..., Any]) -> ToolSpec:
     doc = inspect.getdoc(fn) or ""
     summary, arg_docs = _parse_docstring(doc)
     signature = inspect.signature(fn)
-    try:
-        hints = typing.get_type_hints(fn)
-    except Exception:  # noqa: BLE001 - 注解无法求值时退化为无类型，不应影响工具可用
-        hints = {}
+    hints = typing.get_type_hints(fn)
 
     properties: dict[str, Any] = {}
     required: list[str] = []
@@ -151,6 +167,10 @@ def from_function(fn: Callable[..., Any]) -> ToolSpec:
         parameters=parameters,
         run=run,
         concurrency_safe=name in _READ_ONLY_TOOLS,
+        implementation=(
+            f"{getattr(fn, '__module__', type(fn).__module__)}."
+            f"{getattr(fn, '__qualname__', type(fn).__qualname__)}"
+        ),
     )
 
 
@@ -165,9 +185,9 @@ _TYPE_MAP: dict[Any, str] = {
 
 
 def _annotation_to_schema(annotation: Any) -> dict[str, Any]:
-    """Python 类型注解 → JSON Schema 片段。无法识别时退化为 string。"""
+    """Python 类型注解 → JSON Schema 片段；不明确的声明启动即失败。"""
     if annotation is inspect.Parameter.empty or annotation is Any:
-        return {"type": "string"}
+        raise TypeError("tool parameters require explicit supported type annotations")
 
     origin = typing.get_origin(annotation)
     args = typing.get_args(annotation)
@@ -177,19 +197,26 @@ def _annotation_to_schema(annotation: Any) -> dict[str, Any]:
         non_none = [a for a in args if a is not type(None)]
         if len(non_none) == 1:
             return _annotation_to_schema(non_none[0])
-        return {"type": "string"}
+        raise TypeError(f"unsupported tool parameter union: {annotation!r}")
 
     if origin in (list, set, tuple):
-        item_schema = _annotation_to_schema(args[0]) if args else {"type": "string"}
+        if not args:
+            raise TypeError(f"tool collection annotation requires an item type: {annotation!r}")
+        item_schema = _annotation_to_schema(args[0])
         return {"type": "array", "items": item_schema}
 
     if origin is dict:
-        return {"type": "object"}
+        if len(args) != 2 or args[0] is not str:
+            raise TypeError(f"tool mapping annotation must be dict[str, T]: {annotation!r}")
+        return {
+            "type": "object",
+            "additionalProperties": _annotation_to_schema(args[1]),
+        }
 
     mapped = _TYPE_MAP.get(annotation)
     if mapped:
         return {"type": mapped}
-    return {"type": "string"}
+    raise TypeError(f"unsupported tool parameter annotation: {annotation!r}")
 
 
 _ARGS_HEADER = re.compile(r"^\s*(Args|Arguments|参数)\s*[:：]\s*$")
@@ -255,10 +282,9 @@ def from_adk_tool(tool: Any) -> ToolSpec:
         # Claude SKILL 在技能包 frontmatter 里已声明并发语义；其余远程/副作用工具保守串行。
         concurrency_safe=bool(getattr(tool, "concurrency_safe", False)),
         exclusive_resources=tuple(getattr(tool, "exclusive_resources", ()) or ()),
+        result_protocol=_result_protocol(tool),
+        implementation=f"{type(tool).__module__}.{type(tool).__qualname__}",
     )
-
-
-_EMPTY_OBJECT_SCHEMA: dict[str, Any] = {"type": "object", "properties": {}}
 
 
 def _adk_declaration_to_schema(tool: Any, name: str) -> dict[str, Any]:
@@ -268,15 +294,10 @@ def _adk_declaration_to_schema(tool: Any, name: str) -> dict[str, Any]:
     （原始 JSON Schema，skill-center / Claude SKILL 走这条）与 ``parameters``
     （genai ``Schema`` 对象，AgentTool 走这条）。两种都要能吃。
     """
-    try:
-        declaration = tool._get_declaration()  # noqa: SLF001 - ADK 公版工具的既定取声明方式
-    except Exception as exc:  # noqa: BLE001 - 取声明失败不应拖垮整个工具面
-        log_kv(logger, logging.WARNING, "ToolRegistry", "declaration unavailable, using empty schema",
-               tool=name, error=type(exc).__name__)
-        return dict(_EMPTY_OBJECT_SCHEMA)
+    declaration = tool._get_declaration()  # noqa: SLF001 - ADK 公版工具的既定取声明方式
 
     if declaration is None:
-        return dict(_EMPTY_OBJECT_SCHEMA)
+        raise ValueError(f"{name}: ADK tool declaration is missing")
 
     json_schema = getattr(declaration, "parameters_json_schema", None)
     if isinstance(json_schema, dict) and json_schema:
@@ -284,19 +305,18 @@ def _adk_declaration_to_schema(tool: Any, name: str) -> dict[str, Any]:
 
     parameters = getattr(declaration, "parameters", None)
     if parameters is None:
-        return dict(_EMPTY_OBJECT_SCHEMA)
+        raise ValueError(f"{name}: ADK tool parameters schema is missing")
     dumped = _dump_genai_schema(parameters)
-    return _normalize_schema(dumped) if dumped else dict(_EMPTY_OBJECT_SCHEMA)
+    if not dumped:
+        raise ValueError(f"{name}: ADK tool parameters schema is empty")
+    return _normalize_schema(dumped)
 
 
 def _dump_genai_schema(schema: Any) -> Optional[dict[str, Any]]:
     """genai ``Schema``（pydantic 模型）→ dict。"""
     dump = getattr(schema, "model_dump", None)
     if callable(dump):
-        try:
-            return dump(exclude_none=True, mode="json")
-        except Exception:  # noqa: BLE001 - 退化到手工提取
-            pass
+        return dump(exclude_none=True, mode="json")
     if isinstance(schema, dict):
         return dict(schema)
     return None
@@ -304,20 +324,35 @@ def _dump_genai_schema(schema: Any) -> Optional[dict[str, Any]]:
 
 def _normalize_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """genai 用大写枚举表示类型（OBJECT/STRING…），OpenAI 端要小写。"""
+    normalized = _normalize_schema_node(schema)
+    if normalized.get("type") != "object" or not isinstance(
+        normalized.get("properties"), dict,
+    ):
+        raise ValueError("tool parameters schema must declare object properties")
+    return normalized
+
+
+def _normalize_schema_node(schema: dict[str, Any]) -> dict[str, Any]:
+    """Normalize every nested JSON-Schema node without treating it as a root."""
+
     normalized: dict[str, Any] = {}
     for key, value in schema.items():
         if key == "type" and isinstance(value, str):
             normalized[key] = value.lower()
         elif key == "properties" and isinstance(value, dict):
-            normalized[key] = {k: _normalize_schema(v) if isinstance(v, dict) else v
+            normalized[key] = {k: _normalize_schema_node(v) if isinstance(v, dict) else v
                                for k, v in value.items()}
         elif key == "items" and isinstance(value, dict):
-            normalized[key] = _normalize_schema(value)
+            normalized[key] = _normalize_schema_node(value)
+        elif isinstance(value, dict):
+            normalized[key] = _normalize_schema_node(value)
+        elif isinstance(value, list):
+            normalized[key] = [
+                _normalize_schema_node(item) if isinstance(item, dict) else item
+                for item in value
+            ]
         else:
             normalized[key] = value
-    normalized.setdefault("type", "object")
-    if normalized["type"] == "object":
-        normalized.setdefault("properties", {})
     return normalized
 
 
@@ -330,24 +365,28 @@ def build_registry(tools: list[Any]) -> ToolRegistry:
 
     specs: list[ToolSpec] = []
     for tool in tools:
-        try:
-            if callable(tool) and not hasattr(tool, "run_async"):
-                specs.append(from_function(tool))
-            elif is_agent_tool(tool):
-                # ADK AgentTool（A2A 远程子代理）硬依赖真实 InvocationContext，
-                # 鸭子类型 shim 满足不了 → 必须走桥接自建子 Runner，否则调用必失败。
-                specs.append(from_agent_tool(tool))
-            else:
-                specs.append(from_adk_tool(tool))
-        except Exception as exc:  # noqa: BLE001 - 单个工具适配失败不应阻断整个引擎
-            log_kv(logger, logging.ERROR, "ToolRegistry", "adapt failed, tool skipped",
-                   tool=getattr(tool, "name", getattr(tool, "__name__", "?")),
-                   error=type(exc).__name__)
-    registry = ToolRegistry(specs)
-    log_kv(logger, logging.INFO, "ToolRegistry", "built",
-           count=len(registry),
-           concurrency_safe=[s.name for s in registry.all() if s.concurrency_safe])
-    return registry
+        if callable(tool) and not hasattr(tool, "run_async"):
+            specs.append(from_function(tool))
+        elif is_agent_tool(tool):
+            # ADK AgentTool（本地 researcher 或 A2A 远程子代理）依赖真实 InvocationContext，
+            # 鸭子类型 shim 满足不了 → 必须走桥接自建子 Runner，否则调用必失败。
+            specs.append(from_agent_tool(tool))
+        else:
+            specs.append(from_adk_tool(tool))
+    return ToolRegistry(specs)
+
+
+def _result_protocol(tool: Any) -> str:
+    """Classify only the transport vocabulary; Broker owns its adapter."""
+
+    from agent.claude_skill.claude_skill_tool import ClaudeSkillTool  # noqa: PLC0415
+    from agent.skills.selected_skill_tool import SelectedSkillTool  # noqa: PLC0415
+
+    if isinstance(tool, SelectedSkillTool):
+        return "skill-center"
+    if isinstance(tool, ClaudeSkillTool):
+        return "claude-skill"
+    return "plain"
 
 
 async def call_tool(spec: ToolSpec, args: dict[str, Any], ctx: NativeToolContext) -> Any:

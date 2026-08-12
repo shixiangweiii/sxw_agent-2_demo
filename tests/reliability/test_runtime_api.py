@@ -8,6 +8,11 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+
+from tests.reliability.support.runtime_releases import (
+    activate_test_release,
+    activate_test_releases,
+)
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -66,11 +71,7 @@ def _build_api(
 async def api_env(tmp_path):
     store = SqliteRuntimeStore(RuntimeDatabase(tmp_path / "runtime.db"))
     await store.initialize()
-    releases = {}
-    for engine in ("plan_execute", "agent_loop", "native_loop"):
-        releases[engine] = await store.register_release(
-            ReleaseManifest(engine=engine, components={"test": "api-v1"}), activate=True,
-        )
+    releases = await activate_test_releases(store, marker="api-v1")
     artifacts = FilesystemArtifactStore(tmp_path / "artifacts")
     app = _build_api(store, artifacts)
 
@@ -144,6 +145,7 @@ async def test_committed_sse_replay_uses_seq_and_terminal_not_done(api_env):
         store, EngineRegistry({"native_loop": adapter}), event_flush_bytes=1,
     )
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="api-test-worker", lease_ms=30_000,
         now_ms=(await store.get_run(run_id)).envelope.created_at,
     )
@@ -186,6 +188,7 @@ async def test_no_subscription_is_needed_for_worker_completion(api_env):
         )
     }))
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="detached-worker", lease_ms=30_000,
         now_ms=(await store.get_run(run_id)).envelope.created_at,
     )
@@ -257,9 +260,9 @@ async def test_fi_11_terminal_before_first_sse_read_replays_after_api_store_rest
     artifact_path = tmp_path / "artifacts"
     original_store = SqliteRuntimeStore(RuntimeDatabase(database_path))
     await original_store.initialize()
-    release = await original_store.register_release(
+    release = await activate_test_release(
+        original_store,
         ReleaseManifest(engine="native_loop", components={"test": "fi-11-v1"}),
-        activate=True,
     )
     original_app = _build_api(
         original_store, FilesystemArtifactStore(artifact_path),
@@ -282,6 +285,7 @@ async def test_fi_11_terminal_before_first_sse_read_replays_after_api_store_rest
             )
         }))
         claim = await original_store.claim_next(
+            release_map=await original_store.active_releases(),
             worker_id="fi-11-before-kill",
             lease_ms=30_000,
             now_ms=(await original_store.get_run(run_id)).envelope.created_at,

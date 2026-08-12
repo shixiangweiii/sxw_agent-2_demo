@@ -47,6 +47,7 @@
         "USER_MESSAGE_COMMITTED",
         "RUN_STATUS_CHANGED",
         "ACTIVITY_STATUS_CHANGED",
+        "OUTPUT_GENERATION_STARTED",
         "OUTPUT_DELTA_COMMITTED",
         "MODEL_MESSAGE_COMMITTED",
         "TOOL_CALL_COMMITTED",
@@ -98,8 +99,7 @@
             "FAILED",
             "CANCELLED",
             "TIMED_OUT",
-            "REJECTED",
-            "INCOMPATIBLE_RELEASE"
+            "REJECTED"
           ]
         },
         { "type": "null" }
@@ -128,6 +128,44 @@
         "required": ["event_type"]
       },
       "then": { "properties": { "terminal_status": { "type": "string" } } }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": { "const": "OUTPUT_GENERATION_STARTED" }
+        },
+        "required": ["event_type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "message_id",
+              "generation_id",
+              "supersedes_generation_id",
+              "reason"
+            ],
+            "properties": {
+              "message_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+              "generation_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+              "supersedes_generation_id": {
+                "oneOf": [
+                  { "type": "string", "minLength": 1, "maxLength": 512 },
+                  { "type": "null" }
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "enum": ["initial", "next_turn", "retry", "recovery", "reactive_compact"]
+              }
+            }
+          },
+          "payload_ref": { "type": "null" },
+          "terminal_status": { "type": "null" }
+        }
+      }
     }
   ],
   "$defs": {

@@ -3,9 +3,9 @@
 与 `agent_loop` 最本质的区别：**这里真的有一个 `while`**。模型调用、工具调度、
 续推与终止判定全部由本文件拥有，不再借道任何 Agent 框架的流程引擎。
 
-复刻自 CC 的关键不变量：
-- 退出信号是"本轮模型有没有发起 tool_call"，**不是 `stop_reason`**
-  （CC query.ts:553 明确注明 stop_reason 不可靠，Qwen 上同样成立）；
+借鉴 CC 的扁平循环结构，同时在 Runtime 生产边界收紧协议：
+- 只接受 provider 显式 stop / tool_calls finish marker，并核对它与本轮完整
+  ToolCall batch 一致；静默 EOF、矛盾 marker 均失败关闭；
 - 状态就是一个扁平 messages 数组，续推靠 `state = 新状态; continue`；
 - 每个 continue 点带**命名 transition**，纯为可观测（`[LoopControl]` 日志）；
 - 恢复优先于失败：上下文超长不是终止条件，而是"压缩后重来一轮"。
@@ -17,7 +17,9 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Awaitable, Callable, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Optional
+
+from jsonschema import Draft202012Validator
 
 from agent.engine.loop_tools import (
     FORCE_SUMMARY_REMINDER,
@@ -40,7 +42,6 @@ from agent.engine.native_loop.messages import (
     Usage,
     apply_tool_result_budget,
     clone,
-    messages_after_boundary,
 )
 from agent.engine.native_loop.tools import ToolRegistry
 from agent.llm.chat import AgentChatClient
@@ -62,17 +63,28 @@ T_MODEL_ERROR = "model_error"
 T_ABORTED = "aborted"
 T_REACTIVE_COMPACT = "reactive_compact_retry"
 
+EarlyToolDispatchMode = Literal[
+    "off",
+    "experimental_heuristic",
+    "provider_block_complete",
+]
+
 
 @dataclass
 class LoopConfig:
     max_iters: int                      # 软收尾轮次（到达即 force-summary 劝停）
     hard_cap: int                       # 硬熔断轮次（= max_iters + 余量）
     max_tool_concurrency: int
-    streaming_tool_exec: bool           # 安全阀：关掉即"流完再统一跑工具"
+    early_tool_dispatch: EarlyToolDispatchMode
     tool_result_max_chars: int
     context_window_tokens: int          # 上下文压缩：有效窗口
     compact_buffer_tokens: int          # 上下文压缩：预留 buffer（阈值 = 窗口 − buffer）
     compact_preserve_units: int         # 压缩后原样保留的尾部原子单元数
+    max_tool_calls_per_turn: int = 64
+    max_tool_calls_per_run: int = 256
+    max_tool_argument_bytes: int = 64 * 1024
+    max_tool_batch_argument_bytes: int = 256 * 1024
+    max_model_output_bytes: int = 1024 * 1024
     # 反应式压缩最多尝试几次。CC 是单次守卫；这里允许配置，但默认同样是 1 次，
     # 目的是防"压缩 → 仍超长 → 再压缩"的死循环。
     max_reactive_compacts: int = 1
@@ -83,12 +95,103 @@ class LoopConfig:
 _COMPACT_COOLDOWN_TURNS = 3
 
 
+class _EarlyToolScheduler:
+    """Experimental early dispatch with fixed workers and bounded admission.
+
+    The default ``off`` path never constructs this object.  Experimental mode
+    therefore cannot create one task per streamed call or grow an unbounded
+    pending list; backpressure reaches the provider iterator through submit().
+    """
+
+    def __init__(
+        self,
+        *,
+        execute: ExecuteToolHook,
+        state: LoopState,
+        workers: int,
+        queue_size: int,
+    ) -> None:
+        self._execute = execute
+        self._state = state
+        self._queue: asyncio.Queue[
+            tuple[ToolCall, asyncio.Future[executor.ToolOutcome]] | None
+        ] = asyncio.Queue(maxsize=max(1, queue_size))
+        self._workers = [
+            asyncio.create_task(self._worker(), name=f"native-early-tool-{index}")
+            for index in range(max(1, workers))
+        ]
+        self._futures: list[asyncio.Future[executor.ToolOutcome]] = []
+        self._sealed = False
+
+    async def submit(
+        self, call: ToolCall,
+    ) -> asyncio.Future[executor.ToolOutcome]:
+        if self._sealed:
+            raise RuntimeError("early scheduler is sealed")
+        future: asyncio.Future[executor.ToolOutcome] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._futures.append(future)
+        await self._queue.put((call, future))
+        return future
+
+    async def seal(self) -> None:
+        if self._sealed:
+            return
+        self._sealed = True
+        for _ in self._workers:
+            await self._queue.put(None)
+
+    async def join(self) -> None:
+        await self.seal()
+        await asyncio.gather(*self._workers)
+
+    async def cancel(self) -> None:
+        for future in self._futures:
+            if not future.done():
+                future.cancel()
+        for task in self._workers:
+            task.cancel()
+        await asyncio.gather(*self._workers, return_exceptions=True)
+        # Consume any completed exception so loop teardown never leaves
+        # "Future exception was never retrieved" diagnostics behind.
+        await asyncio.gather(*self._futures, return_exceptions=True)
+
+    async def _worker(self) -> None:
+        while True:
+            item = await self._queue.get()
+            try:
+                if item is None:
+                    return
+                call, future = item
+                if future.cancelled():
+                    continue
+                try:
+                    result = await self._execute(call, self._state)
+                except asyncio.CancelledError:
+                    if not future.done():
+                        future.cancel()
+                    raise
+                except BaseException as exc:
+                    if not future.done():
+                        future.set_exception(exc)
+                else:
+                    if not future.done():
+                        future.set_result(result)
+            finally:
+                self._queue.task_done()
+
+
 @dataclass
 class LoopState:
     """跨轮可变状态。每个 continue 点整体替换，避免散落的字段赋值。"""
 
     messages: list[Msg]
     iters: int = 0
+    # model_call_count 在发起请求前 checkpoint 预留，恢复不退款；因此进程崩溃
+    # 不能绕过硬上限。iters 仍表示语义 turn slot，可在 MODEL_REQUEST 恢复时回退。
+    model_call_count: int = 0
+    tool_call_count: int = 0
     transition: Optional[str] = None
     # 上下文压缩守卫：反应式压缩次数上限 + 压缩失败后的冷却轮次
     attempted_reactive_compact: int = 0
@@ -96,6 +199,33 @@ class LoopState:
     compact_cooldown: int = 0            # >0 时跳过主动压缩，每轮递减
     last_usage: Optional[Usage] = None
     tool_state: dict[str, Any] = field(default_factory=dict)
+    generation_counter: int = 0
+    current_message_id: str = "uninitialized"
+    current_generation_id: str = "uninitialized"
+    supersedes_generation_id: str | None = None
+    generation_reason: str = "initial"
+    final_text: str | None = None
+    final_message_id: str | None = None
+    final_generation_id: str | None = None
+    resume_from_model_request: bool = False
+    restored_phase: str | None = None
+
+
+CheckpointHook = Callable[
+    [LoopState, str, tuple[StreamEvent, ...]],
+    Awaitable[None],
+]
+PrepareToolBatchHook = Callable[[list[ToolCall], LoopState], Awaitable[None]]
+RunToolCallsHook = Callable[
+    [list[ToolCall], LoopState, int],
+    AsyncIterator[executor.ToolOutcome],
+]
+ExecuteToolHook = Callable[[ToolCall, LoopState], Awaitable[executor.ToolOutcome]]
+ControlProbeHook = Callable[[], Awaitable[None]]
+
+
+class NativeRunCancelled(Exception):
+    """The durable Runtime observed cancellation at a safe Native boundary."""
 
 
 class NativeLoop:
@@ -109,7 +239,12 @@ class NativeLoop:
         system_instruction: str,
         config: LoopConfig,
         chat: Optional[AgentChatClient] = None,
-        checkpoint: Callable[[LoopState, str], Awaitable[None]] | None = None,
+        checkpoint: CheckpointHook | None = None,
+        prepare_tool_batch: PrepareToolBatchHook | None = None,
+        run_tool_calls: RunToolCallsHook | None = None,
+        execute_tool: ExecuteToolHook | None = None,
+        control_probe: ControlProbeHook | None = None,
+        message_id_factory: Callable[[int], str] | None = None,
     ) -> None:
         self._client = client
         self._registry = registry
@@ -118,12 +253,20 @@ class NativeLoop:
         # 摘要走轻量单轮补全客户端；为 None 时压缩整体禁用（降级为只做体积治理）。
         self._chat = chat
         self._checkpoint_hook = checkpoint
+        self._prepare_tool_batch_hook = prepare_tool_batch
+        self._run_tool_calls_hook = run_tool_calls
+        self._execute_tool_hook = execute_tool
+        self._control_probe = control_probe
+        self._message_id_factory = message_id_factory or (
+            lambda ordinal: f"native-message-{ordinal}"
+        )
         self._invocation_id = f"invocation_{uuid.uuid4().hex}"
         # run() 结束后由调用方取回：完整历史 + 收口原因（transition 名）。
         # stop_reason 让嵌套场景（如 Claude SKILL 子 Runner）能区分
         # "正常收口" 与 "撞上熔断"，而不必去匹配错误文案。
         self.final_messages: list[Msg] = []
         self.stop_reason: str = ""
+        self.error_code: str | None = None
         # 每轮请求都会带上、但不在 state.messages 里的固定开销：system 指令 +
         # 全部工具的 JSON Schema。当前工具面下就有约 1.8k token，不计入会系统性低估
         # 上下文规模，让压缩阈值形同虚设。工具面启动后不变，故只算一次。
@@ -142,7 +285,18 @@ class NativeLoop:
         cfg = self._config
         log_kv(logger, logging.INFO, "NativeLoop", "start",
                max_iters=cfg.max_iters, hard_cap=cfg.hard_cap,
-               streaming_tool_exec=cfg.streaming_tool_exec, tools=len(self._registry))
+               early_tool_dispatch=cfg.early_tool_dispatch, tools=len(self._registry))
+
+        if cfg.early_tool_dispatch == "provider_block_complete":
+            # The OpenAI-compatible adapter has no explicit block-complete
+            # signal. Worker startup normally rejects this configuration; keep
+            # the kernel guard so non-Worker callers cannot silently downgrade.
+            raise RuntimeError("EARLY_DISPATCH_CAPABILITY_UNAVAILABLE")
+
+        # Cancellation/deadline is checked before any recovery dispatch or
+        # model reservation.  The reusable kernel has no Runtime dependency;
+        # production injects this narrow awaited probe.
+        await self._probe_control()
 
         # 若进程在完整 ToolCall batch 落盘后消失，先恢复缺失的
         # ToolResult；稳定 logical slot 会让 Broker 复用已提交结果。
@@ -150,15 +304,18 @@ class NativeLoop:
             yield event
 
         while True:
+            await self._probe_control()
             state.iters += 1
 
-            # ── 硬熔断：软收尾没劝住时的最后一道闸 ───────────────────────
-            if state.iters > cfg.hard_cap:
+            # ── 硬熔断：模型请求在 checkpoint 中预留，崩溃不退款 ─────────
+            if state.model_call_count >= cfg.hard_cap:
                 log_kv(logger, logging.ERROR, "LoopControl", "hard cap exceeded",
-                       iter=state.iters, hard_cap=cfg.hard_cap, transition=T_HARD_CAP)
+                       calls=state.model_call_count, hard_cap=cfg.hard_cap,
+                       transition=T_HARD_CAP)
                 for ev in self._fail(
                     state, T_HARD_CAP,
                     f"已达框架硬熔断上限（{cfg.hard_cap} 轮），本轮对话中止。",
+                    code="RUN_MODEL_CALL_LIMIT",
                 ):
                     yield ev
                 return
@@ -171,8 +328,42 @@ class NativeLoop:
             with start_span("native.turn", KIND_TURN, iter=state.iters) as turn_span:
                 # ── 主动压缩：估算逼近窗口上限就先摘要，别等真的 413 ─────────
                 await self._maybe_proactive_compact(state)
+
                 # 持久化模型 I/O 前的边界；半个 stream 失败时从此重放。
-                await self._checkpoint(state, "MODEL_REQUEST")
+                # generation start 与 checkpoint 在 Runtime 的同一短事务中
+                # 提交，之后才允许发起网络请求。
+                prior_generation = (
+                    state.current_generation_id
+                    if state.current_generation_id != "uninitialized"
+                    else None
+                )
+                state.model_call_count += 1
+                state.generation_counter += 1
+                state.current_message_id = self._message_id_factory(state.iters - 1)
+                state.supersedes_generation_id = prior_generation
+                if state.resume_from_model_request:
+                    state.generation_reason = "recovery"
+                elif state.transition == T_REACTIVE_COMPACT:
+                    state.generation_reason = "reactive_compact"
+                elif prior_generation is None:
+                    state.generation_reason = "initial"
+                else:
+                    state.generation_reason = "next_turn"
+                state.current_generation_id = f"gen_{uuid.uuid4().hex}"
+                state.final_text = None
+                state.final_message_id = None
+                state.final_generation_id = None
+                await self._checkpoint(
+                    state,
+                    "MODEL_REQUEST",
+                    events=(StreamEvent("output_generation_started", {
+                        "message_id": state.current_message_id,
+                        "generation_id": state.current_generation_id,
+                        "supersedes_generation_id": state.supersedes_generation_id,
+                        "reason": state.generation_reason,
+                    }),),
+                )
+                state.resume_from_model_request = False
 
                 # 组装本次模型请求的消息视图，这里控制LLM能看到的东西，LLM负责决策
                 # _build_request 是 LLM 的"眼睛"——Runtime 通过它控制视野（历史范围、体积上限、临时提醒），但决策权始终在 LLM；
@@ -183,20 +374,52 @@ class NativeLoop:
                 # ── 调模型：边流边产 text，同时累积 tool_call ────────────────
                 text_parts: list[str] = []
                 ready_calls: list[ToolCall] = [] # ready_calls 在循环外声明，所以整个流迭代期间共享同一个列表，每次 append 都在同一个列表上累积
-                early_tasks: list[tuple[ToolCall, asyncio.Task[executor.ToolOutcome]]] = []
+                early_scheduler = (
+                    _EarlyToolScheduler(
+                        execute=self._execute,
+                        state=state,
+                        workers=cfg.max_tool_concurrency,
+                        queue_size=cfg.max_tool_calls_per_turn,
+                    )
+                    if cfg.early_tool_dispatch == "experimental_heuristic"
+                    else None
+                )
+                early_results: list[tuple[ToolCall, asyncio.Future[executor.ToolOutcome]]] = []
                 deferred_calls: list[ToolCall] = []
-                early_allowed = cfg.streaming_tool_exec
+                early_allowed = early_scheduler is not None
                 finish_reason: Optional[str] = None
+                model_output_bytes = 0
+                saw_turn_end = False
 
                 try:
                     async for item in self._client.stream(
                         messages=request_messages,
                         tools=self._registry.wire_declarations() or None, # 把 ToolRegistry 里所有注册工具转换成 OpenAI tools 请求体格式的 JSON Schema 列表——告诉 LLM"你可以调用这些工具，签名是这样"。
-                        allow_early_tool_dispatch=cfg.streaming_tool_exec,
+                        allow_early_tool_dispatch=(
+                            cfg.early_tool_dispatch == "experimental_heuristic"
+                        ),
+                        max_tool_calls=cfg.max_tool_calls_per_turn,
+                        max_tool_argument_bytes=cfg.max_tool_argument_bytes,
+                        max_tool_batch_argument_bytes=cfg.max_tool_batch_argument_bytes,
                     ):
+                        if saw_turn_end:
+                            raise NativeLlmError(
+                                "provider emitted data after the finish marker",
+                                "MODEL_PROTOCOL_INVALID",
+                            )
                         if isinstance(item, TextDelta):
+                            model_output_bytes += len(item.text.encode("utf-8"))
+                            if model_output_bytes > cfg.max_model_output_bytes:
+                                raise NativeLlmError(
+                                    "model generation exceeded the configured byte limit",
+                                    "MODEL_OUTPUT_LIMIT_EXCEEDED",
+                                )
                             text_parts.append(item.text)
-                            yield StreamEvent("text", {"delta": item.text})
+                            yield StreamEvent("text", {
+                                "delta": item.text,
+                                "message_id": state.current_message_id,
+                                "generation_id": state.current_generation_id,
+                            })
                         elif isinstance(item, ToolCallReady):
                             # Runtime identity is derived from the durable model activity slot,
                             # not from a provider-generated function_call_id.  A whole-attempt
@@ -205,27 +428,38 @@ class NativeLoop:
                             item.call.logical_key = (
                                 f"native:turn:{state.iters - 1}:call:{len(ready_calls)}"
                             )
+                            self._check_call_limits(state, ready_calls, item.call)
                             ready_calls.append(item.call) #  CC 的 streaming tool dispatch（流式工具提前派发） 语义， 虽然每次只追加一个，但因为整个流的多个 ToolCallReady 都走同一分支，流结束时 ready_calls 自然就是本轮所有调用的集合。
-                            for ev in self._call_events(item.call): # item.call 是一个下层已经从 OpenAI 流式分片中拼好、参数已完整可解析的 ToolCall 实例
-                                yield ev
                             # 流式工具执行：只要目前为止的调用全是并发安全的，就立刻开跑。
                             # 一旦出现非安全工具，之后的一律推迟到流结束后按批次串行执行——
                             # 这样恰好保住 CC `partitionToolCalls` 的"并发前缀 + 顺序其余"语义。
-                            if early_allowed and self._is_concurrency_safe(item.call):
+                            if (
+                                early_allowed
+                                and self._is_concurrency_safe(item.call)
+                                and self._arguments_valid(item.call)
+                            ):
                                 turn_span.incr("early_dispatched")
-                                early_tasks.append((item.call, asyncio.create_task(
-                                    self._execute(item.call, state),
-                                )))
+                                assert early_scheduler is not None
+                                early_results.append((
+                                    item.call,
+                                    await early_scheduler.submit(item.call),
+                                ))
                             else:
                                 early_allowed = False
                                 deferred_calls.append(item.call)
                         elif isinstance(item, TurnEnd):
+                            if saw_turn_end:
+                                raise NativeLlmError(
+                                    "provider emitted more than one turn terminator",
+                                    "MODEL_PROTOCOL_INVALID",
+                                )
+                            saw_turn_end = True
                             finish_reason = item.finish_reason
                             if item.usage is not None:
                                 state.last_usage = item.usage
                 except ContextOverflowError as exc:
                     # ★ 恢复优先于失败：上下文超长不是终止条件，而是"压缩后重来一轮"。
-                    await self._cancel_tasks(early_tasks)
+                    await self._cancel_early(early_scheduler, early_results)
                     recovered = await self._reactive_compact(
                         state, already_emitted=bool(text_parts))
                     if recovered:
@@ -237,24 +471,40 @@ class NativeLoop:
                            "context overflow, unrecoverable",
                            iter=state.iters, transition=T_MODEL_ERROR)
                     turn_span.set(transition=T_MODEL_ERROR, failure="context_overflow")
-                    for ev in self._fail(state, T_MODEL_ERROR, str(exc)):
+                    for ev in self._fail(
+                        state, T_MODEL_ERROR, str(exc), code="CONTEXT_OVERFLOW",
+                    ):
                         yield ev
                     return
                 except NativeLlmError as exc:
-                    await self._cancel_tasks(early_tasks)
+                    await self._cancel_early(early_scheduler, early_results)
                     log_kv(logger, logging.ERROR, "LoopControl", "model error",
                            iter=state.iters, kind=exc.kind, transition=T_MODEL_ERROR)
                     turn_span.set(transition=T_MODEL_ERROR, failure="model_error",
                                   error_kind=exc.kind)
-                    for ev in self._fail(state, T_MODEL_ERROR, str(exc)):
+                    for ev in self._fail(state, T_MODEL_ERROR, str(exc), code=exc.kind):
                         yield ev
                     return
                 except BaseException:
                     # 取消 / GeneratorExit 兜底，必须排在具体异常之后。用 BaseException
                     # 是因为消费方 `aclose()` 抛来的 GeneratorExit 既不是 Exception
                     # 也不是 CancelledError，窄捕获会漏掉，让已提前投递的工具变成游离 task。
-                    await self._cancel_tasks(early_tasks)
+                    await self._cancel_early(early_scheduler, early_results)
                     raise
+
+                if early_scheduler is not None:
+                    await early_scheduler.seal()
+
+                if not saw_turn_end or finish_reason is None:
+                    await self._cancel_early(early_scheduler, early_results)
+                    for ev in self._fail(
+                        state,
+                        T_MODEL_ERROR,
+                        "provider stream ended without an explicit finish marker",
+                        code="MODEL_STREAM_INCOMPLETE",
+                    ):
+                        yield ev
+                    return
 
                 turn_span.set(text_chars=sum(len(t) for t in text_parts),
                               tool_calls=[c.name for c in ready_calls] or None,
@@ -267,10 +517,52 @@ class NativeLoop:
                     tool_calls=list(ready_calls) or None,
                 ))
 
+                protocol_error = self._validate_finish_reason(
+                    finish_reason,
+                    text="".join(text_parts),
+                    calls=ready_calls,
+                )
+                if protocol_error is not None:
+                    await self._cancel_early(early_scheduler, early_results)
+                    for ev in self._fail(
+                        state,
+                        T_MODEL_ERROR,
+                        protocol_error[1],
+                        code=protocol_error[0],
+                    ):
+                        yield ev
+                    return
+
+                state.tool_call_count += len(ready_calls)
+                invalid = self._validate_tool_batch(ready_calls)
+                if invalid:
+                    await self._cancel_early(early_scheduler, early_results)
+                    synthetic_events: list[StreamEvent] = []
+                    for index, call in enumerate(ready_calls):
+                        code, message = invalid.get(
+                            index,
+                            ("TOOL_BATCH_REJECTED", "another call made the batch invalid"),
+                        )
+                        outcome = executor.rejected_outcome(call, code=code, message=message)
+                        state.messages.append(outcome.message)
+                        synthetic_events.extend(self._synthetic_events(outcome, code=code))
+                    state.transition = T_NEXT_TURN
+                    await self._checkpoint(
+                        state,
+                        "NEXT_TURN",
+                        events=tuple(synthetic_events),
+                    )
+                    continue
+
+                await self._checkpoint(state, "MODEL_RESPONSE_COMMITTED")
+
                 # ── 唯一的退出判定 ──────────────────────────────────────────
-                # 依据是"本轮有没有发起工具调用"，不看 finish_reason：
-                # 后者在多数 OpenAI 兼容实现上并不可靠（CC 源码同注）。
                 if not ready_calls:
+                    final_text = "".join(text_parts)
+                    state.final_text = final_text
+                    state.final_message_id = state.current_message_id
+                    state.final_generation_id = state.current_generation_id
+                    state.transition = T_COMPLETED
                     await self._checkpoint(state, "COMPLETED")
                     log_kv(logger, logging.INFO, "LoopControl", "no tool calls, turn complete",
                            iter=state.iters, finish_reason=finish_reason,
@@ -280,41 +572,41 @@ class NativeLoop:
                         yield ev
                     return
 
+                # Broker atomically PREPAREs the complete stable-slot batch only
+                # after MODEL_RESPONSE_COMMITTED, and no external dispatch is
+                # reachable before TOOL_BATCH_COMMITTED.
+                await self._prepare_tool_batch(ready_calls, state)
+
                 # Side-effect/UNKNOWN 工具必须等完整 ToolCall batch 落盘。
                 try:
                     await self._checkpoint(state, "TOOL_BATCH_COMMITTED")
                 except BaseException:
-                    await self._cancel_tasks(early_tasks)
+                    await self._cancel_early(early_scheduler, early_results)
                     raise
 
                 # ── 收集工具结果：先回收已提前开跑的，再按批次跑其余 ─────────
                 try:
-                    for call, task in early_tasks:
-                        outcome = await task
+                    for call, future in early_results:
+                        outcome = await future
                         for ev in self._result_events(outcome):
                             yield ev
                         state.messages.append(outcome.message)
                         await self._checkpoint(state, "TOOL_RESULT_COMMITTED")
 
-                    async for outcome in executor.run_calls(
-                        deferred_calls,
-                        self._registry,
-                        invocation_id=self._invocation_id,
-                        state=state.tool_state,
-                        max_concurrency=cfg.max_tool_concurrency,
-                    ):
+                    async for outcome in self._run_calls(deferred_calls, state):
                         for ev in self._result_events(outcome):
                             yield ev
                         state.messages.append(outcome.message)
                         await self._checkpoint(state, "TOOL_RESULT_COMMITTED")
+                    if early_scheduler is not None:
+                        await early_scheduler.join()
                 except BaseException:
                     # 用 BaseException 而不是 CancelledError：消费方若走 `aclose()`，
                     # 生成器在 yield 处收到的是 GeneratorExit（它不是 Exception 的子类，
                     # 也不是 CancelledError），窄捕获会让提前投递的工具任务变成游离 task
                     # 继续跑——那可能是技能沙箱子进程或 skill-center 的 HTTP 调用。
                     # 取消时也必须补齐 tool_result 配对，否则这段历史下次进模型会被判 400。
-                    await self._cancel_tasks(early_tasks)
-                    self._fill_missing_results(state, ready_calls)
+                    await self._cancel_early(early_scheduler, early_results)
                     log_kv(logger, logging.WARNING, "LoopControl", "cancelled during tools",
                            iter=state.iters, transition=T_ABORTED)
                     turn_span.set(transition=T_ABORTED)
@@ -335,9 +627,21 @@ class NativeLoop:
         self.final_messages = state.messages
         self.stop_reason = reason
 
-    def _fail(self, state: LoopState, reason: str, message: str) -> list[StreamEvent]:
+    def _fail(
+        self,
+        state: LoopState,
+        reason: str,
+        message: str,
+        *,
+        code: str | None = None,
+    ) -> list[StreamEvent]:
         self._finish(state, reason)
-        return [StreamEvent("error", {"message": message, "reason": reason})]
+        self.error_code = code or reason.upper()
+        return [StreamEvent("error", {
+            "message": message,
+            "reason": reason,
+            "code": self.error_code,
+        })]
 
     def _complete(self, state: LoopState, finish_reason: Optional[str]) -> list[StreamEvent]:
         self._finish(state, T_COMPLETED)
@@ -441,7 +745,9 @@ class NativeLoop:
         关键点：返回的是**副本**。体积治理与临时系统提醒都只作用于本次请求，
         不写回会话历史——否则这些提醒会跨轮累积，越滚越多。
         """
-        live = clone(messages_after_boundary(state.messages))
+        # compact() already replaces the discarded prefix.  There is no
+        # append-only historical format or compatibility boundary to scan.
+        live = clone(state.messages)
         truncated = apply_tool_result_budget(live, self._config.tool_result_max_chars)
         if truncated:
             log_kv(logger, logging.INFO, "ToolResultBudget", "oversized results truncated",
@@ -474,9 +780,45 @@ class NativeLoop:
 
     # ── 工具执行 ───────────────────────────────────────────────────────────
 
-    async def _checkpoint(self, state: LoopState, phase: str) -> None:
+    async def _checkpoint(
+        self,
+        state: LoopState,
+        phase: str,
+        *,
+        events: tuple[StreamEvent, ...] = (),
+    ) -> None:
         if self._checkpoint_hook is not None:
-            await self._checkpoint_hook(state, phase)
+            await self._checkpoint_hook(state, phase, events)
+
+    async def _probe_control(self) -> None:
+        if self._control_probe is not None:
+            await self._control_probe()
+
+    async def _prepare_tool_batch(
+        self, calls: list[ToolCall], state: LoopState,
+    ) -> None:
+        if self._prepare_tool_batch_hook is not None:
+            await self._prepare_tool_batch_hook(calls, state)
+
+    async def _run_calls(
+        self, calls: list[ToolCall], state: LoopState,
+    ) -> AsyncIterator[executor.ToolOutcome]:
+        if not calls:
+            return
+        if self._run_tool_calls_hook is not None:
+            async for outcome in self._run_tool_calls_hook(
+                calls, state, self._config.max_tool_concurrency,
+            ):
+                yield outcome
+            return
+        async for outcome in executor.run_calls(
+            calls,
+            self._registry,
+            invocation_id=self._invocation_id,
+            state=state.tool_state,
+            max_concurrency=self._config.max_tool_concurrency,
+        ):
+            yield outcome
 
     async def _resume_pending_tools(self, state: LoopState) -> AsyncIterator[StreamEvent]:
         """恢复最近一个已落盘 batch 中尚未配对的 ToolResult。"""
@@ -498,14 +840,20 @@ class NativeLoop:
         }
         pending = [call for call in calls if call.id not in answered]
         if not pending:
+            # A crash may land after the final per-result checkpoint but before
+            # the explicit turn boundary.  Re-establish NEXT_TURN durably
+            # before reserving another model request; do not silently skip a
+            # phase merely because all ledger results are already paired.
+            if state.restored_phase == "TOOL_RESULT_COMMITTED":
+                state.transition = T_NEXT_TURN
+                await self._checkpoint(state, "NEXT_TURN")
             return
-        async for outcome in executor.run_calls(
-            pending,
-            self._registry,
-            invocation_id=self._invocation_id,
-            state=state.tool_state,
-            max_concurrency=self._config.max_tool_concurrency,
-        ):
+        # Idempotent full-batch prepare rebuilds attempt-local correlation after
+        # restart and re-validates every stable slot before any re-dispatch.
+        await self._prepare_tool_batch(calls, state)
+        if state.restored_phase == "MODEL_RESPONSE_COMMITTED":
+            await self._checkpoint(state, "TOOL_BATCH_COMMITTED")
+        async for outcome in self._run_calls(pending, state):
             for event in self._result_events(outcome):
                 yield event
             state.messages.append(outcome.message)
@@ -518,30 +866,128 @@ class NativeLoop:
         return bool(spec and spec.concurrency_safe and not spec.exclusive_resources)
 
     async def _execute(self, call: ToolCall, state: LoopState) -> executor.ToolOutcome:
+        if self._execute_tool_hook is not None:
+            return await self._execute_tool_hook(call, state)
         return await executor.execute_one(
             call, self._registry,
             invocation_id=self._invocation_id, state=state.tool_state,
         )
 
     @staticmethod
-    async def _cancel_tasks(
-        tasks: list[tuple[ToolCall, asyncio.Task[executor.ToolOutcome]]],
+    async def _cancel_early(
+        scheduler: _EarlyToolScheduler | None,
+        _results: list[tuple[ToolCall, asyncio.Future[executor.ToolOutcome]]],
     ) -> None:
-        for _, task in tasks:
-            task.cancel()
-        for _, task in tasks:
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001 - 清理阶段不再传播
-                pass
+        if scheduler is not None:
+            await scheduler.cancel()
 
-    def _fill_missing_results(self, state: LoopState, calls: list[ToolCall]) -> None:
-        """给还没有配对结果的 tool_call 补合成结果（CC 的 yieldMissingToolResultBlocks）。"""
-        answered = {m.tool_call_id for m in state.messages if m.role == "tool"}
-        for call in calls:
-            if call.id in answered:
+    def _check_call_limits(
+        self,
+        state: LoopState,
+        current: list[ToolCall],
+        call: ToolCall,
+    ) -> None:
+        cfg = self._config
+        if len(current) + 1 > cfg.max_tool_calls_per_turn:
+            raise NativeLlmError(
+                "model exceeded the per-turn ToolCall limit",
+                "TOOL_CALL_LIMIT_EXCEEDED",
+            )
+        if state.tool_call_count + len(current) + 1 > cfg.max_tool_calls_per_run:
+            raise NativeLlmError(
+                "model exceeded the per-Run ToolCall limit",
+                "TOOL_CALL_LIMIT_EXCEEDED",
+            )
+        argument_bytes = len((call.arguments or "").encode("utf-8"))
+        if argument_bytes > cfg.max_tool_argument_bytes:
+            raise NativeLlmError(
+                "one ToolCall argument exceeded the configured byte limit",
+                "TOOL_ARGUMENTS_TOO_LARGE",
+            )
+        batch_bytes = argument_bytes + sum(
+            len((existing.arguments or "").encode("utf-8")) for existing in current
+        )
+        if batch_bytes > cfg.max_tool_batch_argument_bytes:
+            raise NativeLlmError(
+                "ToolCall batch arguments exceeded the configured byte limit",
+                "TOOL_BATCH_TOO_LARGE",
+            )
+
+    def _arguments_valid(self, call: ToolCall) -> bool:
+        spec = self._registry.get(call.name)
+        if spec is None:
+            return False
+        arguments, error = executor.parse_arguments(call)
+        if error is not None or arguments is None:
+            return False
+        return not list(Draft202012Validator(spec.parameters).iter_errors(arguments))
+
+    def _validate_tool_batch(
+        self, calls: list[ToolCall],
+    ) -> dict[int, tuple[str, str]]:
+        invalid: dict[int, tuple[str, str]] = {}
+        for index, call in enumerate(calls):
+            spec = self._registry.get(call.name)
+            if spec is None:
+                invalid[index] = (
+                    "TOOL_NOT_FOUND",
+                    f"tool is not present in the frozen catalog: {call.name}",
+                )
                 continue
-            state.messages.append(executor.cancelled_outcome(call).message)
+            arguments, parse_error = executor.parse_arguments(call)
+            if parse_error is not None or arguments is None:
+                invalid[index] = (
+                    "TOOL_ARGUMENTS_INVALID",
+                    "tool arguments are not a JSON object",
+                )
+                continue
+            errors = sorted(
+                Draft202012Validator(spec.parameters).iter_errors(arguments),
+                key=lambda item: list(item.path),
+            )
+            if errors:
+                invalid[index] = (
+                    "TOOL_ARGUMENTS_INVALID",
+                    errors[0].message[:1000],
+                )
+        return invalid
+
+    @staticmethod
+    def _validate_finish_reason(
+        finish_reason: str,
+        *,
+        text: str,
+        calls: list[ToolCall],
+    ) -> tuple[str, str] | None:
+        if finish_reason == "stop":
+            if calls:
+                return (
+                    "MODEL_PROTOCOL_INVALID",
+                    "finish_reason=stop cannot carry ToolCalls",
+                )
+            if not text.strip():
+                return (
+                    "MODEL_EMPTY_FINAL_RESPONSE",
+                    "final assistant response is empty",
+                )
+            return None
+        if finish_reason == "tool_calls":
+            if not calls:
+                return (
+                    "MODEL_PROTOCOL_INVALID",
+                    "finish_reason=tool_calls requires a complete ToolCall batch",
+                )
+            call_ids = [call.id for call in calls]
+            if any(not call_id for call_id in call_ids) or len(call_ids) != len(set(call_ids)):
+                return (
+                    "MODEL_PROTOCOL_INVALID",
+                    "ToolCall ids must be present and unique within one model response",
+                )
+            return None
+        return (
+            "MODEL_PROTOCOL_INVALID",
+            f"unsupported finish_reason: {finish_reason}",
+        )
 
     # ── 事件翻译 ───────────────────────────────────────────────────────────
 
@@ -561,7 +1007,7 @@ class NativeLoop:
 
     def _result_events(self, outcome: executor.ToolOutcome) -> list[StreamEvent]:
         # 计划工具的返回不给用户看：它的信息已经由 plan_step 表达过了。
-        if outcome.call.name == PLAN_TOOL:
+        if outcome.call.name == PLAN_TOOL or not outcome.project_event:
             return []
         _, parse_error = executor.parse_arguments(outcome.call)
         broker_owned = (
@@ -573,3 +1019,27 @@ class NativeLoop:
             "name": outcome.call.name,
             "response": executor.json_safe(outcome.response),
         }, authority="broker" if broker_owned else "engine")]
+
+    @staticmethod
+    def _synthetic_events(
+        outcome: executor.ToolOutcome,
+        *,
+        code: str,
+    ) -> list[StreamEvent]:
+        call = outcome.call
+        args, _ = executor.parse_arguments(call)
+        return [
+            StreamEvent("tool_call", {
+                "id": call.id,
+                "name": call.name,
+                "args": args or {},
+                "not_dispatched": True,
+            }, authority="engine"),
+            StreamEvent("tool_result", {
+                "id": call.id,
+                "name": call.name,
+                "response": executor.json_safe(outcome.response),
+                "error_code": code,
+                "not_dispatched": True,
+            }, authority="engine"),
+        ]

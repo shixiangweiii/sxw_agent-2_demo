@@ -7,12 +7,34 @@ from agent.engine.base import RunContext
 from agent.engine.loop_tools import TASK_PLAN_KEY
 from agent.engine.loop_tools.task_plan_tool import update_task_plan
 from agent.engine.native_loop.tools import NativeToolContext, ToolRegistry, from_function
-from agent.runtime.adapters.brokered_tools import broker_native_registry
-from agent.runtime.domain.models import ToolResultEnvelope, ToolResultStatus
+from agent.runtime.adapters.brokered_tools import (
+    NativeBrokerSession,
+    build_brokered_native_registry,
+    build_runtime_tool_catalog,
+    prepare_native_batch,
+)
+from agent.runtime.application.tool_broker import PreparedToolExecution, ToolBatchCall
+from agent.runtime.domain.models import (
+    ToolResultEnvelope,
+    ToolResultStatus,
+    sha256_json,
+)
 
 
 class _CommittedReplayBroker:
-    async def execute(self, **_kwargs) -> ToolResultEnvelope:
+    async def prepare_batch(self, *, calls, **_kwargs):
+        return tuple(
+            PreparedToolExecution(
+                tool_execution_id="tool_plan_replay",
+                logical_key=call.logical_key,
+                tool_name=call.tool_name,
+                request_digest=sha256_json(call.arguments),
+                arguments=dict(call.arguments),
+            )
+            for call in calls
+        )
+
+    async def execute_prepared(self, **_kwargs) -> ToolResultEnvelope:
         return ToolResultEnvelope(
             status=ToolResultStatus.SUCCESS,
             preview={
@@ -40,8 +62,27 @@ async def test_native_committed_plan_replay_rebuilds_request_local_mirror() -> N
         fencing_token=3,
         release_fingerprint="release-v1",
     )
-    registry = broker_native_registry(
-        ToolRegistry([from_function(update_task_plan)]), rc,
+    source = ToolRegistry([from_function(update_task_plan)])
+    session = NativeBrokerSession(
+            run_id=rc.run_id,
+            activity_id=rc.activity_id,
+            fencing_token=rc.fencing_token,
+            deadline_at_ms=rc.deadline_at_ms,
+            tool_broker=rc.tool_broker,
+            catalog=build_runtime_tool_catalog(source),
+        )
+    arguments = {"steps": ["inspect", "answer"], "current_step": 2}
+    await prepare_native_batch(session, source, [
+        ToolBatchCall(
+            logical_key="native:turn:0:call:0",
+            tool_name="update_task_plan",
+            arguments=arguments,
+            framework_call_id="provider-id-after-restart",
+        ),
+    ])
+    registry = build_brokered_native_registry(
+        source,
+        session,
     )
     wrapped = registry.get("update_task_plan")
     assert wrapped is not None
@@ -53,7 +94,7 @@ async def test_native_committed_plan_replay_rebuilds_request_local_mirror() -> N
     )
 
     await wrapped.run(
-        {"steps": ["inspect", "answer"], "current_step": 2},
+        arguments,
         tool_context,
     )
     assert tool_context.state[TASK_PLAN_KEY] == {

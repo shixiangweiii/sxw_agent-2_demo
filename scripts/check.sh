@@ -155,7 +155,9 @@ import re
 from pathlib import Path
 
 roots = [
-    Path("agent"), Path("arag"), Path("web"), Path("eval/harness"),
+    Path("agent"), Path("arag"), Path("common"), Path("skillcenter"),
+    Path("a2a_service"), Path("web"), Path("eval/harness"),
+    Path("docs/reliability"),
     Path("README.md"), Path("RUNBOOK.md"), Path("AGENTS.md"),
     Path("CLAUDE.md"), Path("eval/README.md"), Path(".env.example"),
 ]
@@ -165,18 +167,49 @@ patterns = {
     "legacy embedding authority": re.compile(r"local_storage/embedding|EMBEDDING_STORAGE_DIR"),
     "legacy done event": re.compile(r"StreamEvent\(\s*['\"]done['\"]|event:\s*done"),
     "legacy source ownership": re.compile(r"api/chat\.py|HistoryStore|CitationInjector|SessionManager"),
+    "incremental schema migration": re.compile(
+        r"\bALTER\s+TABLE\b|\bcheckpoint_upgrader\b|\bupgrade_checkpoint\b",
+        re.IGNORECASE,
+    ),
+    "removed checkpoint external state ref": re.compile(r"engine_state_ref"),
+    "removed release terminal": re.compile(r"INCOMPATIBLE_RELEASE|RELEASE_INCOMPATIBLE"),
+    "legacy evidence carrier": re.compile(r"__evidence_set__|legacy[_ -]?evidence", re.IGNORECASE),
+    "removed native early-dispatch boolean": re.compile(r"native_streaming_tool_exec", re.IGNORECASE),
+    "removed schema error wrapper": re.compile(r"SchemaCompatibilityError"),
+    "removed partial release activation API": re.compile(
+        r"\bregister_releases?\s*\("
+    ),
+}
+production_patterns = {
+    "production reliability demo route": re.compile(
+        r"native_reliability_demo|NativeReliabilityDemo|RoutedNativeAdapter|/reliability-demo"
+    ),
+    "legacy evidence reconstruction helper": re.compile(
+        r"_evidence_set_from_legacy_hits|legacy[_ -]?hits|hits_to_evidence",
+        re.IGNORECASE,
+    ),
 }
 failures = []
 for root in roots:
     files = [root] if root.is_file() else root.rglob("*")
     for path in files:
-        if not path.is_file() or path.suffix not in {".py", ".js", ".html", ".md", ".example"}:
+        if not path.is_file() or path.suffix not in {
+            ".py", ".js", ".html", ".md", ".example", ".sql", ".json",
+        }:
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
         for label, pattern in patterns.items():
             for match in pattern.finditer(text):
                 line = text.count("\n", 0, match.start()) + 1
                 failures.append(f"{path}:{line}: {label}: {match.group(0)}")
+for path in Path("agent").rglob("*"):
+    if not path.is_file() or path.suffix != ".py":
+        continue
+    source = path.read_text(encoding="utf-8", errors="replace")
+    for label, pattern in production_patterns.items():
+        for match in pattern.finditer(source):
+            line = source.count("\n", 0, match.start()) + 1
+            failures.append(f"{path}:{line}: {label}: {match.group(0)}")
 if failures:
     raise SystemExit("\n".join(failures))
 PY

@@ -6,9 +6,11 @@ transactions in :mod:`arag.persistence.service`.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
+import sqlite3
 import time
 import uuid
 from collections.abc import AsyncIterator, Sequence
@@ -27,18 +29,11 @@ from arag.persistence.models import (
     SubmittedDocument,
 )
 from arag.store.base import Chunk
-from common.sqlite_schema import SchemaIdentityError, ensure_current_schema
-
-# ARAG owns its schema version; it deliberately does not import from ``agent``.
-SCHEMA_VERSION = "1"
+from common.sqlite_schema import ensure_current_schema
 
 
 class RagPersistenceError(RuntimeError):
     """Base class for deterministic persistence failures."""
-
-
-class RagSchemaError(RagPersistenceError):
-    """The on-disk schema is newer than, or differs from, this release."""
 
 
 class IndexJobConflict(RagPersistenceError):
@@ -76,13 +71,21 @@ class RagRepository:
     @asynccontextmanager
     async def connection(self) -> AsyncIterator[aiosqlite.Connection]:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = await aiosqlite.connect(self.db_path)
+        conn = await aiosqlite.connect(self.db_path, isolation_level=None)
         conn.row_factory = aiosqlite.Row
-        await conn.execute("PRAGMA journal_mode = WAL")
-        await conn.execute("PRAGMA synchronous = FULL")
-        await conn.execute("PRAGMA foreign_keys = ON")
-        await conn.execute("PRAGMA busy_timeout = 5000")
         try:
+            await conn.execute("PRAGMA busy_timeout = 5000")
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    await conn.execute("PRAGMA journal_mode = WAL")
+                    break
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+                        raise
+                    await asyncio.sleep(0.01)
+            await conn.execute("PRAGMA synchronous = FULL")
+            await conn.execute("PRAGMA foreign_keys = ON")
             yield conn
         finally:
             await conn.close()
@@ -95,16 +98,12 @@ class RagRepository:
         """
         schema_path = Path(__file__).with_name("schema.sql")
         async with self.connection() as conn:
-            try:
-                await ensure_current_schema(
-                    conn,
-                    schema_sql=schema_path.read_text(encoding="utf-8"),
-                    schema_version=SCHEMA_VERSION,
-                    db_path=self.db_path,
-                    label="rag",
-                )
-            except SchemaIdentityError as exc:
-                raise RagSchemaError(str(exc)) from exc
+            await ensure_current_schema(
+                conn,
+                schema_bytes=schema_path.read_bytes(),
+                db_path=self.db_path,
+                label="rag",
+            )
 
     async def submit_document(
         self,

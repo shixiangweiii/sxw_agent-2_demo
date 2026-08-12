@@ -25,12 +25,14 @@
 | claim 前 Worker kill | Activity=`PENDING` | 可由任一恢复 Worker 领取 | 固定排序 + `UPDATE ... RETURNING` | Run=`FAILED` |
 | claim 后、LLM 前 kill | Activity=`CLAIMED/RUNNING`、lease/fencing 已提交 | Run 仍非终态 | lease 到期 classifier requeue；fencing 增长 | 立即失败 Run |
 | LLM 返回后、event commit 前 kill | 没有模型输出事实 | 当前 model Activity 可重试 | 按 Engine 恢复粒度重新调用 | 从 Trace/内存恢复未提交输出 |
-| 部分 delta 已 commit 后 kill | 若干 `OUTPUT_DELTA_COMMITTED` | 这些 delta 可重放，但不是 final history | activity 重试；实现可继续产生新 committed delta，最终语义只看 final message | 删除已提交 delta；把 partial 纳入后续 conversation |
-| checkpoint 两写并发 | 一个 expected revision 获胜 | 另一个 `CHECKPOINT_REVISION_CONFLICT` | 重读后按业务决定重算/放弃 | last-write-wins |
-| lease 已过期，旧 Worker 返回 | 新 fencing 已生效 | 旧结果拒绝 `ACTIVITY_FENCING_STALE` | 当前 owner 继续；late result 仅诊断 | 接受“先返回者”覆盖 |
+| 部分 delta 已 commit 后 kill | `OUTPUT_GENERATION_STARTED` + 若干 `OUTPUT_DELTA_COMMITTED` | 旧 generation 可重放审计，但不是 final history | 以 `reason=recovery` 创建新 generation；客户端只重置正文，最终语义只看 final message | 删除已提交 delta；追加到旧 generation；把 partial 纳入 conversation |
+| provider 空流、usage-only 或 silent EOF | 最多只有 `MODEL_REQUEST`/未完 generation | 不合成 TurnEnd；`MODEL_STREAM_INCOMPLETE` 可重试 | 新 generation 重试，且未经 PREPARE 不得 dispatch | 当作空成功或正常 `stop` |
+| checkpoint 两写并发 | 一个 expected revision 获胜 | 另一个丢失 attempt ownership | `AttemptOwnershipLost` 冒泡给 Worker，旧 attempt 停止 | last-write-wins；转成 ToolResult 或 Run terminal |
+| lease 已过期，旧 Worker 返回 | 新 fencing 已生效 | 旧结果拒绝并转为 `AttemptOwnershipLost` | 当前 owner 继续；late result 仅诊断 | 接受“先返回者”覆盖；把 ownership loss 显示给模型 |
 | Worker heartbeat 消失 | heartbeat stale | 仅运维信号 | 以 Activity lease 恢复 | 据此直接失败所有 Run |
 | trace disabled/写失败 | Runtime DB 不受影响 | 执行与恢复继续 | 记录 best-effort 诊断告警 | 依赖 trace 裁决/恢复 |
 | final message commit 前 kill | 无 `ASSISTANT_MESSAGE_COMMITTED`/terminal | Run 非成功 | Activity 恢复后重新 finalize | 单独保存 final 后补 terminal |
+| Native `COMPLETED` checkpoint 已 commit、成功 terminal 前 kill | checkpoint 含精确 final text/message/generation | 不再请求模型或重放 delta | 从 checkpoint 继续 final transaction | 用模型重新生成最终答案 |
 | final terminal 事务重试 | 第一次可能已整体提交 | 最多一个 terminal | CAS/幂等读取既有 terminal | 第二个 terminal/seq batch |
 
 ## 3. ToolEffect 与 cancel 竞态
@@ -91,8 +93,9 @@
 | vector/BM25 丢失或 checksum 坏 | Document/chunks truth 仍在 | Retrieval=`DEGRADED` | 从 active truth 重建后原子换 snapshot | 把索引当权威或返回正常 MISS |
 | 一路召回失败、另一路成功 | committed EvidenceSet | `DEGRADED`，保留有效 hits | 主 Agent best-effort 继续 | 标 `HIT` 隐藏失败或标 `MISS` |
 | scope/ACL 失败 | 无可授权 evidence | `DENIED` | 主 Agent按策略继续 | 当 MISS/ERROR |
-| Run release 与 Worker 不匹配 | frozen fingerprint | 一律 `INCOMPATIBLE_RELEASE` | 不领取/不执行未知 checkpoint | 静默用当前 active release |
-| DB schema identity 不符 | 启动期 schema 校验失败 | API/Worker fail-fast | 由使用者显式删库重建 | 自动迁移或修补后运行 |
+| Run release 与 Worker 不匹配 | Run 冻结 fingerprint | exact-claim SQL 不领取，不产生 Run 终态 | 匹配 Worker 恢复；否则 Run 保持 pending 并由绝对 deadline 收口 | 静默用当前 active release；Coordinator 把调度错配终态化 |
+| 新 fingerprint 激活时存在活跃旧 Run | 旧 Run 与三个 active pointer 仍完整 | `ACTIVE_RUNS_BLOCK_RELEASE_ACTIVATION`，三 pointer 全部不变 | 等旧 Run 终态后重试激活 | 部分切换 pointer；让新 Worker 解释旧 checkpoint |
+| DB schema identity 不符 | 完整 current `schema.sql` digest 不同或非空库缺 `schema_meta` | `CURRENT_SCHEMA_MISMATCH`，API/Worker/ARAG 启动 fail-fast | 由使用者显式删库重建 | 自动迁移、修补或重写 identity 后运行 |
 
 ## 6. Deadline 的统一规则
 

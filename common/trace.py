@@ -77,11 +77,13 @@ _LIST_SCAN_MAX_FILES = 200
 # 文件摘要缓存条数（键含 mtime/size，文件被追加就自动失效）
 _SUMMARY_CACHE_CAPACITY = 512
 
-# 敏感 key：命中即整值替换。刻意**不匹配裸 token**——
-# prompt_tokens / completion_tokens / max_tokens 都是要留的正常字段。
+# 敏感 key：命中即整值替换。裸 ``token`` 只做整键匹配——不能用普通
+# ``token`` 子串，否则 prompt_tokens / completion_tokens / max_tokens 这些
+# 正常可观测字段也会被抹掉。
 _SECRET_KEY_RE = re.compile(
     r"(api[_-]?key|apikey|authorization|secret|password|passwd|credential"
-    r"|access[_-]?token|auth[_-]?token|bearer)",
+    r"|access[_-]?token|auth[_-]?token|refresh[_-]?token|session[_-]?token"
+    r"|id[_-]?token|bearer|^token$)",
     re.IGNORECASE,
 )
 # data URL：多模态图片进 messages 后会常驻会话历史、每轮都带，
@@ -268,6 +270,31 @@ def redact(value: Any, _depth: int = 0) -> Any:
         if match:
             return (f"[image {match.group(1)} {len(value)}B "
                     f"sha1={_sha1(value.encode('utf-8', 'replace'))}]")
+        # Tool arguments and model messages routinely contain JSON serialized
+        # *inside* an otherwise structured payload.  Treating that value as an
+        # opaque string bypasses key-based redaction and also leaks through a
+        # summary ``head``.  Parse only complete object/array strings, redact
+        # recursively, then serialize back to a string so Trace keeps the
+        # original field shape.  Free-form prose deliberately remains prose:
+        # ``full`` is an explicit raw-payload diagnostic mode and cannot infer
+        # secrets that have no structural key.
+        stripped = value.strip()
+        if (
+            len(stripped) >= 2
+            and stripped[0] in "[{"
+            and stripped[-1] in "]}"
+        ):
+            try:
+                nested = json.loads(stripped)
+            except (TypeError, ValueError):
+                nested = None
+            if isinstance(nested, (dict, list)):
+                value = json.dumps(
+                    redact(nested, _depth + 1),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
         limit = _tracer.max_field_chars
         if len(value) > limit:
             return value[:limit] + f"…[truncated, {len(value)} chars total]"
@@ -346,7 +373,7 @@ class _Tracer:
 
     def __init__(self) -> None:
         self.enabled = False
-        self.payload_level = LEVEL_FULL
+        self.payload_level = LEVEL_SUMMARY
         self.max_field_chars = 20000
         self.engine = "unknown"
         self._dir: Optional[Path] = None
@@ -430,7 +457,7 @@ class _Tracer:
     ) -> None:
         self.enabled = enabled
         self.payload_level = payload_level if payload_level in (
-            LEVEL_NONE, LEVEL_SUMMARY, LEVEL_FULL) else LEVEL_FULL
+            LEVEL_NONE, LEVEL_SUMMARY, LEVEL_FULL) else LEVEL_SUMMARY
         self.max_field_chars = max(200, max_field_chars)
         self.engine = engine
         self._ring.clear()
@@ -478,7 +505,7 @@ def _prune(root: Path, retention_days: int) -> None:
 def configure_tracing(
     *,
     enabled: bool = True,
-    payload_level: str = LEVEL_FULL,
+    payload_level: str = LEVEL_SUMMARY,
     trace_dir: str = "local_storage/traces",
     max_field_chars: int = 20000,
     retention_days: int = 7,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.reliability.support.runtime_releases import activate_test_release
+
 import uuid
 from dataclasses import dataclass
 
@@ -25,9 +27,8 @@ class FixedClock:
 async def test_canonical_history_uses_conversation_turn_sequence_not_wall_clock_or_uuid(tmp_path):
     store = SqliteRuntimeStore(RuntimeDatabase(tmp_path / "runtime.db"))
     await store.initialize()
-    await store.register_release(
+    await activate_test_release(store,
         ReleaseManifest(engine="native_loop", components={"test": "history-v1"}),
-        activate=True,
     )
     clock = FixedClock()
     admission = AdmissionService(store, clock=clock, default_deadline_ms=60_000)
@@ -49,6 +50,7 @@ async def test_canonical_history_uses_conversation_turn_sequence_not_wall_clock_
 
     async def succeed(run, answer: str) -> None:
         claim = await store.claim_next(
+            release_map=await store.active_releases(),
             worker_id=f"worker-{answer}", lease_ms=30_000, now_ms=clock.now_ms()
         )
         assert claim is not None

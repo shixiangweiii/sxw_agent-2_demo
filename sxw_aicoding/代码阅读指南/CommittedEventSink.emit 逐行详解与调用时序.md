@@ -1,448 +1,171 @@
-# CommittedEventSink.emit 逐行详解与调用时序
+# CommittedEventSink.emit 逐段详解与调用时序
 
-本文档围绕 `agent/runtime/application/events.py:130` 的 `CommittedEventSink.emit` 方法，逐行解释其内部实现逻辑，并给出完整的调用时序图。该方法是三代引擎共享的 **engine-owned 事件持久化入口**，承载聚合、分派、诊断旁路与 DB 写入职责；Broker-owned 工具事件则由 ToolBroker/Store 的 ToolExecution 事务提交，不经该方法重复写入。
+本文以当前 `agent/runtime/application/events.py` 为准，解释 `CommittedEventSink.emit()` 的每个语义段。不使用固定行号，避免后续加注释或重排方法时文档失效。
 
----
+## 1. 它的当前定位
 
-## 目录
+`CommittedEventSink` 是 Coordinator 交给 EngineAdapter 的 `RuntimeIO` 实现，核心职责是：
 
-- [1. 核心定位与设计意图](#1-核心定位与设计意图)
-- [2. 调用入口与对象绑定](#2-调用入口与对象绑定)
-- [3. emit 逐行解析](#3-emit-逐行解析)
-- [4. 关键依赖方法说明](#4-关键依赖方法说明)
-- [5. 端到端调用时序图](#5-端到端调用时序图)
-- [6. 关键不变量](#6-关键不变量)
-- [7. 常见疑问](#7-常见疑问)
-- [8. 相关文档](#8-相关文档)
+- 把 text delta 聚合成已提交 `OUTPUT_DELTA_COMMITTED`；
+- 在语义边界前 flush text；
+- 提交 engine-owned Canonical Event；
+- 提供带 revision CAS 的 checkpoint，并支持 checkpoint 与一组 engine-owned event 原子提交；
+- 暴露强制 Tool Broker、cancel/deadline probe 和显式 final assistant。
 
----
+正常工具的 `TOOL_CALL_COMMITTED` / `TOOL_RESULT_COMMITTED` 不由 `emit()` 重复写入，而是 Tool Broker/Store 账本事务的一部分。
 
-## 1. 核心定位与设计意图
-
-### 1.1 三层架构中的位置
-
-```text
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         引擎层：只产出事件草稿                               │
-│  NativeLoop / AgentLoop / PlanExecute                                       │
-│  yield StreamEvent("text", {"delta": "..."})                                │
-│  yield StreamEvent("tool_call", {...})                                      │
-└───────────────────────────────┬──────────────────────────────────────────────┘
-                                │
-┌───────────────────────────────▼─────────────────────────────────────────────┐
-│                      适配层：LegacyEngineAdapter                            │
-│  legacy_engines.py:168                                                      │
-│  await io.emit(event.event, event.data)                                     │
-│  - Broker 已拥有 tool_call/tool_result → force_flush() + continue          │
-│  - 其他事件 → io.emit()                                                     │
-└───────────────────────────────┬─────────────────────────────────────────────┘
-                                │
-┌───────────────────────────────▼─────────────────────────────────────────────┐
-│                  持久化层：CommittedEventSink (events.py:55)                 │
-│  - text delta：100ms / 2KiB 聚合后写 DB                                    │
-│  - 进入 Sink 的 engine-owned tool_call/plan_step/...：立即写 DB             │
-│  - Broker-owned tool_call/tool_result：由 ToolBroker/Store 事务提交          │
-│  - citation：只收集，terminal 事务统一落库                                   │
-│  - error：诊断旁路，不决定终态                                              │
-│  - 诊断 Trace 旁路：TTFT + event_counts + answer payload                   │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### 1.2 设计意图
-
-- **三代引擎共享同一套持久化语义**：引擎只 `yield` 事件草稿，不接触 DB；避免每个引擎各自实现持久化导致行为不一致。
-- **先 commit、后 SSE 可见**：所有事件先写入 `run_events` 表（同一事务内更新 `runs.next_seq`），再由 SSE 订阅者可见，避免断线重连丢事件。
-- **text 走聚合，进入 Sink 的非 text 走即时**：模型流式输出一次回答几百个 delta，逐条写 DB 代价过高；进入 Sink 的 engine-owned 非 text 事件（例如未知工具/参数错误）是事实，必须即时持久化。归 ToolBroker 所有的 Broker-owned `tool_call/tool_result` 由 ToolExecution 准备/结算事务提交，不会再次进入 Sink。
-- **诊断与业务分离**：Trace 旁路只记计数/关键字段，绝不参与提交语义。
-
----
-
-## 2. 调用入口与对象绑定
-
-### 2.1 `io` 的实际类型
-
-`RuntimeIO` 是 `agent/runtime/ports/engine.py:26` 定义的 **Protocol**（鸭子类型接口）：
-
-```python
-class RuntimeIO(Protocol):
-    async def emit(self, event_type: str, payload: dict[str, Any]) -> None: ...
-    async def force_flush(self) -> None: ...
-    async def checkpoint(...) -> CheckpointRecord: ...
-    async def is_cancelled(self) -> bool: ...
-    def remaining_ms(self) -> int: ...
-    def seed_assistant_text(self, text: str) -> None: ...
-```
-
-实际实现类为 `agent/runtime/application/events.py:55` 的 **`CommittedEventSink`**。
-
-### 2.2 绑定位置
-
-`agent/runtime/application/coordinator.py:241`：
-
-```python
-io = CommittedEventSink(
-    self.store,
-    run_id=run.envelope.run_id,
-    activity_id=activity.activity_id,
-    fencing_token=activity.fencing_token,
-    deadline_at_ms=run.envelope.deadline_at,
-    flush_ms=self.event_flush_ms,
-    flush_bytes=self.event_flush_bytes,
-    clock=self.clock,
-)
-```
-
-随后在 289 行传入适配器：
-
-```python
-outcome = await adapter.execute(request, io)
-```
-
-适配器内部（如 `LegacyEngineAdapter.execute`）接收 `io: RuntimeIO`，最终到达 `legacy_engines.py:168`：
-
-```python
-await io.emit(event.event, event.data)
-```
-
----
-
-## 3. emit 逐行解析
-
-```python
-async def emit(self, event_type: str, payload: dict[str, Any]) -> None:
-```
-
-### 3.1 关闭态检查（134-135）
+## 2. 入口前置检查
 
 ```python
 if self._closed:
     raise RuntimeError("event sink is closed")
-```
-
-**意图**：如果 `close()` 已被调用（attempt 结束），立即拒绝新事件。防止引擎在 attempt 结束后继续写事件，避免事件流污染下一次 attempt。
-
-### 3.2 后台错误传播（136）
-
-```python
 self._raise_background_error()
-```
-
-**意图**：定时器 flush 协程（`_flush_after_delay`）中的异常会被记录到 `_background_error`。此处将其上抛给引擎协程，让引擎感知到 DB 写入失败，而非静默丢数据。
-
-**实现**：
-```python
-def _raise_background_error(self) -> None:
-    if self._background_error is not None:
-        error = self._background_error
-        self._background_error = None
-        raise error
-```
-
-### 3.3 诊断 Trace 埋点（138）
-
-```python
 self._trace_event(str(event_type), payload)
 ```
 
-**意图**：在 `_span` 上记录事件（计数 + 关键字段），仅影响诊断 Trace，不影响提交语义。`text` 不在 `_TRACED_EVENTS` 中，走 TTFT + 计数替代。
+含义如下：
 
-**实现**：
-```python
-def _trace_event(self, event_type: str, payload: dict[str, Any]) -> None:
-    self.event_counts[event_type] = self.event_counts.get(event_type, 0) + 1
-    if event_type == "error":
-        self.had_error = True
-    if self._span is None or event_type not in _TRACED_EVENTS:
-        return
-    self._span.add_event(event_type, **_traced_fields(event_type, payload))
-```
+1. `close()` 或 `abort()` 后禁止继续写，避免 attempt 收口后出现迟到事件。
+2. 100 ms timer 中的 flush 失败不能静默丢失；异常被保存在 `_background_error`，下一个显式边界继续抛出。
+3. Trace 是旁路诊断；先记数不代表事件已持久化，Trace 也不是恢复事实源。
 
-### 3.4 text 分支：走聚合缓冲（139-141）
+## 3. text 快速分支
 
 ```python
 if event_type in {"text", EventType.OUTPUT_DELTA_COMMITTED}:
-    await self.emit_text(str(payload.get("delta", "")))
+    await self.emit_text(
+        str(payload.get("delta", "")),
+        message_id=...,
+        generation_id=...,
+    )
     return
 ```
 
-**意图**：模型流式输出的文本 delta 走单独路径，按 100ms/2KiB 聚合后再写 DB，避免每个 delta 都写一次。
+text 不走通用“每事件立即 append”路径，而是进入 `emit_text()`。当前 buffer 同时绑定 `message_id` 和 `generation_id`：
 
-`emit_text` 内部逻辑：
-```python
-async def emit_text(self, delta: str) -> None:
-    if not delta:
-        return
-    if self.ttft_ms is None:
-        self.ttft_ms = round((time.monotonic() - self._trace_started) * 1000, 1)
-    async with self._lock:
-        self._buffer.append(delta)
-        self._full_text.append(delta)
-        self._buffer_bytes += len(delta.encode("utf-8"))
-        if self._buffer_bytes >= self.flush_bytes:
-            await self._flush_locked()
-        elif self._timer is None:
-            self._timer = asyncio.create_task(self._flush_after_delay())
-```
+- 身份不变时，delta 可以按 100 ms / 2 KiB 聚合；
+- 身份变化时，必须先 flush 旧 buffer，不得把两个 generation 拼成一条 Canonical Event。
 
-- **首个 delta**：记录 `ttft_ms`（Time To First Token）
-- **追加到 `_buffer` + `_full_text`**：前者用于聚合写入，后者用于最终拼接完整回答
-- **bytes >= flush_bytes（2KiB）**：立即 flush
-- **bytes < flush_bytes**：启动 100ms 定时器，到期后自动 flush
+`emit_text()` 还会在首个非空 delta 记录 TTFT，并把 delta 追加到 attempt-local `_full_text`。
 
-### 3.5 加锁（142）
+Native 生产 Adapter 在 `await io.emit("text", ...)` 后紧接着 `await io.force_flush()`，因此 Native 默认路径的每个已交给 Adapter 的 text 帧都是提交屏障；提交被阻塞时不会继续拉 provider。ADK 两引擎仍可利用 Sink 的 100 ms / 2 KiB 聚合。
+
+## 4. 非 text 分支：先拿锁，再 flush
 
 ```python
 async with self._lock:
+    await self._flush_locked()
+    ...
 ```
 
-**意图**：进入 Sink 的非 text 事件（engine-owned tool projection、plan_step、error 等）走锁保护的同步写入路径。锁保证 flush text buffer 和写入新事件之间的顺序——模型流输出必须在后续事实事件之前完成持久化。Broker-owned `tool_call/tool_result` 的 ToolExecution 与公开事件由 Broker/Store 事务负责，适配器只在其前面调用 `force_flush()`。
+这两步是一个临界区。目的不是用进程内锁“保证数据库事务”，而是防止 timer 或新 text 在“提交旧 text → 提交当前非 text 事件”之间插入。
 
-### 3.6 Flush text buffer（143）
+### 4.1 Skill UI 配额
+
+`skill_event` 在锁内先加载本 Run 已提交的 Skill UI 用量，再按 UTF-8 JSON bytes 检查：
+
+- 单条默认最大 64 KiB；
+- 每 Run 默认最多 2000 条；
+- 每 Run 默认累计最大 8 MiB。
+
+恢复后会从 durable events 重建计数，不会因 Worker 重启重置配额。超限报 `SKILL_UI_LIMIT_EXCEEDED`。
+
+### 4.2 error
+
+`error` 被保存为 INTERNAL `MODEL_MESSAGE_COMMITTED`，同时写入 `engine_error`。它只是诊断信号：attempt 的失败必须转成 `EngineOutcome` 交给 Coordinator 裁决，不能根据某个 error event 或 stream EOF 推导 Run 终态。Store 的 cancel、deadline、recovery/reconciliation 命令事务是另一类权威终态入口。
+
+### 4.3 citation
+
+`citation` 分支只收集 attempt-local 内容。成功收口时，Store 会从已提交 `knowledge_search` Evidence 派生引用，并把 final assistant、citation set 和 success terminal 置于同一事务。
+
+### 4.4 通用 Canonical Event
+
+`_EVENT_MAP` 将引擎名称映射为 Canonical EventType，例如：
+
+| Runtime 入口名 | Canonical Event |
+|---|---|
+| `output_generation_started` | `OUTPUT_GENERATION_STARTED` |
+| `tool_call` | `TOOL_CALL_COMMITTED` |
+| `tool_result` | `TOOL_RESULT_COMMITTED` |
+| `plan_step` | `MODEL_PLAN_UPDATED` |
+| `skill_event` | `SKILL_UI_FRAME_COMMITTED` |
+| `retrieval` | `RETRIEVAL_COMMITTED` |
+
+然后通过 `store.append_events()` 写入，每个 draft 带 Activity、producer 和时间；Store 使用 fencing token 拒绝 stale attempt。
+
+表中的 tool 映射只适用于真正由 Engine 负责投影的合成事件。例如默认 `off` 模式中，模型参数不合法或工具未找到时会生成整批零 dispatch 的错误对。正常 Broker 工具账本事实不能通过此映射再写一遍；实验性提前派发模式可能已执行安全只读前缀，不能把这句话外推为实验模式也绝对零执行。
+
+## 5. `_flush_locked()` 的完整语义
+
+`_flush_locked()` 只能在持有 `_lock` 时调用。它按以下顺序工作：
+
+1. buffer 为空则直接返回；
+2. join text，清空 buffer 和 byte 计数；
+3. 取出并清空 message/generation 身份；
+4. 取消尚未执行的 timer；
+5. 追加一条 `OUTPUT_DELTA_COMMITTED`，payload 带 delta，Native 路径还带 message/generation identity。
+
+先清内存、后 await Store 是安全的，因为锁尚未释放；如果 Store 失败，异常直接中断 attempt，不会把未提交 text 当成成功继续执行。
+
+## 6. checkpoint 与事件的两段提交
+
+`RuntimeIO.checkpoint()` 的时序是：
+
+```text
+force_flush()
+  → store.save_checkpoint(expected_revision, engine_state, events)
+```
+
+需要区分两个原子边界：
+
+- 之前缓冲的 text 由 `force_flush()` 先单独提交；
+- 新 checkpoint row、调用方传入的 engine-owned events、`CHECKPOINT_COMMITTED` 以及必要的 plan 投影，在 `save_checkpoint()` 的同一 SQLite 事务中提交。
+
+Native 在 `MODEL_REQUEST` checkpoint 中一并提交 `OUTPUT_GENERATION_STARTED`。因此客户端不会看到“已开始新 generation，但恢复点仍停在旧一代”的半提交状态。
+
+## 7. 两条 Adapter 调用链
+
+### 7.1 Native：直接 awaited sink
+
+```text
+NativeLoop kernel yield StreamEvent
+  → NativeLoopAdapter 逐个获取
+  → await io.emit(event, data)
+  → text 额外 await io.force_flush()
+  → 提交完成后才获取下一个 kernel/provider 事件
+```
+
+Skill UI 的 awaited sink 也直接 `await io.emit()`。Native 没有 ADK merge queue，没有后台无界 Queue，也没有“无 RuntimeIO”生产 fallback。
+
+### 7.2 ADK：只保留给两个引擎
+
+```text
+plan_execute / agent_loop
+  → ADK 内部 run_stream + queue/merge
+  → AdkEngineAdapter
+  → Broker 已提交的 tool 投影：force_flush 后跳过
+  → 其他事件：await io.emit()
+```
+
+Adapter stream 结束不等于成功；`RunContext.engine_outcome` 必须显式存在，否则返回 `ENGINE_OUTCOME_MISSING`。Native 的最终结果不走这条 RunContext 兼容面。
+
+## 8. generation 与最终 Assistant
+
+Native delta 带稳定 `message_id` 和 attempt generation identity。重试或恢复开始新 generation 时，先提交 `OUTPUT_GENERATION_STARTED`；API 投影为 `text_start`。
+
+`CommittedEventSink.assistant_text` 仍可作为 ADK 的累积文本。Native 成功时必须调用：
 
 ```python
-await self._flush_locked()
+io.set_final_assistant(final_text, final_message_id, final_generation_id)
 ```
 
-**意图**：先把积攒的 text delta 刷入 DB（`OUTPUT_DELTA_COMMITTED`），确保 100ms/2KiB 聚合的文本在后续 ToolCall/ToolResult 之前有序提交。
+Coordinator 使用该 override 提交唯一最终 `ASSISTANT_MESSAGE_COMMITTED`。这条完整消息是最终语义权威，不等价于把所有历史 delta 简单拼接。
 
-**实现**：
-```python
-async def _flush_locked(self) -> None:
-    if not self._buffer:
-        return
-    text = "".join(self._buffer)
-    self._buffer.clear()
-    self._buffer_bytes = 0
-    timer = self._timer
-    self._timer = None
-    if timer is not None and timer is not asyncio.current_task():
-        timer.cancel()
-    await self.store.append_events(
-        self.run_id,
-        [EventDraft(
-            EventType.OUTPUT_DELTA_COMMITTED,
-            {"delta": text},
-            activity_id=self.activity_id,
-            producer="engine",
-            occurred_at=self.clock.now_ms(),
-        )],
-        activity_id=self.activity_id,
-        fencing_token=self.fencing_token,
-        now_ms=self.clock.now_ms(),
-    )
-```
+## 9. 建议的源码阅读顺序
 
-### 3.7 error 事件（144-162）
-
-```python
-if event_type == "error":
-    self.engine_error = dict(payload)
-    await self.store.append_events(
-        self.run_id,
-        [EventDraft(
-            EventType.MODEL_MESSAGE_COMMITTED,
-            {"engine_error": payload},
-            activity_id=self.activity_id,
-            visibility=Visibility.INTERNAL,
-            occurred_at=self.clock.now_ms(),
-        )],
-        activity_id=self.activity_id,
-        fencing_token=self.fencing_token,
-        now_ms=self.clock.now_ms(),
-    )
-    return
-```
-
-**意图**：
-- 记录到 `engine_error`，Coordinator 后续检查它是否和 `outcome.kind=COMPLETED` 矛盾（若矛盾则视为失败）
-- 以 `MODEL_MESSAGE_COMMITTED` + `visibility=INTERNAL` 写入 DB
-- 它是诊断事件，不是公开投递事件，不决定终态
-
-### 3.8 citation 事件（163-165）
-
-```python
-if event_type == "citation":
-    self.citations.extend(payload.get("citations") or [])
-    return
-```
-
-**意图**：引用信息只收集到内存，不立即写 DB。最终由 terminal 提交时一起落库（final assistant + citation + success terminal 同一事务）。
-
-### 3.9 通用事件提交（166-178）
-
-```python
-canonical = _EVENT_MAP.get(event_type)
-if canonical is None:
-    canonical = EventType(event_type)
-await self.store.append_events(
-    self.run_id,
-    [EventDraft(
-        canonical, dict(payload), activity_id=self.activity_id,
-        producer="engine", occurred_at=self.clock.now_ms(),
-    )],
-    activity_id=self.activity_id,
-    fencing_token=self.fencing_token,
-    now_ms=self.clock.now_ms(),
-)
-```
-
-**意图**：
-- 通过 `_EVENT_MAP` 将引擎内部事件名映射为规范 `EventType`
-- 未知类型直接构造 `EventType`
-- 调用 `store.append_events()` 写入 `run_events` 表，带 `fencing_token` 做所有权校验
-
-**事件映射表**：
-```python
-_EVENT_MAP: dict[str, EventType] = {
-    "tool_call": EventType.TOOL_CALL_COMMITTED,
-    "tool_result": EventType.TOOL_RESULT_COMMITTED,
-    "plan_step": EventType.MODEL_PLAN_UPDATED,
-    "skill_event": EventType.SKILL_UI_FRAME_COMMITTED,
-    "retrieval": EventType.RETRIEVAL_COMMITTED,
-}
-```
-
----
-
-## 4. 关键依赖方法说明
-
-### 4.1 `_flush_locked()`（222-244）
-
-已持锁，将 `_buffer` 中的 text delta 聚合为一次 `OUTPUT_DELTA_COMMITTED` 写入。取消定时器，避免重复 flush。
-
-### 4.2 `_flush_after_delay()`（211-220）
-
-100ms 后自动 flush。异常记录到 `_background_error`，下次 `emit` / `force_flush` / `close` 时上抛。
-
-### 4.3 `store.append_events()`
-
-写入 `run_events` 表，更新 `runs.next_seq`，同一事务内完成。SSE 订阅者通过 `after_seq` 查询新事件。
-
----
-
-## 5. 端到端调用时序图
-
-```mermaid
-sequenceDiagram
-    participant Engine as 引擎<br/>(plan_execute/agent_loop/native_loop)
-    participant Legacy as LegacyEngineAdapter<br/>(legacy_engines.py:168)
-    participant Sink as CommittedEventSink<br/>(events.py)
-    participant Store as RuntimeStore<br/>(SQLite runtime.db)
-    participant SSE as SSE Subscriber
-
-    Engine->>Legacy: yield StreamEvent(event, data)
-    Legacy->>Sink: await io.emit(event_type, payload)
-
-    alt self._closed
-        Sink-->>Legacy: raise RuntimeError("event sink is closed")
-    end
-
-    Sink->>Sink: _raise_background_error()
-    Sink->>Sink: _trace_event()  [诊断旁路]
-
-    alt event_type == "text" / OUTPUT_DELTA
-        Sink->>Sink: emit_text(delta)
-        Note over Sink: 追加 _buffer + _full_text<br/>记录 ttft_ms
-        alt bytes >= flush_bytes (2KiB)
-            Sink->>Store: append_events(OUTPUT_DELTA_COMMITTED)
-            Store->>SSE: 新事件可见
-        else bytes < flush_bytes
-            Sink->>Sink: create_task(_flush_after_delay)
-            Note over Sink: 100ms 后自动 flush
-        end
-    else event_type != "text"
-        Sink->>Sink: async with _lock
-        Sink->>Store: _flush_locked()<br/>先刷 text buffer
-        Store->>SSE: text delta 可见
-
-        alt event_type == "error"
-            Sink->>Sink: self.engine_error = payload
-            Sink->>Store: append_events(MODEL_MESSAGE_COMMITTED,<br/>visibility=INTERNAL)
-        else event_type == "citation"
-            Sink->>Sink: self.citations.extend(...)
-            Note over Sink: 只收集，不写 DB
-        else 通用事件 (tool_call/tool_result/plan_step/...)
-            Sink->>Sink: canonical = _EVENT_MAP[event_type]
-            Sink->>Store: append_events(canonical, payload,<br/>fencing_token=...)
-            Store->>SSE: 新事件可见
-        end
-    end
-
-    Legacy-->>Engine: 继续下一次 yield
-```
-
----
-
-## 6. 关键不变量
-
-1. **先 commit、后 SSE 可见**：所有事件先写入 `run_events` 表（同一事务内更新 `runs.next_seq`），再由 SSE 订阅者可见，避免断线重连丢事件。
-
-2. **text 走聚合，非 text 走即时**：模型流式输出一次回答几百个 delta，逐条写 DB 代价过高；非 text 事件（tool_call 等）是事实，必须即时持久化。
-
-3. **非 text 先 flush text**：保证模型流输出在 ToolCall 事实之前有序提交，避免顺序错乱。
-
-4. **citation 只收集**：等 terminal 事务一起落库（final assistant + citation + success terminal 同一事务）。
-
-5. **error 是诊断**：不决定终态，Coordinator 后续检查它是否和 `outcome.kind=COMPLETED` 矛盾，若矛盾则视为失败。
-
-6. **诊断与业务分离**：Trace 旁路只记计数/关键字段，绝不参与提交语义。
-
-7. **fencing_token 校验**：所有 `append_events` 调用都带 `fencing_token`，保证只有当前 lease 持有者能写入事件。
-
-8. **后台错误上抛**：定时器 flush 协程中的异常会被记录到 `_background_error`，下次 `emit` / `force_flush` / `close` 时上抛，避免静默丢数据。
-
----
-
-## 7. 常见疑问
-
-### 7.1 为什么 text 不直接写 DB？
-
-一次回答会产生几百个 delta，每个 delta 都写一次 DB 会导致：
-- 事务开销过大
-- SSE 可见性过于碎片化
-- 磁盘 I/O 压力
-
-聚合为 100ms/2KiB 一次写入，兼顾实时性和性能。
-
-### 7.2 为什么 citation 不立即写 DB？
-
-citation 需要和 final assistant + success terminal 在同一事务内落库，保证三者原子性。如果 citation 单独写 DB，后续 terminal 提交失败会导致引用悬空。
-
-### 7.3 为什么 error 不决定终态？
-
-error 是引擎内部的诊断信息，可能是可恢复的（如临时网络抖动）。Coordinator 会结合 `EngineOutcome` 综合判断：如果 `outcome.kind=COMPLETED` 但有 error，则视为矛盾，强制失败。
-
-### 7.4 为什么非 text 要先 flush text？
-
-假设模型先输出 "我来调用工具"，然后产出 ToolCall。如果 ToolCall 先写 DB，SSE 订阅者会先看到 ToolCall，再看到 "我来调用工具"，顺序错乱。先 flush text 保证 "我来调用工具" 先落库，ToolCall 后落库，顺序正确。
-
-### 7.5 fencing_token 的作用？
-
-Worker 领取 Activity 时获得 `fencing_token`，后续所有事件写入都带此 token。Store 层校验 token 是否匹配，防止旧 Worker（已失去 lease）继续写入事件，保证事件流的单写者语义。
-
----
-
-## 8. 相关文档
-
-- [事件持久化与 SSE 可见性的分层设计](./事件持久化与SSE可见性的分层设计.md)
-- [SSE 流式输出端到端全链路指南](./SSE流式输出端到端全链路指南.md)
-- [ToolBroker 详解：效应感知的持久化工具调度协议](./ToolBroker%20详解：效应感知的持久化工具调度协议.md)
-- [NativeLoop LLM 流式调用全链路详解](./NativeLoop%20LLM流式调用全链路详解.md)
-
----
-
-## 源码位置索引
-
-| 概念 | 文件路径 | 行号 |
-|---|---|---|
-| `RuntimeIO` Protocol | `agent/runtime/ports/engine.py` | 26 |
-| `CommittedEventSink` 类定义 | `agent/runtime/application/events.py` | 55 |
-| `emit` 方法 | `agent/runtime/application/events.py` | 130 |
-| `emit_text` 方法 | `agent/runtime/application/events.py` | 180 |
-| `_flush_locked` 方法 | `agent/runtime/application/events.py` | 222 |
-| `_flush_after_delay` 方法 | `agent/runtime/application/events.py` | 211 |
-| `CommittedEventSink` 实例化 | `agent/runtime/application/coordinator.py` | 241 |
-| `adapter.execute(request, io)` 调用 | `agent/runtime/application/coordinator.py` | 289 |
-| `io.emit(event.event, event.data)` 调用 | `agent/runtime/adapters/legacy_engines.py` | 168 |
-| `_EVENT_MAP` 事件映射 | `agent/runtime/application/events.py` | 18 |
-| `_TRACED_EVENTS` 诊断事件集合 | `agent/runtime/application/events.py` | 28 |
+1. `agent/runtime/ports/engine.py`：`RuntimeIO` 对外契约。
+2. `agent/runtime/application/events.py`：Sink 的 emit/flush/checkpoint/final 实现。
+3. `agent/runtime/adapters/sqlite/store.py`：`append_events()` 和 `save_checkpoint()` 事务。
+4. `agent/runtime/adapters/adk_engines.py`：ADK-only Adapter。
+5. `agent/engine/native_loop/engine.py`：Native 直接 RuntimeIO 适配。
+6. `agent/runtime/application/tool_broker.py`：Broker-owned ToolCall/ToolResult 的账本边界。

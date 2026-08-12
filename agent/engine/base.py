@@ -1,11 +1,10 @@
-"""Legacy reasoning-engine surface used behind the durable Runtime adapter.
+"""Narrow ADK reasoning-engine surface behind ``AdkEngineAdapter``.
 
-三代实现由每个 Run 的 ``engine`` 字段选择：
+两套 ADK 实现由每个 Run 的 ``engine`` 字段选择：
 - plan_execute（Gen1）：先规划再执行；
 - agent_loop（Gen2）：Tool-Use 循环，但 while 在 ADK BaseLlmFlow 内部；
-- native_loop（Gen3）：自研循环，while 在 agent/engine/native_loop/loop.py 里。
-对比轴是「循环归谁驱动」。Canonical event 和 terminal 的裁决属于
-Runtime，本端口只是现有引擎的 attempt-local 适配面。
+Native 直接实现公开 EngineAdapter，不再进入本 ADK 内部面。Canonical event 和
+terminal 的裁决属于 Runtime，本端口只是 ADK 引擎的 attempt-local 适配面。
 """
 from __future__ import annotations
 
@@ -32,7 +31,7 @@ APP_NAME = "sxw-agent"
 class RunContext:
     run_id: str
     activity_id: str
-    engine: Literal["plan_execute", "agent_loop", "native_loop"]
+    engine: Literal["plan_execute", "agent_loop"]
     agent_uuid: str
     user_id: str
     session_id: str
@@ -54,7 +53,7 @@ class RunContext:
     runtime_checkpoint_revision: int = 0
     runtime_working_state: Any = None
     runtime_checkpoint_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    # Attempt-local explicit control result.  The legacy async iterator is only
+    # Attempt-local explicit control result.  The ADK async iterator is only
     # an event-draft transport: exhausting it is not evidence of success.  Each
     # real engine must set this field on its own completed/failure control path;
     # the Runtime adapter fails closed when the iterator ends without one.
@@ -76,18 +75,13 @@ def extract_text(content: types.Content) -> str:
 
 def build_engine(
     ctx: "AgentContext",
-    engine: Literal["plan_execute", "agent_loop", "native_loop"],
+    engine: Literal["plan_execute", "agent_loop"],
 ) -> ReasoningEngine:
-    # Worker 同时装配三代引擎，每次 attempt 按 Run.engine 创建相应实例。
+    # 仅构建两套 ADK 引擎；native_loop 由 NativeLoopAdapter 直接驱动。
     if engine == "plan_execute":
         from agent.engine.plan_execute.plan_execute_engine import PlanExecuteEngine
         return PlanExecuteEngine(ctx)
     if engine == "agent_loop":
         from agent.engine.agent_loop.agent_loop_engine import AgentLoopEngine
         return AgentLoopEngine(ctx)
-    if engine == "native_loop":
-        # Gen3：自研 Tool-Use 循环。与 agent_loop 的工具面、系统指令、SSE 契约完全一致，
-        # 区别只在"循环归谁驱动"——这里的 while 在我们自己手里，不经任何 Agent 框架。
-        from agent.engine.native_loop.engine import NativeLoopEngine
-        return NativeLoopEngine(ctx, engine=engine)
     raise ValueError(f"unknown run engine={engine}")

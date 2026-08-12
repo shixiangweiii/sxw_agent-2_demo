@@ -1,666 +1,269 @@
 # Runtime 核心数据模型详解
 
-本文档以 Claim 为引子，系统梳理可靠执行运行时的核心数据结构、领域模型和表结构设计，帮助理解整个 Runtime 的数据模型设计哲学。
+本文以当前源码为准，介绍 Runtime 的领域模型、SQLite 持久化模型以及它们之间的权威边界。核心不是“把一次 LLM 调用存下来”，而是用 Run、Activity、Canonical Event、Checkpoint、ToolExecution 和 Release 构造一个可裁决、可恢复的执行运行时。
 
----
-
-## 目录
-
-- [1. 数据模型全景图](#1-数据模型全景图)
-- [2. 核心领域模型](#2-核心领域模型)
-- [3. 状态机模型](#3-状态机模型)
-- [4. 表结构设计](#4-表结构设计)
-- [5. 数据流与事务边界](#5-数据流与事务边界)
-- [6. 源码位置索引](#6-源码位置索引)
-
----
-
-## 1. 数据模型全景图
-
-### 1.1 模型层次
+## 1. 先建立全景图
 
 ```text
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              应用层 (Application)                           │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
-│  │     Claim    │  │   Runtime    │  │   Working    │  │   Engine     │   │
-│  │              │  │  Envelope    │  │    State     │  │  Outcome     │   │
-│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              领域层 (Domain)                                │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
-│  │  RunRecord   │  │   Activity   │  │  Canonical   │  │  Checkpoint  │   │
-│  │              │  │   Record     │  │    Event     │  │   Record     │   │
-│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘   │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                     │
-│  │    Tool      │  │   Artifact   │  │    Signal    │                     │
-│  │  Execution   │  │   Metadata   │  │              │                     │
-│  └──────────────┘  └──────────────┘  └──────────────┘                     │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           持久化层 (SQLite)                                  │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐        │
-│  │  runs    │ │activities│ │run_events│ │checkpoints│ │tool_     │        │
-│  │          │ │          │ │          │ │          │ │executions│        │
-│  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘        │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐        │
-│  │conversa- │ │ run_     │ │ artifact │ │ signals  │ │ timers   │        │
-│  │  tions   │ │requests  │ │_metadata │ │          │ │          │        │
-│  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘        │
-└─────────────────────────────────────────────────────────────────────────────┘
+Conversation
+  └─ Run                     一轮用户请求及其唯一终态
+       ├─ Activity            可领取、租约化的执行单元
+       ├─ Canonical Event     append-only 业务事实
+       ├─ Checkpoint          append-only + revision CAS 恢复点
+       ├─ ToolExecution       工具效果及幂等权威
+       ├─ ArtifactLink        指向 SHA-256 CAS 内容
+       ├─ Signal / Timer      外部输入与持久化 retry 时间驱动
+       └─ Release fingerprint 入场时冻结的不可变执行语义
 ```
 
-### 1.2 核心实体关系
+Runtime 的唯一事实源不是 Engine 内存里的 message list，也不是 SSE 连接或 Trace，而是 `runtime.db` 内以短事务提交的表和 Artifact CAS。
 
-```text
-                    ┌─────────────┐
-                    │conversations│
-                    └──────┬──────┘
-                           │ 1:N
-                           ▼
-┌─────────────┐      ┌──────────┐      ┌─────────────┐
-│run_requests │◄─────┤  runs    ├─────►│  activities │
-│ (幂等记录)  │      │          │      │             │
-└─────────────┘      └────┬─────┘      └──────┬──────┘
-                          │ 1:N               │ 1:N
-                          ▼                   ▼
-                    ┌──────────┐        ┌─────────────┐
-                    │run_events│        │ checkpoints │
-                    │(append-only)      │             │
-                    └──────────┘        └─────────────┘
-                          │
-                          │ N:1
-                          ▼
-                    ┌─────────────┐      ┌─────────────┐
-                    │tool_execut- │◄─────│artifact_    │
-                    │  ions       │      │  links      │
-                    └─────────────┘      └─────────────┘
-```
+## 2. Current-only schema 身份
 
----
+Runtime 只接受一份当前 schema：
 
-## 2. 核心领域模型
+- 定义文件：`agent/runtime/adapters/sqlite/schema.sql`
+- 通用校验：`common/sqlite_schema.py`
+- Runtime 接入：`agent/runtime/adapters/sqlite/database.py`
 
-### 2.1 RuntimeEnvelope（运行信封）
-
-**文件**: `agent/runtime/domain/models.py:128`
-
-```python
-class RuntimeEnvelope(BaseModel):
-    schema_version: str              # "1"，冻结版本
-    request_id: str                  # 服务端生成的请求 ID
-    client_request_id: str           # 客户端请求 ID
-    idempotency_key: str             # 幂等键
-    conversation_id: str             # 会话 ID
-    turn_id: str                     # 轮次 ID
-    run_id: str                      # Run ID
-    principal_id: str                # 用户 ID
-    agent_id: str                    # Agent ID
-    engine: EngineName               # 引擎类型
-    deadline_at: int                 # 绝对截止时间 (epoch ms)
-    cancel_token_id: str             # 取消令牌 ID
-    release_fingerprint: str         # Release 指纹
-    input_event_id: str              # 输入事件 ID
-    attachment_refs: tuple[str, ...] # 附件引用列表
-    created_at: int                  # 创建时间
-```
-
-**设计意图**：
-- 封装 Run 的"身份与执行上下文"，是 Run 的不可变核心
-- `release_fingerprint` 锁定本次 Run 使用的不可变 release；恢复时若 Worker 无法解释该 release/schema，必须 fail-closed 为 `INCOMPATIBLE_RELEASE`，项目当前没有跨版本 checkpoint 升级路径
-- `deadline_at` 是绝对时间，向下传递剩余预算
-
----
-
-### 2.2 RunRecord（运行记录）
-
-**文件**: `agent/runtime/domain/models.py:185`
-
-```python
-class RunRecord(BaseModel):
-    envelope: RuntimeEnvelope        # 运行信封
-    trace_id: str = ""               # 诊断轨迹 ID（故意在 Envelope 外）
-    status: RunStatus                # 运行状态
-    revision: int                    # CAS 版本号
-    next_seq: int                    # 下一个事件 seq
-    current_activity_id: str | None  # 当前 Activity
-    terminal_status: RunStatus | None # 终态状态
-    terminal_payload: dict | None    # 终态负载
-    input_text: str                  # 输入文本
-    pending_input: dict | None       # 等待的输入
-    updated_at: int                  # 更新时间
-```
-
-**关键点**：
-- `trace_id` 不在 Envelope 内：诊断信号，不进入幂等摘要
-- `revision`：CAS 防并发
-- `next_seq`：事件序列号生成器
-
----
-
-### 2.3 ActivityRecord（活动记录）
-
-**文件**: `agent/runtime/domain/models.py:203`
-
-```python
-class ActivityRecord(BaseModel):
-    activity_id: str                 # Activity ID
-    run_id: str                      # 所属 Run
-    type: ActivityType               # 类型：ENGINE_RUN/TOOL_CALL/...
-    logical_key: str                 # 逻辑键（用于 stable slot）
-    status: ActivityStatus           # 状态
-    attempt: int                     # 尝试次数
-    available_at: int                # 可领取时间
-    lease_owner: str | None          # 租约持有者
-    lease_expires_at: int | None     # 租约过期时间
-    fencing_token: int               # 围栏令牌
-    revision: int                    # CAS 版本号
-    result: dict | None              # 结果
-    error: dict | None               # 错误
-    resume_payload: dict | None      # 恢复负载
-    created_at: int
-    updated_at: int
-```
-
-**关键设计**：
-- `logical_key`：`run_id + logical_key` 派生 UUIDv5，保证 stable slot
-- `lease_owner + lease_expires_at`：租约机制，防 Worker 崩溃锁死
-- `fencing_token`：防过期执行者迟到提交
-
----
-
-### 2.4 CanonicalEvent（规范事件）
-
-**文件**: `agent/runtime/domain/models.py:164`
-
-```python
-class CanonicalEvent(BaseModel):
-    event_id: str                    # 事件 ID
-    schema_version: str              # 版本
-    run_id: str                      # Run ID
-    turn_id: str                     # 轮次 ID
-    activity_id: str | None          # Activity ID
-    tool_execution_id: str | None    # 工具执行 ID
-    seq: int                         # 序列号
-    event_type: EventType            # 事件类型
-    producer: str                    # 生产者
-    payload: dict | None             # 负载
-    payload_ref: str | None          # 负载引用（Artifact）
-    visibility: Visibility           # 可见性：PUBLIC/INTERNAL
-    sensitivity: Sensitivity         # 敏感性：PUBLIC/PRIVATE/SENSITIVE
-    occurred_at: int                 # 发生时间
-    terminal_status: RunStatus | None # 终态状态
-    release_fingerprint: str         # Release 指纹
-```
-
-**核心规则**：
-- **append-only**：只追加不修改，有触发器保证
-- **seq 单调**：同一 Run 内 seq 严格递增
-- **visibility**：PUBLIC 可被 SSE 推送，INTERNAL 只内部可见
-
----
-
-### 2.5 CheckpointRecord（检查点记录）
-
-**文件**: `agent/runtime/domain/models.py:222`
-
-```python
-class CheckpointRecord(BaseModel):
-    checkpoint_id: str               # 检查点 ID
-    run_id: str                      # Run ID
-    activity_id: str                 # Activity ID
-    revision: int                    # CAS 版本号
-    working_state: WorkingState      # 工作状态
-    engine_state: dict | None        # 引擎状态
-    engine_state_ref: str | None     # 引擎状态引用
-    release_fingerprint: str         # Release 指纹
-    schema_version: str              # 版本
-    created_at: int                  # 创建时间
-```
-
-**设计意图**：
-- `working_state`：可恢复的认知状态
-- `engine_state`：引擎私有状态（可能很大，用 ref 引用 Artifact）
-- 崩溃恢复时从最后一个 committed checkpoint 继续
-
----
-
-### 2.6 WorkingState（工作状态）
-
-**文件**: `agent/runtime/domain/models.py:149`
-
-```python
-class WorkingState(BaseModel):
-    goal: str                        # 目标
-    constraints: list[str]           # 约束
-    model_plan: list[dict]           # 规划
-    confirmed_facts: list[dict]      # 已确认事实
-    open_questions: list[str]        # 未解决问题
-    pending_input: dict | None       # 等待的输入
-    budget: dict                     # 预算
-    artifact_refs: list[str]         # 工件引用
-    evidence_refs: list[str]         # 证据引用
-    release_fingerprint: str         # Release 指纹
-```
-
----
-
-### 2.7 Claim（执行权凭证）
-
-**文件**: `agent/runtime/ports/store.py:66`
-
-```python
-@dataclass(frozen=True)
-class Claim:
-    run: RunRecord                   # Run 快照
-    activity: ActivityRecord         # Activity 快照
-```
-
-**语义**：Worker 对 Activity 的排他性执行权，内存中，不持久化。
-
----
-
-## 3. 状态机模型
-
-### 3.1 Run 状态机
-
-**文件**: `agent/runtime/domain/models.py:17`
-
-```text
-                              ┌─────────────────────────────────────────┐
-                              │                                         │
-                              ▼                                         │
-┌──────────┐  admit   ┌──────────────────┐  claim   ┌─────────┐       │
-│  客户端  │ ───────► │ DISPATCH_PENDING ├────────► │ RUNNING │       │
-└──────────┘          └──────────────────┘          └────┬────┘       │
-                                                         │            │
-                                    ┌────────────────────┼────────────┤
-                                    │                    │            │
-                                    ▼                    ▼            │
-                            ┌───────────────┐   ┌───────────────┐    │
-                            │WAITING_RETRY  │   │WAITING_INPUT  │    │
-                            └───────┬───────┘   └───────┬───────┘    │
-                                    │                   │            │
-                                    └───────────────────┼────────────┤
-                                                        │            │
-                                                        ▼            │
-                                                ┌─────────────┐      │
-                                                │ 终态 (6种)  │ ─────┘
-                                                └─────────────┘
-```
-
-**状态集合**：
-
-| 类别 | 状态 |
-|---|---|
-| 非终态 | `ACCEPTED`, `DISPATCH_PENDING`, `RUNNING`, `WAITING_RETRY`, `WAITING_INPUT`, `CANCEL_REQUESTED` |
-| 终态 | `SUCCEEDED`, `FAILED`, `CANCELLED`, `TIMED_OUT`, `REJECTED`, `INCOMPATIBLE_RELEASE` |
-
-**关键规则**：
-- 终态最多一个，不可变
-- cancel 与 terminal 竞争，先提交者赢
-- 存在 unresolved ToolEffect 时不能直接 CANCELLED
-
----
-
-### 3.2 Activity 状态机
-
-**文件**: `agent/runtime/domain/models.py:42`
-
-```text
-         ┌─────────┐     claim     ┌─────────┐    mark_running   ┌─────────┐
-         │ PENDING ├──────────────►│ CLAIMED ├────────────────► │ RUNNING │
-         └────┬────┘               └────┬────┘                  └────┬────┘
-              │                         │                            │
-              │ recover                 │ lease expired              │
-              │                         ▼                            │
-              │                    ┌─────────┐                       │
-              └────────────────────│ PENDING │◄──────────────────────┘
-                                   └─────────┘
-                                        │
-              ┌─────────────────────────┼─────────────────────────┐
-              │                         │                         │
-              ▼                         ▼                         ▼
-       ┌─────────────┐          ┌─────────────┐          ┌─────────────┐
-       │WAITING_RETRY│          │WAITING_INPUT│          │  RECONCILE  │
-       └─────────────┘          └─────────────┘          └─────────────┘
-```
-
-**状态集合**：
-
-| 类别 | 状态 |
-|---|---|
-| 执行中 | `PENDING`, `CLAIMED`, `RUNNING` |
-| 等待 | `WAITING_RETRY`, `WAITING_INPUT`, `RECONCILE`, `MANUAL` |
-| 终态 | `SUCCEEDED`, `FAILED`, `CANCELLED` |
-
----
-
-### 3.3 ToolEffect 状态机
-
-**文件**: `agent/runtime/domain/models.py:102`
-
-```text
-┌──────────┐  dispatch  ┌────────────┐  success   ┌──────────┐
-│ PREPARED ├──────────►│ DISPATCHED ├──────────► │COMMITTED │
-└──────────┘            └─────┬──────┘            └──────────┘
-                              │
-                    ┌─────────┼─────────┐
-                    │         │         │
-                    ▼         ▼         ▼
-             ┌────────┐ ┌────────┐ ┌─────────────┐
-             │ FAILED │ │UNKNOWN │ │MANUAL_REQUIRED│
-             └────────┘ └───┬────┘ └─────────────┘
-                            │
-                            ▼
-                       ┌───────────┐
-                       │RECONCILING│
-                       └───────────┘
-```
-
-**状态集合**：
-
-| 类别 | 状态 |
-|---|---|
-| 初始 | `PREPARED` |
-| 执行中 | `DISPATCHED`, `RECONCILING` |
-| 终态 | `COMMITTED`, `FAILED` |
-| 不确定 | `UNKNOWN`, `MANUAL_REQUIRED` |
-
-**Effect Class**：
-- `READ_ONLY`：可安全重试
-- `IDEMPOTENT_EFFECT`：必须透传稳定 key
-- `NON_IDEMPOTENT_EFFECT`：不可透明重试
-- `UNKNOWN_EFFECT`：未声明，默认保守
-
----
-
-## 4. 表结构设计
-
-### 4.1 核心表清单
-
-| 表名 | 作用 | 关键特性 |
-|---|---|---|
-| `runs` | Run 记录 | 唯一活跃约束，revision CAS |
-| `activities` | Activity 记录 | lease/fencing，claim 索引 |
-| `run_events` | 事件流 | append-only，触发器保护 |
-| `checkpoints` | 检查点 | revision CAS，latest 索引 |
-| `tool_executions` | 工具执行账本 | stable slot，reconcile 支持 |
-| `conversations` | 会话 | 轮次管理 |
-| `run_requests` | 幂等记录 | 复合主键，digest 校验 |
-| `artifact_metadata` | 工件元数据 | SHA-256 内容寻址 |
-| `artifact_links` | 工件关联 | 来源追踪 |
-| `signals` | 信号记录 | 幂等消费，late 拒绝 |
-| `timers` | 定时器 | SCHEDULED → FIRED 一次 |
-| `runtime_workers` | Worker 注册 | heartbeat，release map |
-| `release_manifests` | 不可变 release 清单 | release fingerprint 权威内容 |
-| `active_releases` | 当前引擎 release 指针 | 指向 `release_manifests` |
-| `cancellation_commands` | 取消命令账本 | `(run_id, command_id)` 幂等 |
-
----
-
-### 4.2 runs 表
+`schema_meta` 只有三个字段：
 
 ```sql
-CREATE TABLE runs (
-    run_id TEXT PRIMARY KEY,
-    schema_version TEXT NOT NULL,
-    request_id TEXT NOT NULL UNIQUE,
-    client_request_id TEXT NOT NULL,
-    idempotency_key TEXT NOT NULL,
-    conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id),
-    turn_seq INTEGER NOT NULL CHECK (turn_seq >= 1),
-    turn_id TEXT NOT NULL UNIQUE,
-    principal_id TEXT NOT NULL,
-    agent_id TEXT NOT NULL,
-    engine TEXT NOT NULL CHECK (engine IN ('plan_execute','agent_loop','native_loop')),
-    deadline_at INTEGER NOT NULL,
-    cancel_token_id TEXT NOT NULL UNIQUE,
-    release_fingerprint TEXT NOT NULL REFERENCES release_manifests(release_fingerprint),
-    input_event_id TEXT NOT NULL UNIQUE,
-    attachment_refs_json TEXT NOT NULL,
-    input_text TEXT NOT NULL,
-    state TEXT NOT NULL,
-    revision INTEGER NOT NULL DEFAULT 0,
-    next_seq INTEGER NOT NULL DEFAULT 1,
-    current_activity_id TEXT,
-    terminal_status TEXT,
-    terminal_payload_json TEXT,
-    pending_input_json TEXT,
-    trace_id TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    
-    -- 约束
-    CHECK (terminal_status IS NULL OR state = terminal_status),
-    UNIQUE (conversation_id, turn_seq)
-);
-
--- 关键索引
-CREATE UNIQUE INDEX uq_active_run_per_conversation ON runs(conversation_id)
-WHERE state NOT IN ('SUCCEEDED','FAILED','CANCELLED','TIMED_OUT','REJECTED','INCOMPATIBLE_RELEASE');
-
-CREATE INDEX ix_runs_status_created ON runs(state, created_at);
+CREATE TABLE schema_meta (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    schema_digest TEXT NOT NULL CHECK (length(schema_digest) = 64),
+    created_at INTEGER NOT NULL
+) STRICT;
 ```
 
-**设计要点**：
-- `uq_active_run_per_conversation`：保证同一 conversation 最多一个非终态 Run
-- `terminal_status IS NULL OR state = terminal_status`：终态时 state 必须等于 terminal_status
-- `next_seq`：事件序列号生成器，与 event append 同事务递增
+`schema_digest` 是完整 `schema.sql` **原始字节**的 SHA-256，不是表名列表或人工版本号。`ensure_current_schema()` 在一个 `BEGIN IMMEDIATE` 中完成判定：
 
-> 上述 SQL 是阅读用的核心片段；`schema.sql` 中还包含 state/visibility/sensitivity 等完整 CHECK、STRICT 和外键约束，实际 schema 以当前文件为准。
+1. 空库：执行完整 schema，再写入 digest。
+2. 非空库：只校验 `schema_meta.id=1` 的 digest 是否完全相等。
+3. 缺少 meta、digest 不等或 schema 文件非法：抛出 `SchemaIdentityError`，稳定错误码为 `CURRENT_SCHEMA_MISMATCH`。
 
----
+这个项目不会修改陌生库，也不会自动删库。换 schema 时由操作者显式删除本地 DB 并重建。
 
-### 4.3 activities 表
+### 两类“版本”不要混淆
 
-```sql
-CREATE TABLE activities (
-    activity_id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES runs(run_id),
-    type TEXT NOT NULL,
-    logical_key TEXT NOT NULL,
-    state TEXT NOT NULL,
-    attempt INTEGER NOT NULL DEFAULT 0,
-    available_at INTEGER NOT NULL,
-    lease_owner TEXT,
-    lease_expires_at INTEGER,
-    fencing_token INTEGER NOT NULL DEFAULT 0,
-    revision INTEGER NOT NULL DEFAULT 0,
-    result_json TEXT,
-    error_json TEXT,
-    pending_input_json TEXT,
-    resume_payload_json TEXT,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    
-    UNIQUE (run_id, logical_key),
-    CHECK ((lease_owner IS NULL) = (lease_expires_at IS NULL))
-);
+- `schema_meta.schema_digest` 是本地 SQLite 存储布局身份。
+- `RuntimeEnvelope`、`CanonicalEvent`、Artifact 契约、`EvidenceSet` 等对外 DTO 保留 `schema_version: Literal["1"]`，表示当前传输契约。`ToolResultEnvelope` 是另一个严格的当前 DTO，但其模型本身没有 `schema_version` 字段。
 
--- 关键索引：claim_next 使用
-CREATE INDEX ix_activities_claim ON activities(state, available_at, created_at, activity_id);
-CREATE INDEX ix_activities_lease ON activities(state, lease_expires_at);
-```
+SQLite 的 `runs`、`run_events`、`checkpoints`、`release_manifests` 不再存各自的 `schema_version`。传输契约字段不等于库表兼容机制。
 
-**设计要点**：
-- `ix_activities_claim`：加速 `claim_next` 查询
-- `logical_key`：stable slot，崩溃恢复时重新计算相同 ID
-- `lease_owner/lease_expires_at`：成对出现或成对 NULL
+## 3. 核心领域模型
 
----
+源码入口：`agent/runtime/domain/models.py`。
 
-### 4.4 run_events 表
+### 3.1 RuntimeEnvelope
 
-```sql
-CREATE TABLE run_events (
-    event_id TEXT PRIMARY KEY,
-    schema_version TEXT NOT NULL,
-    run_id TEXT NOT NULL REFERENCES runs(run_id),
-    turn_id TEXT NOT NULL,
-    activity_id TEXT REFERENCES activities(activity_id),
-    tool_execution_id TEXT,
-    seq INTEGER NOT NULL CHECK (seq >= 1),
-    event_type TEXT NOT NULL,
-    producer TEXT NOT NULL,
-    payload_json TEXT,
-    payload_ref TEXT,
-    visibility TEXT NOT NULL,
-    sensitivity TEXT NOT NULL,
-    occurred_at INTEGER NOT NULL,
-    terminal_status TEXT,
-    release_fingerprint TEXT NOT NULL,
-    
-    UNIQUE (run_id, seq),
-    CHECK (payload_json IS NULL OR payload_ref IS NULL)
-);
+`RuntimeEnvelope` 是 Run 入场时冻结的执行信封，主要包括：
 
--- append-only 保护
-CREATE TRIGGER run_events_no_update
-BEFORE UPDATE ON run_events BEGIN
-  SELECT RAISE(ABORT, 'RUN_EVENTS_APPEND_ONLY');
-END;
+- 请求与幂等：`request_id`、`client_request_id`、`idempotency_key`
+- 对话与轮次：`conversation_id`、`turn_id`、`run_id`
+- 租户与引擎：`principal_id`、`agent_id`、`engine`
+- 控制：`deadline_at`、`cancel_token_id`
+- 执行语义：`release_fingerprint`
+- 输入溯源：`input_event_id`、`attachment_refs`、`created_at`
 
-CREATE TRIGGER run_events_no_delete
-BEFORE DELETE ON run_events BEGIN
-  SELECT RAISE(ABORT, 'RUN_EVENTS_APPEND_ONLY');
-END;
+`release_fingerprint` 由 admission 从当时的 `active_releases` 读取并冻结。它不会因之后 Worker 重启而改变。
 
--- 终态事件唯一
-CREATE UNIQUE INDEX uq_run_terminal_event ON run_events(run_id)
-WHERE event_type = 'RUN_TERMINATED';
-```
+### 3.2 RunRecord
 
-**设计要点**：
-- 触发器保证 append-only
-- `UNIQUE(run_id, seq)`：seq 单调递增
-- `uq_run_terminal_event`：最多一个终态事件
+`RunRecord` 是信封之上的可变运行状态：
 
-> 上述 SQL 是简化片段；完整的 `visibility`/`sensitivity` 枚举约束、STRICT 声明和索引请以 `agent/runtime/adapters/sqlite/schema.sql` 为准。
+- `status` / `terminal_status` / `terminal_payload`
+- `revision`：Run 状态 CAS 版本
+- `next_seq`：下一个 Canonical Event 序号
+- `current_activity_id`
+- `pending_input`
+- `input_text`、`updated_at`
+- `trace_id`：只用于 API 进程与 Worker 进程的诊断关联，不参与业务裁决
 
----
+### 3.3 ActivityRecord 与 Claim
 
-### 4.5 tool_executions 表
+Activity 是可领取的持久工作单元。关键字段是：
 
-```sql
-CREATE TABLE tool_executions (
-    tool_execution_id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES runs(run_id),
-    activity_id TEXT NOT NULL REFERENCES activities(activity_id),
-    logical_key TEXT NOT NULL,
-    tool_name TEXT NOT NULL,
-    release_digest TEXT NOT NULL,
-    effect_class TEXT NOT NULL,
-    effect_status TEXT NOT NULL,
-    attempt INTEGER NOT NULL DEFAULT 0,
-    dispatch_fencing_token INTEGER,
-    request_digest TEXT NOT NULL,
-    request_json TEXT NOT NULL,
-    idempotency_key TEXT NOT NULL,
-    result_json TEXT,
-    result_ref TEXT,
-    error_json TEXT,
-    external_object_id TEXT,
-    reconcile_state TEXT,
-    supports_reconcile INTEGER NOT NULL CHECK (supports_reconcile IN (0,1)),
-    revision INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    
-    UNIQUE (run_id, logical_key)
-);
-```
+- 稳定身份：`activity_id`、`run_id`、`logical_key`、`type`
+- 调度：`status`、`attempt`、`available_at`
+- 所有权：`lease_owner`、`lease_expires_at`、`fencing_token`
+- CAS：`revision`
+- 结果/恢复：`result`、`error`、`resume_payload`
 
-**设计要点**：
-- `logical_key`：stable slot，重放时校验 tool_name/digest 一致
-- `effect_status`：ToolEffect 状态机
-- `supports_reconcile`：是否支持人工查询
+`Claim` 是 `RunRecord + ActivityRecord` 的不可变快照，不是新的数据库实体。Worker 必须带着 Claim 里的 `fencing_token` 执行后续写入。
 
-> `supports_reconcile` 只表示是否存在受保护的查询能力；它不等同于允许普通副作用重试。完整 effect class/status 约束见 `schema.sql`。
+### 3.4 CanonicalEvent
 
----
+Canonical Event 是 append-only 的业务事实，包含 `run_id`、`turn_id`、单 Run 递增 `seq`、event type、payload/ref、visibility/sensitivity 和可选 Activity/ToolExecution 关联。
 
-## 5. 数据流与事务边界
+`run_events` 表不重复保存 release fingerprint。读取事件时 Store 与 `runs` join，用 Run 冻结的 release 派生 `CanonicalEvent.release_fingerprint`。
 
-### 5.1 Admission 事务
+典型事件包括：
+
+- `USER_MESSAGE_COMMITTED`
+- `OUTPUT_GENERATION_STARTED` / `OUTPUT_DELTA_COMMITTED`
+- `TOOL_CALL_COMMITTED` / `TOOL_RESULT_COMMITTED`
+- `CHECKPOINT_COMMITTED`
+- `ASSISTANT_MESSAGE_COMMITTED` / `CITATION_SET_COMMITTED`
+- `RUN_TERMINATED`
+
+`OUTPUT_GENERATION_STARTED` 投影成 SSE `text_start`，带稳定 `message_id`、当次 `generation_id` 与 supersede 信息。重试和恢复不覆盖旧 delta，而是开启新 generation。
+
+### 3.5 WorkingState 与 CheckpointRecord
+
+`WorkingState` 记录 goal、constraints、plan、facts、pending input、budget、Artifact/Evidence refs。它不重复保存 release fingerprint。
+
+`CheckpointRecord` 只有：
 
 ```text
-BEGIN IMMEDIATE
-├─ 查 run_requests (幂等校验)
-├─ 查 active_releases (release 校验)
-├─ 查 artifact_metadata (附件校验)
-├─ INSERT/UPDATE conversations
-├─ INSERT runs
-├─ INSERT activities
-├─ INSERT run_requests
-├─ INSERT artifact_links
-├─ INSERT run_events (seq 1-4)
-│   ├─ USER_MESSAGE_COMMITTED
-│   ├─ RUN_STATUS_CHANGED (None → ACCEPTED)
-│   ├─ RUN_STATUS_CHANGED (ACCEPTED → DISPATCH_PENDING)
-│   └─ ACTIVITY_STATUS_CHANGED (None → PENDING)
-└─ COMMIT
+checkpoint_id, run_id, activity_id, revision,
+working_state, engine_state, created_at
 ```
 
-### 5.2 Claim 事务
+注意已经不存在的字段：
+
+- checkpoint 不存 `schema_version`
+- checkpoint 不存 `release_fingerprint`
+- checkpoint 不存额外引擎状态外部指针；当前 typed state 直接由 `engine_state` 承载
+
+`save_checkpoint()` 同时校验 Activity fence 和 `expected_revision`，并能把 engine-owned events 与 checkpoint 放在同一短事务中提交。Native 只接受当前唯一 typed codec；存在 checkpoint 但无法严格解析时是 `NATIVE_CHECKPOINT_INVALID`，不猜测、不回退到 history。
+
+### 3.6 EngineOutcome 与 RuntimeIO
+
+Engine Adapter 统一端口是：
 
 ```text
-BEGIN IMMEDIATE
-├─ SELECT ... FROM activities WHERE state='PENDING' ... LIMIT 1
-├─ UPDATE activities SET state='CLAIMED', fencing_token+1
-├─ UPDATE runs SET state='RUNNING'
-├─ INSERT run_events
-│   ├─ ACTIVITY_STATUS_CHANGED (PENDING → CLAIMED)
-│   └─ RUN_STATUS_CHANGED (DISPATCH_PENDING → RUNNING)
-└─ COMMIT
+execute(EngineRunRequest, RuntimeIO) -> EngineOutcome
 ```
 
-### 5.3 Finalize 事务
+`EngineOutcomeKind` 只描述 Engine 为什么结束：`COMPLETED`、`RETRYABLE_FAILURE`、`TERMINAL_FAILURE`、`WAITING_INPUT`、`CANCELLED`。它是 Coordinator 的输入，不能直接写 Run 终态。
+
+`RuntimeIO` 提供 committed event sink、checkpoint CAS、Tool Broker、cancel/deadline probe 和：
+
+```python
+set_final_assistant(text, message_id, generation_id)
+```
+
+Native 使用这个显式 final override 指定最后一个完整、非空、无 ToolCall 的 Assistant turn。Coordinator 成功收口时优先取它；ADK Adapter 未设置时，才使用 Sink 的累计文本。
+
+### 3.7 ReleaseManifest
+
+`ReleaseManifest` 只有：
+
+```python
+engine: EngineName
+components: dict[str, str]
+```
+
+fingerprint 是 manifest 规范 JSON 的 SHA-256。`components` 覆盖 current schema digest、engine/runtime/shared source digest、最终 ToolCatalog digest、provider/model/checkpoint codec、语义配置、资源上限和实际安装依赖版本。
+
+`release_manifests` 由 SQLite trigger 禁止 UPDATE/DELETE，`active_releases` 是三个 engine 的当前指针。Worker 启动使用唯一公开写入路径：
 
 ```text
-BEGIN IMMEDIATE
-├─ UPDATE runs SET state=terminal_status, terminal_status=..., terminal_payload=...
-├─ INSERT run_events
-│   ├─ ASSISTANT_MESSAGE_COMMITTED
-│   ├─ CITATION_SET_COMMITTED
-│   └─ RUN_TERMINATED
-└─ COMMIT
+activate_current_releases(plan_execute, agent_loop, native_loop)
 ```
 
----
+三份 manifest 的写入/核对、活跃旧 Run 检查和三个 active pointer 切换全部在一个 `BEGIN IMMEDIATE` 内，不会暴露“一半新 release”。
 
-## 6. 源码位置索引
+## 4. 状态机
 
-| 类别 | 文件 | 说明 |
-|---|---|---|
-| 领域模型 | `agent/runtime/domain/models.py` | 所有 Record/Event/State 定义 |
-| 状态枚举 | `agent/runtime/domain/models.py:17-126` | RunStatus/ActivityStatus/EventType 等 |
-| 表结构 | `agent/runtime/adapters/sqlite/schema.sql` | 完整建表语句（单一当前 schema，无 migration） |
-| 状态机规格 | `docs/reliability/state-machines.md` | 冻结的邻接表与错误码 |
-| Store 接口 | `agent/runtime/ports/store.py` | Protocol 定义 |
-| SQLite 实现 | `agent/runtime/adapters/sqlite/store.py` | 具体实现 |
-| JSON Schema | `docs/reliability/schemas/` | 冻结的序列化契约 |
+### 4.1 RunStatus
 
----
+```text
+非终态：ACCEPTED, DISPATCH_PENDING, RUNNING,
+          WAITING_RETRY, WAITING_INPUT, CANCEL_REQUESTED
 
-## 附录：设计原则总结
+终态：  SUCCEEDED, FAILED, CANCELLED, TIMED_OUT, REJECTED
+```
 
-| 原则 | 体现 |
+错误 release 的 Worker 根本不能 claim Run，因此没有“release 不兼容终态”。Run 保持待调度，由符合 exact release 的 Worker 领取，或最终由绝对 deadline 收口。
+
+### 4.2 ActivityStatus
+
+```text
+PENDING -> CLAIMED -> RUNNING
+RUNNING -> SUCCEEDED | FAILED | CANCELLED
+RUNNING -> WAITING_RETRY | WAITING_INPUT
+RUNNING -> RECONCILE | MANUAL
+```
+
+租约过期恢复不是简单无条件回到 `PENDING`：Store 先检查 deadline、cancel 和未决 ToolEffect。只有可安全重放的边界才重派，不确定副作用会进入 reconcile/manual。
+
+## 5. SQLite 表与权威职责
+
+| 表 | 权威职责 |
 |---|---|
-| **单一事实源** | 每类数据只在一个表中权威存储 |
-| **append-only** | run_events 只追加，触发器保护 |
-| **CAS 防并发** | revision/fencing_token 双重校验 |
-| **stable slot** | UUIDv5 派生，崩溃恢复可重算 |
-| **事务边界清晰** | admission/claim/finalize 各自原子 |
-| **幂等设计** | idempotency_key + digest 校验 |
-| **lease/fencing** | 防 Worker 崩溃锁死和过期提交 |
+| `schema_meta` | current schema 字节 digest |
+| `conversations` | 对话归属、下一 turn seq |
+| `release_manifests` | 不可变 release 内容 |
+| `active_releases` | 每个 engine 的当前入场指针 |
+| `runs` | Run 状态、终态、deadline、冻结 release |
+| `run_requests` | `(principal_id, agent_id, idempotency_key)` 幂等事实 |
+| `activities` | 工作单元、lease、fencing、attempt |
+| `run_events` | append-only Canonical Event |
+| `checkpoints` | append-only 恢复点及 revision CAS |
+| `tool_executions` | ToolEffect 状态、稳定 slot、结果/ref |
+| `artifact_metadata` / `artifact_links` | CAS 元数据与业务引用 |
+| `signals` / `cancellation_commands` | 幂等外部命令 |
+| `timers` | 当前已装配的持久化 retry timer；绝对 deadline 由 Store 另行扫描 |
+| `runtime_workers` | Worker 心跳、state 与 release map |
 
----
+表中不重复存储可从 Run 权威派生的 release fingerprint。例如 Event 读模型中的 fingerprint 来自 Run join，Checkpoint/WorkingState 则根本不带该字段。
 
-*文档生成时间: 2026-08-12*
-*基于项目版本: sxw_agent-2_demo R0 冻结规格*
+## 6. 关键事务边界
+
+### 6.1 Admission
+
+一个写事务内按顺序完成：
+
+```text
+幂等重放判定
+-> 读取 engine 的 active release
+-> 校验 Artifact
+-> 创建/更新 Conversation
+-> 写 Run + ENGINE_RUN Activity + run_request
+-> 链接输入 Artifact
+-> 追加用户消息和状态事件
+```
+
+幂等重放先于 conversation busy 检查。activation 和 admission 都使用写事务读/写 active pointer，因此不会冻结到一个半切换 release。
+
+### 6.2 Claim
+
+`claim_next()` 使用一条 `UPDATE ... RETURNING` 在短写事务中领取 Activity，并且 SQL 同时精确匹配：
+
+```text
+(runs.engine, runs.release_fingerprint) in worker.release_map
+```
+
+普通 claim、恢复后 claim 和 reconcile claim 共用这个条件。
+
+### 6.3 Event / Checkpoint / Terminal
+
+- Event batch 与 `runs.next_seq` 同事务，回滚不留 seq 洞。
+- Checkpoint CAS 和引擎事件可同事务提交。
+- 成功时 final assistant、由 committed Evidence 派生的 citations 和 `RUN_TERMINATED` 同事务。
+- Store 自有事件不允许 Engine 伪造。
+
+## 7. AttemptOwnershipLost：所有权不是业务失败
+
+`agent/runtime/domain/errors.py` 定义 `AttemptOwnershipLost`。以下情形会被转成该控制异常：
+
+- stale fencing token / lease expired
+- Activity 没有合法运行租约
+- checkpoint revision CAS 冲突
+- Coordinator 不可达防御中的 claim/release mismatch
+
+它必须穿过 Engine 和 Coordinator 到 Worker，不能被包装成 ToolResult，也不能使 Run 终态化。Worker 停止当地 attempt，让持久化 lease recovery 决定下一个所有者。
+
+## 8. 建议阅读顺序
+
+1. `agent/runtime/domain/models.py`：领域词汇和状态机。
+2. `agent/runtime/ports/store.py` 与 `agent/runtime/ports/engine.py`：存储和 Engine 端口。
+3. `agent/runtime/adapters/sqlite/schema.sql`：唯一 current schema。
+4. `common/sqlite_schema.py` 与 `agent/runtime/adapters/sqlite/database.py`：schema digest 启动边界。
+5. `agent/runtime/adapters/sqlite/store.py`：admission、claim、checkpoint、terminal 事务。
+6. `agent/runtime/application/events.py` 与 `agent/runtime/application/coordinator.py`：RuntimeIO 和终态所有权。
+7. `agent/runtime/worker/main.py` 与 `agent/runtime/worker/dispatcher.py`：release 装配、领取和 lease 续租。
+
+> 本项目当前的 authority 是单机多进程共享 SQLite + Artifact CAS。租约/fencing 解决的是本机进程级故障恢复，不等于跨主机 HA。

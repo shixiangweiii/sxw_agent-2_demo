@@ -11,7 +11,17 @@ from typing import Any, Callable
 import httpx
 
 from agent.config import AgentSettings
-from agent.runtime.domain.models import ms_to_rfc3339, utc_now_ms
+from agent.runtime.domain.errors import RuntimeFault
+from agent.runtime.domain.models import (
+    EvidenceItem,
+    EvidenceSet,
+    RetrievalStatus,
+    ToolExecutionOutput,
+    ToolResultEnvelope,
+    ToolResultStatus,
+    ms_to_rfc3339,
+    utc_now_ms,
+)
 from agent.skills.request_context import get_request_context
 from common.obs import get_logger, get_trace_id, log_kv
 from common.trace import KIND_RETRIEVAL, start_span
@@ -23,7 +33,7 @@ def build_knowledge_search_tool(settings: AgentSettings) -> Callable[..., Any]:
     base_url = settings.arag_base_url.rstrip("/")
     timeout = settings.arag_timeout_ms / 1000.0
 
-    async def knowledge_search(query: str) -> dict[str, Any]:
+    async def knowledge_search(query: str) -> ToolExecutionOutput:
         """检索企业知识库，返回与问题相关的资料片段；回答知识型问题前应先调用本工具。
 
         Args:
@@ -62,26 +72,13 @@ def build_knowledge_search_tool(settings: AgentSettings) -> Callable[..., Any]:
                      "content": c.get("content", "")}
                     for i, c in enumerate(chunks)
                 ]
-                # Runtime Tool Broker consumes this internal field before the result reaches
-                # the model.  It is the lossless EvidenceSet authority written to Artifact;
-                # the model only receives the bounded ``hits`` projection above.
-                evidence_set = {
-                    "schema_version": "1",
-                    "query": query,
-                    "query_id": data.get("query_id"),
-                    "run_id": retrieval_request.get("run_id"),
-                    "activity_id": retrieval_request.get("activity_id"),
-                    "principal_id": retrieval_request.get("principal_id") or "unknown",
-                    "dataset_scope": list(retrieval_request.get("datasets") or ["default"]),
-                    "scope": str(retrieval_request.get("scope") or "public"),
-                    "retrieval_status": data.get("status", "HIT" if chunks else "MISS"),
-                    "rewrites": data.get("rewrites") or [query],
-                    "cost_ms": data.get("cost_ms"),
-                    "degraded_reasons": list(data.get("degraded_reasons") or []),
-                    "evidence": [dict(c, n=i + 1) for i, c in enumerate(chunks)],
-                    "retrieved_at": ms_to_rfc3339(utc_now_ms()),
-                }
-                retrieval_status = str(evidence_set["retrieval_status"])
+                evidence_set = _evidence_from_retrieval(
+                    query=query,
+                    request=retrieval_request,
+                    response=data,
+                    chunks=chunks,
+                )
+                retrieval_status = evidence_set.retrieval_status.value
                 degraded = retrieval_status in {"DEGRADED", "ERROR"}
                 # ★ 检索**质量**信号进入轨迹与完整 EvidenceSet Artifact，绝不进入
                 #   上面喂给模型的有界 hits preview。
@@ -117,13 +114,25 @@ def build_knowledge_search_tool(settings: AgentSettings) -> Callable[..., Any]:
                             "知识库未检索到相关资料。请明确告知未找到相关资料，再据常识谨慎作答；"
                             "不要编造引用，也不要给出资料未提供的具体来源性事实（算法名/参数/函数名）。"
                         )
-                    return {"hits": [], "count": 0, "degraded": degraded,
-                            "__evidence_set__": evidence_set,
-                            "note": note}
-                return {"hits": hits, "count": len(hits),
+                    preview = {
+                        "hits": [], "count": 0, "degraded": degraded, "note": note,
+                    }
+                else:
+                    preview = {
+                        "hits": hits,
+                        "count": len(hits),
                         "degraded": degraded,
-                        "__evidence_set__": evidence_set,
-                        "note": "请基于以上资料回答，并在引用处用 [n] 标注（n 为资料序号）。"}
+                        "note": "请基于以上资料回答，并在引用处用 [n] 标注（n 为资料序号）。",
+                    }
+                return ToolExecutionOutput(
+                    result=ToolResultEnvelope(
+                        status=ToolResultStatus.SUCCESS,
+                        preview=preview,
+                    ),
+                    evidence=evidence_set,
+                )
+            except RuntimeFault:
+                raise
             # ★ 微服务边界的降级点：arag 挂了/超时不能让整轮对话失败。
             # 这里返回结构化结果而不是抛异常——属于"业务可预期失败"，
             # 模型收到 degraded 标记后会声明未访问知识库再作答，循环继续正常推进。
@@ -137,26 +146,31 @@ def build_knowledge_search_tool(settings: AgentSettings) -> Callable[..., Any]:
                 # retrieval fact.  Preserve an explicit ERROR EvidenceSet so
                 # Broker/citation/audit never misclassify the fallback as a
                 # healthy zero-hit MISS merely because there are no chunks.
-                evidence_set = {
-                    "schema_version": "1",
-                    "query": query,
-                    "query_id": retrieval_request.get("query_id"),
-                    "run_id": retrieval_request.get("run_id"),
-                    "activity_id": retrieval_request.get("activity_id"),
-                    "principal_id": retrieval_request.get("principal_id") or "unknown",
-                    "dataset_scope": list(retrieval_request.get("datasets") or ["default"]),
-                    "scope": str(retrieval_request.get("scope") or "public"),
-                    "retrieval_status": "ERROR",
-                    "rewrites": [query],
-                    "cost_ms": None,
-                    "degraded_reasons": [type(exc).__name__],
-                    "evidence": [],
-                    "retrieved_at": ms_to_rfc3339(utc_now_ms()),
-                }
-                return {"hits": [], "count": 0, "degraded": True,
-                        "__evidence_set__": evidence_set,
-                        "note": "知识检索暂不可用。请在回答开头显式声明『未能访问知识库，以下基于常识』，"
-                                "再谨慎作答；不要编造引用，也不要把常识冒充为检索结果。"}
+                evidence_set = _evidence_from_retrieval(
+                    query=query,
+                    request=retrieval_request,
+                    response={
+                        "status": "ERROR",
+                        "query_id": retrieval_request["query_id"],
+                        "rewrites": [query],
+                        "cost_ms": None,
+                        "degraded_reasons": [type(exc).__name__],
+                    },
+                    chunks=[],
+                )
+                return ToolExecutionOutput(
+                    result=ToolResultEnvelope(
+                        status=ToolResultStatus.SUCCESS,
+                        preview={
+                            "hits": [],
+                            "count": 0,
+                            "degraded": True,
+                            "note": "知识检索暂不可用。请在回答开头显式声明『未能访问知识库，以下基于常识』，"
+                                    "再谨慎作答；不要编造引用，也不要把常识冒充为检索结果。",
+                        },
+                    ),
+                    evidence=evidence_set,
+                )
 
     return knowledge_search
 
@@ -172,13 +186,18 @@ def _retrieval_request(query: str) -> dict[str, Any]:
     """
     context = get_request_context()
     if context is None:
-        return {
-            "query": query,
-            "top_k": 6,
-            "scope": "public",
-            "datasets": ["default"],
-        }
-    identity = context.idempotency_key or f"{context.run_id}:{context.activity_id}"
+        raise RuntimeFault(
+            "EVIDENCE_CONTRACT_INVALID",
+            "knowledge_search requires a Runtime ToolExecution context",
+            500,
+        )
+    if not context.run_id or not context.activity_id or not context.idempotency_key:
+        raise RuntimeFault(
+            "EVIDENCE_CONTRACT_INVALID",
+            "knowledge_search context lacks stable Runtime identities",
+            500,
+        )
+    identity = context.idempotency_key
     query_id = "qry_" + hashlib.sha256(
         f"{identity}:{query}".encode("utf-8")
     ).hexdigest()
@@ -189,7 +208,47 @@ def _retrieval_request(query: str) -> dict[str, Any]:
         "run_id": context.run_id or None,
         "activity_id": context.activity_id or None,
         "principal_id": context.user_id,
+        "idempotency_key": context.idempotency_key,
         "scope": "public",
         "datasets": ["default"],
         "deadline_at": ms_to_rfc3339(context.deadline_at_ms),
     }
+
+
+def _evidence_from_retrieval(
+    *,
+    query: str,
+    request: dict[str, Any],
+    response: dict[str, Any],
+    chunks: list[dict[str, Any]],
+) -> EvidenceSet:
+    """Validate ARAG provenance as-is; missing facts are never synthesized."""
+
+    try:
+        evidence = tuple(
+            EvidenceItem.model_validate(dict(chunk, n=index), strict=True)
+            for index, chunk in enumerate(chunks, start=1)
+        )
+        return EvidenceSet(
+            query=query,
+            query_id=response["query_id"],
+            run_id=request["run_id"],
+            activity_id=request["activity_id"],
+            principal_id=request["principal_id"],
+            dataset_scope=tuple(request["datasets"]),
+            scope=request["scope"],
+            retrieval_status=RetrievalStatus(response["status"]),
+            rewrites=tuple(response["rewrites"]),
+            cost_ms=response.get("cost_ms"),
+            degraded_reasons=tuple(response["degraded_reasons"]),
+            tool_execution_id=request["idempotency_key"],
+            evidence=evidence,
+            retrieved_at=ms_to_rfc3339(utc_now_ms()),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeFault(
+            "EVIDENCE_CONTRACT_INVALID",
+            "ARAG response does not satisfy the current EvidenceSet contract",
+            500,
+            {"reason": str(exc)},
+        ) from exc

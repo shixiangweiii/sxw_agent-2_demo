@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.reliability.support.runtime_releases import activate_test_release
+
 import asyncio
 import sqlite3
 import uuid
@@ -55,9 +57,8 @@ class FakeClock:
 async def _runtime(tmp_path):
     store = SqliteRuntimeStore(RuntimeDatabase(tmp_path / "runtime.db"))
     await store.initialize()
-    release = await store.register_release(
+    release = await activate_test_release(store,
         ReleaseManifest(engine="native_loop", components={"manual-reconcile": "v1"}),
-        activate=True,
     )
     return store, FakeClock(), release
 
@@ -82,6 +83,7 @@ async def _admit(store, clock, *, key: str):
 
 async def _claim_and_start(store, clock, *, worker_id: str = "manual-worker"):
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id=worker_id, lease_ms=30_000, now_ms=clock.now_ms(),
     )
     assert claim is not None
@@ -386,6 +388,7 @@ async def test_manual_mark_committed_is_one_atomic_effect_activity_event_and_art
             return EngineOutcome(kind=EngineOutcomeKind.COMPLETED)
 
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="manual-commit-coordinator", lease_ms=30_000, now_ms=clock.now_ms(),
     )
     assert claim is not None
@@ -726,6 +729,7 @@ async def test_cancel_after_claim_before_coordinator_never_enters_engine_adapter
     store, clock, release = await _runtime(tmp_path)
     run = await _admit(store, clock, key="cancel-after-claim-before-coordinator")
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="pre-adapter-cancel-worker",
         lease_ms=30_000,
         now_ms=clock.now_ms(),
@@ -964,6 +968,7 @@ async def test_unknown_result_correlation_survives_manual_restart_and_reconcile_
         manifest, must_not_redispatch, reconcile=reconcile,
     )
     claim = await restarted.claim_next(
+        release_map=await restarted.active_releases(),
         worker_id="correlation-reconcile-worker",
         lease_ms=30_000,
         now_ms=clock.now_ms(),
@@ -1038,6 +1043,7 @@ async def test_inconclusive_hook_correlation_is_visible_to_reauthorized_hook_aft
     )
     first_broker.register(manifest, must_not_dispatch, reconcile=inconclusive)
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="hook-correlation-first-worker",
         lease_ms=30_000,
         now_ms=clock.now_ms(),
@@ -1087,6 +1093,7 @@ async def test_inconclusive_hook_correlation_is_visible_to_reauthorized_hook_aft
     )
     second_broker.register(manifest, must_not_dispatch, reconcile=conclusive)
     second_claim = await restarted.claim_next(
+        release_map=await restarted.active_releases(),
         worker_id="hook-correlation-second-worker",
         lease_ms=30_000,
         now_ms=clock.now_ms(),
@@ -1151,6 +1158,7 @@ async def test_cancel_takes_over_replay_safe_effect_before_replacement_claim(tmp
     assert (await store.get_activity(execution["activity_id"])).status is ActivityStatus.MANUAL
     assert (await store.get_activity(parent.activity_id)).status is ActivityStatus.RECONCILE
     assert await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="must-not-replay-after-cancel",
         lease_ms=30_000,
         now_ms=clock.now_ms(),
@@ -1402,6 +1410,7 @@ async def test_manual_mark_failed_is_sticky_and_never_redispatches_unknown_effec
         signal_id="manual-failed-1",
     )
     resumed = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="manual-worker-2", lease_ms=30_000, now_ms=clock.now_ms(),
     )
     assert resumed is not None
@@ -1483,6 +1492,7 @@ async def test_reconcile_signal_then_coordinator_queries_hook_and_finishes_witho
         tool_reconciler=broker,
     )
     first = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="coordinator-1", lease_ms=30_000, now_ms=clock.now_ms(),
     )
     assert first is not None
@@ -1510,6 +1520,7 @@ async def test_reconcile_signal_then_coordinator_queries_hook_and_finishes_witho
     assert (await store.get_activity(signalled["activity_id"])).status is ActivityStatus.PENDING
 
     second = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="coordinator-2", lease_ms=30_000, now_ms=clock.now_ms(),
     )
     assert second is not None
@@ -1518,6 +1529,7 @@ async def test_reconcile_signal_then_coordinator_queries_hook_and_finishes_witho
     ) is RunStatus.DISPATCH_PENDING
     assert adapter_calls == 1
     third = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="coordinator-3", lease_ms=30_000, now_ms=clock.now_ms(),
     )
     assert third is not None
@@ -1553,6 +1565,7 @@ async def test_reconcile_hook_confirmed_failure_is_failed_and_never_becomes_comm
         signal_id="query-failure-1",
     )
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="reconcile-failure-worker", lease_ms=30_000,
         now_ms=clock.now_ms(),
     )
@@ -1683,6 +1696,7 @@ async def test_kill_during_reconcile_hook_recovers_to_manual_then_resignals_and_
         tool_reconciler=first_broker,
     )
     first_claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="killed-worker", lease_ms=30_000, now_ms=clock.now_ms(),
     )
     assert first_claim is not None
@@ -1762,6 +1776,7 @@ async def test_kill_during_reconcile_hook_recovers_to_manual_then_resignals_and_
         tool_reconciler=second_broker,
     )
     query_claim = await restarted.claim_next(
+        release_map=await restarted.active_releases(),
         worker_id="restarted-query", lease_ms=30_000, now_ms=clock.now_ms(),
     )
     assert query_claim is not None
@@ -1770,6 +1785,7 @@ async def test_kill_during_reconcile_hook_recovers_to_manual_then_resignals_and_
     ) is RunStatus.DISPATCH_PENDING
     assert adapter_calls == 0
     final_claim = await restarted.claim_next(
+        release_map=await restarted.active_releases(),
         worker_id="restarted-engine", lease_ms=30_000, now_ms=clock.now_ms(),
     )
     assert final_claim is not None
@@ -1804,6 +1820,7 @@ async def test_kill_before_hook_start_recovers_scheduled_child_to_manual(
         signal_id="reconcile-scheduled-kill",
     )
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="dies-before-broker", lease_ms=30_000, now_ms=clock.now_ms(),
     )
     assert claim is not None
@@ -1856,6 +1873,7 @@ async def test_claimed_reconcile_parent_with_expired_deadline_recovers_timed_out
         signal_id="claimed-reconcile-deadline-query",
     )
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="claimed-deadline-worker", lease_ms=30_000,
         now_ms=clock.now_ms(),
     )
@@ -1896,6 +1914,7 @@ async def test_exact_reconcile_claim_rechecks_deadline_before_hook(tmp_path):
         signal_id="exact-reconcile-deadline-signal",
     )
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="exact-deadline-worker",
         lease_ms=30_000,
         now_ms=clock.now_ms(),
@@ -2032,6 +2051,7 @@ async def test_kill_after_hook_settlement_clears_marker_and_resumes_engine(tmp_p
         restarted, EngineRegistry({"native_loop": FinalAdapter()}), clock=clock,
     )
     claim = await restarted.claim_next(
+        release_map=await restarted.active_releases(),
         worker_id="after-settle-recovery", lease_ms=30_000, now_ms=clock.now_ms(),
     )
     assert claim is not None
@@ -2190,6 +2210,7 @@ async def test_cancel_first_manual_mark_settles_effect_and_unique_cancelled_term
         execution["tool_execution_id"]
     ]
     assert await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="must-not-revive", lease_ms=30_000, now_ms=clock.now_ms(),
     ) is None
     replay = await _submit(
@@ -2327,6 +2348,7 @@ async def test_cancel_reconcile_only_resolves_one_of_many_then_last_signal_cance
         tool_reconciler=broker,
     )
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="cancel-reconcile-query", lease_ms=30_000, now_ms=clock.now_ms(),
     )
     assert claim is not None
@@ -2446,6 +2468,7 @@ async def test_cancel_reconcile_hook_unavailable_or_inconclusive_returns_to_manu
         tool_reconciler=broker,
     )
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id=f"worker-{failure_mode}", lease_ms=30_000,
         now_ms=clock.now_ms(),
     )
@@ -2538,6 +2561,7 @@ async def test_cancel_owned_hook_kill_recovers_to_cancel_reconciliation_not_runn
         store, EngineRegistry({}), clock=clock, tool_reconciler=broker,
     )
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="cancel-hook-killed-worker", lease_ms=30_000,
         now_ms=clock.now_ms(),
     )
@@ -2753,6 +2777,7 @@ async def test_reconciliation_deadline_guards_signal_query_and_stale_fence(tmp_p
         tool_reconciler=broker,
     )
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="deadline-query-worker", lease_ms=120_000,
         now_ms=clock.now_ms(),
     )

@@ -1,316 +1,255 @@
 # ToolBroker 在 Query 到 Answer 全链路中的位置
 
-本文基于以下两份文档整理与补充：
+本文只回答一个问题：用户发起 Query 后，`ToolBroker` 究竟在哪一段接管工具调用，又怎样把结果安全地交还给模型和前端。
 
-- 《Query 到 Answer 全链路代码阅读指南》（`sxw_aicoding/代码阅读指南/全链路整理/Query到Answer全链路代码阅读指南.md`）
-- 《ToolBroker 详解：效应感知的持久化工具调度协议》（`sxw_aicoding/代码阅读指南/ToolBroker 详解：效应感知的持久化工具调度协议.md`）
+详细状态机见同目录的《ToolBroker 详解：效应感知的持久化工具调度协议》。完整 HTTP/Worker/SSE 流程见 `全链路整理/Query到Answer全链路代码阅读指南.md`。
 
----
-
-## 一、一句话定位
-
-**ToolBroker 位于全链路阶段五「Engine 执行 → Event 产出」的内部，是 Engine 调用外部工具时的可靠执行层。**
-
-它把 LLM 生成的 `tool_call` 意图，转换为一次**持久化、可重试、可对账、崩溃可恢复**的外部动作。ToolBroker/Store 在准备和结算时提交 `tool_executions` 账本及对应的公开 `TOOL_CALL_COMMITTED`/`TOOL_RESULT_COMMITTED` 投影；结果仍会以 `ToolResultEnvelope` 返回 Engine，但已由 Broker 拥有的事件不会再次经过 `CommittedEventSink`，最终由 SSE 从 `run_events` 推送给前端。
-
----
-
-## 二、在 7 阶段全链路中的位置
-
-| 阶段 | 名称 | ToolBroker 是否参与 | 说明 |
-|---|---|---|---|
-| 一 | HTTP 入口 → CreateRun | 否 | 仅做请求校验与幂等键检查 |
-| 二 | Admission → SQLite 事务 | 否 | 创建 runs、activities、events |
-| 三 | Worker 领取 Claim | 否 | claim_next 与 lease/fencing |
-| 四 | RunCoordinator 执行 | 间接 | 注入 `ToolBroker` 到 `RunContext`，但不直接调用 |
-| **五** | **Engine 执行 → Event 产出** | **核心** | **LLM 产生 tool_call → ToolBroker 执行 → 产出 tool_result/text** |
-| 六 | SSE 推送 → 前端消费 | 间接 | ToolBroker 产生的事件经 SSE 推送 |
-| 七 | 前端渲染 → 终态 | 间接 | 前端根据 tool_result 等事件渲染 |
-
-ToolBroker 完全运行在 **Worker 进程**内部，API 进程不直接感知它的存在。
-
----
-
-## 三、阶段五调用栈中的精确位置
-
-阶段五的入口是 `LegacyEngineAdapter.execute()`（`agent/runtime/adapters/legacy_engines.py:65`）。其内部调用链如下：
+## 1. 一句话定位
 
 ```text
-LegacyEngineAdapter.execute(request, io)
-├─ 创建 ADK SessionService（per-attempt）
-├─ 编译 canonical_history → ADK session events
-├─ 构造 RunContext
-│   ├─ tool_broker: ToolBroker              <-- 由 Worker 注册时注入
-│   ├─ fencing_token                        <-- 来自 activity 的 fencing_token
-│   ├─ release_fingerprint                  <-- 用于 release 兼容性校验
-│   ├─ runtime_io: CommittedEventSink       <-- 事件出口
-│   └─ engine_checkpoint / runtime_working_state
-├─ engine = build_engine(context, "native_loop")
-├─ async for event in engine.run_stream(rc):
-│   ├─ Broker-owned tool event → io.force_flush()
-│   └─ Engine-owned event → io.emit(event_type, data)
-│       └─ 聚合 100ms / 2048 bytes → append_events()
-└─ 返回 rc.engine_outcome
+ToolBroker = Engine 与外部工具之间的 durable effect authority
 ```
 
-当 Engine 内部产生一次 tool_call 时，会走到：
+它运行在 Runtime Worker 中，不在 API 进程中。它接收 Engine 已验证的 ToolCall batch，先创建持久化 stable slot，再执行外部工具，最后把权威 ToolResult 返回 Engine。
+
+ToolBroker 不负责：
+
+- 接收 HTTP CreateRun；
+- 决定 Run terminal；
+- 拉取 SSE；
+- 生成模型文本；
+- 把 Trace 当作恢复数据。
+
+这些职责分别属于 Admission、RunCoordinator/Store 权威命令路径、SSE API、Engine/Provider 和各自的权威存储。
+
+## 2. 在全链路中的准确位置
 
 ```text
-Engine 内部 tool_call 处理
-    │
-    ▼
-ToolBroker.execute(
-    run_id=...,
-    parent_activity_id=...,
-    fencing_token=...,          <-- 与 activity 的 fencing_token 一致
-    logical_key=...,
-    tool_name=...,
-    arguments=...,
-    deadline_at_ms=...,
-)
-    │
-    ├─ 查注册表 _tools[tool_name]
-    ├─ 计算 request_digest（sha256_json(arguments)）
-    ├─ store.prepare_tool_execution()       → 状态 PREPARED
-    ├─ 判断 safe_replay（依 effect_class）
-    ├─ store.mark_tool_dispatched()         → 状态 DISPATCHED
-    ├─ 构造 ToolCallContext
-    ├─ 调用实际 executor(arguments, ctx)
-    │   ├─ 成功 → _commit_result()          → 状态 COMMITTED
-    │   ├─ 失败/超时 → _settle_dispatch_failure() → FAILED/UNKNOWN
-    │
-    └─ 返回 ToolResultEnvelope
+Browser
+  → POST /api/v1/runs
+  → Admission transaction
+  → runtime.db 中 Run + ENGINE_RUN Activity
+  → Worker.claim_next(release_map)
+  → RunCoordinator.execute_claim
+  → EngineAdapter.execute(request, RuntimeIO)
+       ├─ AdkEngineAdapter: plan_execute / agent_loop
+       └─ NativeLoopAdapter: native_loop（以下为默认 `off`）
+             → LLM 输出完整 ToolCall batch
+             → ToolBroker.prepare_batch
+             → ToolBroker.execute_prepared
+             → ToolResultEnvelope 放回模型消息
+             → 下一轮 LLM
+  → Coordinator 原子提交 final assistant + terminal
+  → SSE 从 committed run_events replay/tail
 ```
 
-返回的 `ToolResultEnvelope` 被 Engine 消费，并生成 `tool_result` 草稿。对于已由 Broker 执行并结算的注册工具，`LegacyEngineAdapter` 识别其 `authority != "engine"`，只执行 `io.force_flush()` 后跳过 `io.emit()`；对应的公开 `TOOL_RESULT_COMMITTED` 已在 Broker 的结算事务中写入 `run_events`。只有未知工具或参数解析失败等 `authority="engine"` 投影才由 `CommittedEventSink.emit("tool_result", ...)` 负责写入。
+按阶段看：
 
----
-
-## 四、与全链路时序图的对应关系
-
-全链路时序图中这一段：
-
-```text
-浏览器                  API 进程(:8000)           SQLite(runtime.db)         Worker 进程
- │                         │                        │                        │
- │<─SSE id:5 event:text────│                        │                        │
- │  delta: "混合召回是..."  │                        │                        │
- │<─SSE id:6 event:tool_call│                       │                        │
- │<─SSE id:7 event:tool_result                       │                        │
-```
-
-其内部实际发生的是：
-
-1. Engine 生成 `tool_call` 意图，任何 `TOOL_CALL_COMMITTED` 出现前都必须先 `force_flush()` 前置 text buffer；
-2. ADK 路径由 `BrokeredToolBridge` 先 `force_flush()`，再批量 `prepare_tool_execution_batch()`；`native_loop` 则先 `yield authority="broker"` 草稿，`LegacyEngineAdapter` 完成 `force_flush()` 并跳过 `io.emit()`，生成器恢复后才进入 `tool_broker.execute()` 和 `prepare_tool_execution()`；
-3. ToolBroker 在 prepare 事务中提交 ToolExecution + `TOOL_CALL_COMMITTED`，事务外执行 `PREPARED → DISPATCHED → executor`，再在结算事务中提交 `COMMITTED/FAILED/UNKNOWN` 与 `TOOL_RESULT_COMMITTED`；
-4. 结果返回 Engine，适配器跳过 Broker-owned `tool_result` 草稿。未知工具/参数错误等没有 ToolExecution 的 engine-owned 事件，才经 `CommittedEventSink` 写入。
-
-因此，`tool_call` 与对应 `tool_result` 标记了 ToolBroker 执行周期的两端；多工具并发或 Activity 状态事件可能插入其间，SSE 不保证二者在 seq 上相邻，应使用 `tool_execution_id`/stable logical key 做关联。
-
----
-
-## 五、ToolBroker 子流程详解
-
-### 5.1 核心数据结构
-
-#### ToolManifest（`agent/runtime/domain/models.py:243-254`）
-
-```python
-class ToolManifest(BaseModel):
-    name: str
-    release_digest: str
-    effect_class: ToolEffectClass
-    timeout_seconds: float
-    max_attempts: int = 1
-    supports_idempotency: bool = False
-    supports_reconcile: bool = False
-    supports_cancel: bool = False
-    result_policy: str = "INLINE_OR_ARTIFACT"
-    concurrency_safe: bool = False
-    exclusive_resources: tuple[str, ...] = ()
-```
-
-Engine 在构造 `RunContext` 时，会携带一组已注册的 `ToolManifest`。ToolBroker 根据 `effect_class` 决定工具的可重试性与对账策略。
-
-#### ToolCallContext（`agent/runtime/application/tool_broker.py:28-46`）
-
-```python
-@dataclass(frozen=True)
-class ToolCallContext:
-    run_id: str
-    parent_activity_id: str
-    tool_activity_id: str
-    tool_execution_id: str
-    idempotency_key: str
-    deadline_at_ms: int
-    attempt: int
-    clock: Clock
-    prior_result_ref: str | None
-    prior_external_object_id: str | None
-    prior_preview: Any | None
-    prior_error_code: str | None
-    prior_error_message: str | None
-
-    @property
-    def remaining_ms(self) -> int:
-        return max(0, self.deadline_at_ms - self.clock.now_ms())
-```
-
-`ToolCallContext` 是 executor 与 reconcile 钩子能看到的全部上下文，其中：
-
-- `idempotency_key`：必须透传给下游幂等接口；
-- `remaining_ms`：剩余 deadline 预算；
-- `prior_*`：崩溃恢复时从 `tool_executions` 表中重放的上次执行状态。
-
-### 5.2 状态机
-
-```python
-class ToolEffectStatus(StrEnum):
-    PREPARED = "PREPARED"
-    DISPATCHED = "DISPATCHED"
-    COMMITTED = "COMMITTED"
-    FAILED = "FAILED"
-    UNKNOWN = "UNKNOWN"
-    RECONCILING = "RECONCILING"
-    MANUAL_REQUIRED = "MANUAL_REQUIRED"
-```
-
-状态流转：
-
-```text
-                    ┌──────────────┐
-                    │   PREPARED   │
-                    └──────┬───────┘
-                           │ mark_tool_dispatched()
-                           ▼
-                    ┌──────────────┐
-            ┌──────│  DISPATCHED  │──────┐
-            │      └──────────────┘      │
-            │                            │
-            │ executor 成功              │ executor 失败
-            ▼                            ▼
-    ┌──────────────┐              ┌──────────────┐
-    │  COMMITTED   │              │    FAILED    │      (READ_ONLY 可直达)
-    └──────────────┘              └──────┬───────┘
-            ▲                            │ safe_replay = false
-            │                            ▼
-            │                    ┌──────────────┐
-            │                    │   UNKNOWN    │
-            │                    └──────┬───────┘
-            │                           │ reconcile()
-            │                           ▼
-            │                    ┌──────────────┐
-            ├────────────────────│ RECONCILING  │
-            │                    └──────┬───────┘
-            │                           │
-            │              ┌────────────┼────────────┐
-            │              ▼            ▼            ▼
-            │       ┌──────────┐ ┌──────────┐ ┌──────────────┐
-            │       │COMMITTED │ │  FAILED  │ │MANUAL_REQUIRED│
-            │       └──────────┘ └──────────┘ └──────────────┘
-            │
-            └──────────────────────────────────────┘
-```
-
-### 5.3 effect_class 与处理策略
-
-| Effect Class | 可安全重试 | 幂等键 | 对账钩子 | 失败处理 |
-|---|---|---|---|---|
-| `READ_ONLY` | 是 | 不需要 | 不需要 | 直接 FAILED |
-| `IDEMPOTENT_EFFECT` | 是 | 必须透传 | 可选 | 可对账 |
-| `NON_IDEMPOTENT_EFFECT` | 否 | 可选 | 建议提供；缺失时无法自动对账 | 进入 `UNKNOWN` 后对账或人工 |
-| `UNKNOWN_EFFECT` | 否 | 不需要 | 可选 | 对账或人工 |
-
-对应到当前系统的工具注册：
-
-- `READ_ONLY`：如 `knowledge_search`（ARAG 检索）；
-- `IDEMPOTENT_EFFECT`：如支持幂等键的工单创建类工具；
-- `NON_IDEMPOTENT_EFFECT`：如发送邮件、支付等；
-- `UNKNOWN_EFFECT`：未声明的 Skill / A2A / Claude SKILL 默认归为此类。
-
-### 5.4 结果管理
-
-- 小结果（≤ 8KiB）：直接内联在 `ToolResultEnvelope.preview` 中；
-- 大结果（> 8KiB）：序列化后写入 `ArtifactStore`，`result_ref` 指向 Artifact ID，`preview` 截断；
-- Evidence：knowledge_search 返回的 EvidenceSet 有特殊处理逻辑。
-
----
-
-## 六、与周边组件的关系
-
-```text
-┌─────────────────────────────────────────────────────────┐
-│                    Engine Adapter                        │
-│  (plan_execute / agent_loop / native_loop)               │
-└────────────────────┬────────────────────────────────────┘
-                     │ execute(tool_name, arguments)
-                     ▼
-┌─────────────────────────────────────────────────────────┐
-│                      ToolBroker                          │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
-│  │   register   │  │   execute    │  │  reconcile   │  │
-│  └──────────────┘  └──────────────┘  └──────────────┘  │
-└────────┬─────────────────┬─────────────────┬───────────┘
-         │                 │                 │
-         ▼                 ▼                 ▼
-┌────────────────┐  ┌──────────────┐  ┌──────────────────┐
-│  RuntimeStore  │  │ ArtifactStore│  │  External Tools  │
-│  (SQLite)      │  │ (CAS)        │  │  (HTTP/gRPC/...) │
-└────────────────┘  └──────────────┘  └──────────────────┘
-```
-
-| 组件 | ToolBroker 如何使用它 |
-|---|---|
-| `RuntimeStore` | 持久化 `tool_executions` 状态与结果 |
-| `ArtifactStore` | 大结果（> 8KiB）写入 CAS |
-| `Clock` | 计算 `remaining_ms`，控制超时 |
-| `CommittedEventSink` | engine-owned 工具投影及其他引擎事件的出口；Broker-owned 工具事件不经此处重复写入 |
-| `ToolExecutor` | 实际执行业务逻辑的函数 |
-| `ReconcileHook` | 非幂等副作用工具失败后的对账钩子 |
-
----
-
-## 七、可靠性保证在链路中的体现
-
-全链路指南附录强调的可靠性原则，在 ToolBroker 中的具体落地：
-
-| 原则 | ToolBroker 中的体现 |
-|---|---|
-| **先 commit，后 SSE 可见** | `prepare_tool_execution()`/`settle_tool_execution()` 在调用副作用前后提交 ToolExecution 账本及公开事件投影；结果提交后才返回 Engine |
-| **lease/fencing** | 每次状态变更都校验 `fencing_token`，防止旧 Worker 过期提交 |
-| **幂等** | `IDEMPOTENT_EFFECT` 工具必须透传 `idempotency_key` 给下游 |
-| **稳定账本 + CAS** | `tool_executions` 保留同一 stable slot，通过 `revision`/CAS 更新效应状态；append-only 审计与 SSE 投影位于 `run_events` |
-| **deadline 向下传递** | `deadline_at_ms` 在 `ToolCallContext` 中传递，`executor` 使用剩余预算而非本地重算 |
-| **大结果不入 Event** | 大结果写入 Artifact，Event/Checkpoint 中只保留 `result_ref` |
-| **崩溃恢复** | 从 `tool_executions` 表重放时，根据 `effect_class` 判断 safe_replay；`request_digest` 不一致时触发 `TOOL_REPLAY_MISMATCH` |
-
----
-
-## 八、源码位置索引
-
-| 功能 | 文件 | 行号 |
+| 阶段 | Broker 是否参与 | 说明 |
 |---|---|---|
-| ToolBroker 类定义与 execute 入口 | `agent/runtime/application/tool_broker.py` | 57 / 217 |
-| ToolManifest / ToolEffectClass / ToolResultEnvelope | `agent/runtime/domain/models.py` | 95-109 / 243-282 |
-| ToolCallContext | `agent/runtime/application/tool_broker.py` | 28-46 |
-| 工具注册与校验 | `agent/runtime/application/tool_broker.py` | 85-91 |
-| _commit_result（结果提交） | `agent/runtime/application/tool_broker.py` | 617-716 |
-| _resolve_uncertain（对账） | `agent/runtime/application/tool_broker.py` | 519-558 |
-| _require_manual（人工介入） | `agent/runtime/application/tool_broker.py` | 455-517 |
-| RuntimeStore prepare/settle | `agent/runtime/adapters/sqlite/store.py` | 相关实现 |
-| EngineAdapter 注入 ToolBroker | `agent/runtime/adapters/legacy_engines.py` | 65 附近 |
-| CommittedEventSink | `agent/runtime/application/events.py` | 1 起 |
+| CreateRun/admission | 否 | 冻结 Run、input、release |
+| Worker claim | 否 | claim 只选 exact `(engine, release_fingerprint)` |
+| 模型正文流 | 否 | Engine 通过 RuntimeIO 提交 delta |
+| ToolCall batch | 是 | 原子 PREPARE stable slots 与 ToolCall events |
+| 外部工具执行 | 是 | effect-aware dispatch/retry/reconcile |
+| ToolResult | 是 | 严格适配、Artifact/Evidence、ledger/event 结算 |
+| 下一轮模型 | 间接 | Engine 使用 Broker 返回的 envelope 构造 tool message |
+| Run terminal | 否 | 正常 EngineOutcome 由 Coordinator 收口；cancel/deadline/recovery/reconciliation 可由 Store 权威事务直接提交 |
+| SSE | 间接 | SSE 读取 Broker 已提交的 canonical events |
 
----
+## 3. Worker 启动时 Broker 已被 release 冻结
 
-## 九、总结
+`agent/runtime/worker/main.py::build_worker` 不是先创建 Engine、运行时再随便加工具。当前顺序是：
 
-ToolBroker 是 Query→Answer 全链路中**阶段五「Engine 执行 → Event 产出」**的核心子组件。
+```text
+加载全部工具源
+→ 构造 native/agent_loop registry
+→ 校验公开工具面 parity
+→ 构造唯一 strict ToolCatalog
+→ 注册 ToolBroker
+→ catalog digest 进入三份 ReleaseManifest
+→ 创建三个 Adapter
+→ 原子激活三份 release
+```
 
-- **入口**：Engine 内部产生 `tool_call` 后，调用 `ToolBroker.execute()`；
-- **职责**：持久化工具执行状态、按 effect_class 决定重试/对账策略、透传幂等键、控制 deadline、管理大结果 Artifact；
-- **出口**：返回 `ToolResultEnvelope` 给 Engine；注册工具的 `tool_result` 公开投影已经由 Broker 结算事务写入 `run_events`，Engine-owned 异常投影才经 `CommittedEventSink` 落库，再由 SSE 推送给前端；
-- **价值**：把一次普通的函数调用，提升为具备**持久化、幂等、对账、崩溃恢复、人工介入**能力的生产级工具调度协议。
+因此一个已 accepted Run 冻结的不只是 Engine 源码，还包括：
 
-因此，《ToolBroker 详解》可以视为《Query 到 Answer 全链路代码阅读指南》**阶段五的放大切片**：全链路指南回答“请求怎么从头到尾跑完”，ToolBroker 详解回答“其中一次工具调用是怎么被安全可靠地执行的”。
+- schema/source digest；
+- tool catalog digest；
+- 每个 tool release/effect/result adapter；
+- provider/checkpoint codec；
+- Native 语义配置与资源上限；
+- 真实安装依赖版本。
+
+工具目录不完整、重复、schema 非法、结果协议不明确都会在 release 激活前阻止 Worker 启动。
+
+## 4. Native 默认 `off` 模式中的位置
+
+`NativeLoopAdapter` 直接实现：
+
+```python
+execute(EngineRunRequest, RuntimeIO) -> EngineOutcome
+```
+
+它不再经过旧的通用 ReasoningEngine adapter 或后台 merge queue。生产默认 `native_early_tool_dispatch=off` 时，工具边界如下：
+
+```text
+1. provider stream 显式 finish
+2. 严格校验单 choice、finish reason、完整 ToolCall batch
+3. MODEL_RESPONSE_COMMITTED checkpoint
+4. Broker.prepare_batch：整批 stable slot + TOOL_CALL_COMMITTED 原子提交
+5. TOOL_BATCH_COMMITTED checkpoint
+6. Broker.execute_prepared：允许安全 READ_ONLY 受控并发
+7. Broker 按 call ordinal 结算 TOOL_RESULT_COMMITTED
+8. Engine 按 ordinal 追加 tool messages
+9. TOOL_RESULT_COMMITTED / NEXT_TURN checkpoint
+10. 下一轮模型调用
+```
+
+关键边界是：模型 stream 没有完整结束之前，Broker 的外部执行计数必须始终为零。
+
+模型正文仍会流式提交；工具运行期间的 Skill/Claude Skill 进度仍会通过 awaited RuntimeIO sink 实时展示。“关闭提前派发”不等于关闭正文流或工具进度流。
+
+## 5. Native 实验提前派发中的位置
+
+`experimental_heuristic` 保留，但只作为显式实验模式：
+
+```text
+provider fragments
+→ accumulator 暂时识别一个安全、完整的 READ_ONLY call
+→ 先为该 canonical stable slot PREPARE
+→ 有界 worker 执行
+→ 完整 model batch 到达后重新核对
+```
+
+它仍必须经过 Broker；不存在“因为早所以绕过账本”的路径。后续 fragment 改变已派发的 name/args 时，Broker/Native 以 `TOOL_REPLAY_MISMATCH` fail-closed。
+
+`provider_block_complete` 只有 provider 明确声明 capability 才能用。当前 OpenAI-compatible provider 不提供该信号，因此 Worker 会在 release 激活前报 `EARLY_DISPATCH_CAPABILITY_UNAVAILABLE`。
+
+## 6. 两个 ADK 引擎中的位置
+
+`plan_execute` 和 `agent_loop` 继续使用 `AdkEngineAdapter`，它们的内部循环没有被 Native 重构影响。
+
+ADK 接入点是：
+
+```text
+ADK 完整 non-partial model response
+→ AdkToolBatch.prepare_model_response
+→ flush 前置 text
+→ Broker.prepare_batch
+→ ADK 并行 tool callback
+→ BrokeredAdkTool.resolve stable slot
+→ ToolBroker.execute（execute_prepared 的单调用包装）
+```
+
+framework function-call id 只做 attempt 内回调关联；真正的恢复身份仍是 `adk:turn:{turn}:call:{ordinal}`。
+
+## 7. Broker-owned Event 如何进入 SSE
+
+当前公开 ToolCall/ToolResult 事实由 Broker/Store 提交：
+
+```text
+prepare transaction
+  ├─ ToolExecution PREPARED
+  └─ TOOL_CALL_COMMITTED
+
+settlement transaction
+  ├─ ToolExecution COMMITTED/FAILED/UNKNOWN...
+  ├─ Artifact/Evidence metadata/ref
+  ├─ TOOL_RESULT_COMMITTED
+  └─ 必要时 ACTIVITY_STATUS_CHANGED
+```
+
+Tool settlement 只固化工具结果及其 Evidence/Artifact 事实，不在这里提交 citation projection。成功收口时，`store.finalize_success()` 才根据最终回答中的引用标记和已提交 Evidence index 派生 `CITATION_SET_COMMITTED`，并与 final assistant、success terminal 放在同一事务。
+
+SSE API 不订阅 Broker 的进程内对象，而是短查询 `run_events`：
+
+```text
+committed run_events
+→ replay/tail(after_seq or Last-Event-ID)
+→ SSE event: tool_call / tool_result / citation
+→ Web UI/评测客户端
+```
+
+因此：
+
+- 事务未提交的 ToolCall 对 SSE 不可见；
+- SSE 断开不会取消工具或 Run；
+- 重连按 seq 重放，不依赖 Worker 是否仍在；
+- ToolCall 与 ToolResult 之间可能插入 Activity、Skill 或其他工具事件，不能假设 seq 相邻；
+- 关联应使用 `tool_execution_id`/stable logical slot。
+
+## 8. 工具结果如何返回模型
+
+Tool executor 的返回首先由协议 adapter 归一化为：
+
+```text
+ToolExecutionOutput(result=ToolResultEnvelope(...), evidence=...)
+```
+
+Broker 严格验证并结算后，Engine 才把 `ToolResultEnvelope` 投影成模型可读的 tool message：
+
+- SUCCESS/NO_OUTPUT → content/ref/external id；
+- FAILURE → 明确错误对象；
+- INTERRUPT → pending input；
+- UNKNOWN → 明确 unknown-effect 错误，进入对账/人工语义。
+
+大结果不会完整复制进 Event 或 Checkpoint。Broker ledger 保存有界 preview/ref；Native 恢复时调用 `materialize_committed_result` 从 Artifact CAS 恢复完整 current envelope。
+
+## 9. 与 checkpoint 的顺序关系
+
+Native 的权威边界是：
+
+```text
+MODEL_REQUEST
+MODEL_RESPONSE_COMMITTED
+TOOL_BATCH_COMMITTED
+TOOL_RESULT_COMMITTED
+NEXT_TURN
+COMPLETED
+```
+
+Broker 管 Tool effect，Native checkpoint 管模型循环位置，两者不能互相替代：
+
+- 有 `TOOL_BATCH_COMMITTED`，说明 batch 已完成 PREPARE，恢复可以从 ledger 找 stable slots；
+- 某 ToolExecution 已 COMMITTED，恢复必须复用/重物化，不得重派发；
+- checkpoint 中的大 ToolResult 只留 ledger ref；
+- `COMPLETED` checkpoint 保存精确 final text/message/generation，恢复不再调用 Broker 或模型。
+
+## 10. 失败场景中的位置
+
+| 场景 | 谁裁决 | 结果 |
+|---|---|---|
+| 未知工具/参数非法 | Native/Engine contract | 默认 `off`：整批零 dispatch 并生成成对 engine-owned call/result；实验模式可能浪费已执行的安全 READ_ONLY 前缀 |
+| stable slot 漂移 | Broker | `TOOL_REPLAY_MISMATCH`，终端 fail-closed |
+| result DTO 非严格 JSON | result adapter/Broker | `TOOL_RESULT_CONTRACT_INVALID` |
+| Evidence 缺 provenance | Broker | `EVIDENCE_CONTRACT_INVALID` |
+| READ_ONLY 临时失败 | Broker | 在 deadline/max attempts 内可重试 |
+| 非幂等调用派发后结果不明 | Broker | reconcile 或 `MANUAL_REQUIRED` |
+| stale fencing/lease loss | Store/Worker | `AttemptOwnershipLost`，旧 attempt 不终态化 Run |
+| provider silent EOF | Native provider boundary | `MODEL_STREAM_INCOMPLETE`；默认 `off` 为零 dispatch，实验模式取消剩余任务但可能已有已结算的安全只读前缀 |
+| Run cancel | API/Store、Worker + Adapter | Store 裁决终态；运行中的 Adapter 关闭流、取消并 await 工具任务，效应不明先对账 |
+
+控制故障和契约故障不能被 `execute_one` 吞成普通工具错误再喂回模型。
+
+## 11. 三条最重要的阅读结论
+
+1. `ToolBroker` 位于 Engine 内部的工具边界，但它拥有 Tool effect 和工具公开 event 的权威；Engine 不能自说“工具成功了”。
+2. PREPARE 与 dispatch 分离：先冻结稳定意图，再接触外部世界；恢复身份来自 turn/call ordinal，不来自 provider id。
+3. SSE 只是 committed event 的投影；正常 EngineOutcome 由 Coordinator 原子收口，cancel/deadline/recovery/reconciliation 可由 Store 命令事务直接终态化，但任何路径都不能从某个 ToolResult 或 SSE EOF 推导终态。
+
+## 12. 推荐源码阅读顺序
+
+```text
+agent/runtime/worker/main.py
+→ agent/runtime/application/tool_catalog.py
+→ agent/runtime/application/tool_outputs.py
+→ agent/runtime/application/tool_broker.py
+→ agent/runtime/adapters/brokered_tools.py
+→ agent/engine/native_loop/engine.py
+→ agent/runtime/adapters/adk_engines.py
+→ agent/runtime/adapters/sqlite/store.py
+→ agent/runtime/api/runs.py
+```
+
+这样能先看见启动期契约，再看 durable protocol，最后看两个 Engine family 如何接入及 SSE 如何投影。

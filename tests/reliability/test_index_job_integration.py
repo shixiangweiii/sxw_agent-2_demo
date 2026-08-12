@@ -8,6 +8,12 @@ from fastapi import FastAPI
 
 import agent.api.documents as documents_api
 import agent.tools.knowledge_search as knowledge_search_module
+from agent.runtime.domain.models import new_id, stable_id
+from agent.skills.request_context import (
+    SkillRequestContext,
+    reset_request_context,
+    set_request_context,
+)
 
 
 class _FakeResponse:
@@ -49,6 +55,24 @@ class _FakeAragClient:
 class _FailingAragClient(_FakeAragClient):
     async def post(self, *args, **kwargs):
         raise httpx.ConnectError("arag unavailable")
+
+
+async def _invoke_knowledge(tool, query: str):
+    run_id = new_id("run")
+    tool_execution_id = stable_id("tool", run_id, "knowledge:0")
+    token = set_request_context(SkillRequestContext(
+        agent_uuid="demo-agent",
+        user_id="demo-user",
+        session_id=new_id("conv"),
+        run_id=run_id,
+        activity_id=stable_id("act", run_id, "tool:knowledge:0"),
+        deadline_at_ms=1_900_000_000_000,
+        idempotency_key=tool_execution_id,
+    ))
+    try:
+        return await tool(query)
+    finally:
+        reset_request_context(token)
 
 
 @pytest.mark.asyncio
@@ -117,18 +141,19 @@ async def test_knowledge_tool_preserves_retrieval_status_semantics(
         "rewrites": ["q"],
         "chunks": [],
         "cost_ms": 1,
+        "degraded_reasons": [],
     })
     monkeypatch.setattr(knowledge_search_module.httpx, "AsyncClient", _FakeAragClient)
     try:
         tool = knowledge_search_module.build_knowledge_search_tool(
             SimpleNamespace(arag_base_url="http://arag", arag_timeout_ms=1000)
         )
-        result = await tool("q")
+        output = await _invoke_knowledge(tool, "q")
     finally:
         _FakeAragClient.response = real_response
-    assert result["degraded"] is expected_degraded
-    assert expected_text in result["note"]
-    assert result["__evidence_set__"]["retrieval_status"] == retrieval_status
+    assert output.result.preview["degraded"] is expected_degraded
+    assert expected_text in output.result.preview["note"]
+    assert output.evidence.retrieval_status.value == retrieval_status
 
 
 @pytest.mark.asyncio
@@ -142,9 +167,9 @@ async def test_knowledge_transport_failure_commits_error_evidence_semantics(
         SimpleNamespace(arag_base_url="http://arag", arag_timeout_ms=1000)
     )
 
-    result = await tool("q")
+    output = await _invoke_knowledge(tool, "q")
 
-    assert result["degraded"] is True
-    assert result["__evidence_set__"]["retrieval_status"] == "ERROR"
-    assert result["__evidence_set__"]["degraded_reasons"] == ["ConnectError"]
-    assert "未能访问知识库" in result["note"]
+    assert output.result.preview["degraded"] is True
+    assert output.evidence.retrieval_status.value == "ERROR"
+    assert output.evidence.degraded_reasons == ("ConnectError",)
+    assert "未能访问知识库" in output.result.preview["note"]

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.reliability.support.runtime_releases import activate_test_release
+
 import asyncio
 import sqlite3
 import uuid
@@ -41,9 +43,8 @@ async def _environment(tmp_path):
     path = tmp_path / "runtime.db"
     store = SqliteRuntimeStore(RuntimeDatabase(path))
     await store.initialize()
-    await store.register_release(
+    await activate_test_release(store,
         ReleaseManifest(engine="native_loop", components={"fault-test": "v1"}),
-        activate=True,
     )
     clock = FakeClock()
     run = (await AdmissionService(
@@ -66,6 +67,7 @@ async def _environment(tmp_path):
 
 async def _start(store, clock, *, worker="worker-a", lease_ms=1_000):
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id=worker, lease_ms=lease_ms, now_ms=clock.now_ms()
     )
     assert claim is not None
@@ -86,9 +88,11 @@ async def test_fi_01_admission_commit_survives_kill_before_claim(tmp_path):
 
     assert (await restarted.get_run(run.envelope.run_id)).status is RunStatus.DISPATCH_PENDING
     first = await restarted.claim_next(
+        release_map=await restarted.active_releases(),
         worker_id="after-restart", lease_ms=1_000, now_ms=clock.now_ms()
     )
     second = await restarted.claim_next(
+        release_map=await restarted.active_releases(),
         worker_id="duplicate", lease_ms=1_000, now_ms=clock.now_ms()
     )
     assert first is not None
@@ -107,6 +111,7 @@ async def test_fi_02_kill_before_llm_requeues_without_model_output(tmp_path):
     events = await restarted.list_events(run.envelope.run_id, visibility=None)
     assert not any(event.event_type is EventType.OUTPUT_DELTA_COMMITTED for event in events)
     assert await restarted.claim_next(
+        release_map=await restarted.active_releases(),
         worker_id="replacement", lease_ms=1_000, now_ms=clock.now_ms()
     ) is not None
 
@@ -224,9 +229,11 @@ async def test_fi_09_signal_commit_survives_kill_before_resume_claim(tmp_path):
     await restarted.initialize()
     assert (await restarted.get_run(run.envelope.run_id)).status is RunStatus.DISPATCH_PENDING
     assert await restarted.claim_next(
+        release_map=await restarted.active_releases(),
         worker_id="signal-resume", lease_ms=1_000, now_ms=clock.now_ms()
     ) is not None
     assert await restarted.claim_next(
+        release_map=await restarted.active_releases(),
         worker_id="duplicate-resume", lease_ms=1_000, now_ms=clock.now_ms()
     ) is None
 

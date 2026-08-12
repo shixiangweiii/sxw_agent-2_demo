@@ -40,9 +40,9 @@ Runtime 必须在 API 与 Worker 分进程、外部 LLM/Tool/RAG/Skill 不可事
 
 ### TB-3 Checkpoint CAS
 
-在单一事务中验证：Run 非终态、Activity fencing 有效、`expected_checkpoint_revision` 匹配。随后 append checkpoint revision，更新 Run 当前 checkpoint 指针/WorkingState 关联，并插入 `CHECKPOINT_COMMITTED` event。任一步失败全部回滚；旧 revision 返回 `CHECKPOINT_REVISION_CONFLICT`，不得 last-write-wins。
+在单一事务中验证：Run 非终态、Activity fencing 有效、`expected_checkpoint_revision` 匹配。随后 append checkpoint revision，更新 Run 当前 checkpoint 指针/WorkingState 关联，并插入 `CHECKPOINT_COMMITTED` 及本边界要求的 engine-owned events。任一步失败全部回滚；旧 revision 返回 `CHECKPOINT_REVISION_CONFLICT`，Adapter 必须以 `AttemptOwnershipLost` 终止旧 attempt，不得 last-write-wins 或转成模型可见错误。
 
-Checkpoint 只包含 WorkingState v1 与引擎状态/引用、release/schema；Activity 完成情况从 `activities` 查询，不复制进 WorkingState。
+Checkpoint 只包含 WorkingState 与引擎 current typed state；不保存可由 Run 权威派生的 release/schema 副本，也不保存无使用者的外部 engine-state ref。Activity 完成情况从 `activities` 查询，不复制进 WorkingState。Native 只接受 ADR-0004 定义的唯一 strict current codec。
 
 ### TB-4 Tool Broker（三段式）
 

@@ -6,7 +6,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 
 from agent.runtime.application.coordinator import RunCoordinator
-from agent.runtime.domain.errors import RuntimeFault
+from agent.runtime.domain.errors import AttemptOwnershipLost, RuntimeFault
 from agent.runtime.ports.artifact import ArtifactStore
 from agent.runtime.ports.clock import Clock, SystemClock
 from agent.runtime.ports.store import Claim, RuntimeStore
@@ -73,7 +73,7 @@ class RuntimeWorker:
                         worker_id=self.worker_id,
                         lease_ms=self.lease_ms,
                         now_ms=self.clock.now_ms(),
-                        engines=tuple(self.release_map),
+                        release_map=self.release_map,
                     )
                     if claim is None:
                         break
@@ -95,7 +95,7 @@ class RuntimeWorker:
             worker_id=self.worker_id,
             lease_ms=self.lease_ms,
             now_ms=now,
-            engines=tuple(self.release_map),
+            release_map=self.release_map,
         )
         if claim is None:
             return False
@@ -148,11 +148,33 @@ class RuntimeWorker:
 
     async def _execute(self, claim: Claim) -> None:
         finished = asyncio.Event()
-        renewal = asyncio.create_task(self._renew_lease(claim, finished))
+        ownership_lost = asyncio.Event()
+        attempt = asyncio.create_task(
+            self.coordinator.execute_claim(claim, worker_id=self.worker_id),
+            name=f"runtime-attempt:{claim.activity.activity_id}",
+        )
+        renewal = asyncio.create_task(
+            self._renew_lease(claim, finished, ownership_lost, attempt),
+            name=f"runtime-lease:{claim.activity.activity_id}",
+        )
         try:
-            await self.coordinator.execute_claim(claim, worker_id=self.worker_id) # 协调器执行
+            await attempt
         except asyncio.CancelledError:
+            if ownership_lost.is_set():
+                log_kv(
+                    logger, logging.WARNING, "Worker", "attempt stopped after lease loss",
+                    run_id=claim.run.envelope.run_id,
+                    activity_id=claim.activity.activity_id,
+                )
+                return
             raise
+        except AttemptOwnershipLost as exc:
+            log_kv(
+                logger, logging.WARNING, "Worker", "attempt ownership lost",
+                run_id=claim.run.envelope.run_id,
+                activity_id=claim.activity.activity_id,
+                code=exc.code,
+            )
         except RuntimeFault as exc:
             log_kv(
                 logger, logging.WARNING, "Worker", "attempt rejected",
@@ -172,8 +194,17 @@ class RuntimeWorker:
             renewal.cancel()
             with suppress(asyncio.CancelledError):
                 await renewal
+            if not attempt.done():
+                attempt.cancel()
+            await asyncio.gather(attempt, return_exceptions=True)
 
-    async def _renew_lease(self, claim: Claim, finished: asyncio.Event) -> None:
+    async def _renew_lease(
+        self,
+        claim: Claim,
+        finished: asyncio.Event,
+        ownership_lost: asyncio.Event,
+        attempt: asyncio.Task[object],
+    ) -> None:
         while not finished.is_set():
             try:
                 await asyncio.wait_for(finished.wait(), timeout=self.renew_ms / 1000)
@@ -181,13 +212,24 @@ class RuntimeWorker:
             except TimeoutError:
                 pass
             now = self.clock.now_ms()
-            valid = await self.store.renew_lease(
-                claim.activity.activity_id,
-                worker_id=self.worker_id,
-                fencing_token=claim.activity.fencing_token,
-                lease_expires_at=now + self.lease_ms,
-                now_ms=now,
-            )
+            try:
+                valid = await self.store.renew_lease(
+                    claim.activity.activity_id,
+                    worker_id=self.worker_id,
+                    fencing_token=claim.activity.fencing_token,
+                    lease_expires_at=now + self.lease_ms,
+                    now_ms=now,
+                )
+            except BaseException as exc:
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                valid = False
+                log_kv(
+                    logger, logging.ERROR, "Worker", "lease renewal failed",
+                    run_id=claim.run.envelope.run_id,
+                    activity_id=claim.activity.activity_id,
+                    error=type(exc).__name__,
+                )
             if not valid:
                 log_kv(
                     logger, logging.WARNING, "Worker", "lease fence lost",
@@ -195,6 +237,8 @@ class RuntimeWorker:
                     activity_id=claim.activity.activity_id,
                     fencing_token=claim.activity.fencing_token,
                 )
+                ownership_lost.set()
+                attempt.cancel()
                 return
 
     async def _drain(self) -> None:

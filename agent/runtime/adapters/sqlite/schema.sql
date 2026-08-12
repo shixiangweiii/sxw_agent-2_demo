@@ -2,8 +2,7 @@
 -- a mismatching local database must be deleted and recreated by the operator.
 CREATE TABLE schema_meta (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    schema_version TEXT NOT NULL,
-    schema_checksum TEXT NOT NULL,
+    schema_digest TEXT NOT NULL CHECK (length(schema_digest) = 64),
     created_at INTEGER NOT NULL
 ) STRICT;
 
@@ -21,9 +20,17 @@ CREATE TABLE release_manifests (
     release_fingerprint TEXT PRIMARY KEY,
     engine TEXT NOT NULL CHECK (engine IN ('plan_execute','agent_loop','native_loop')),
     manifest_json TEXT NOT NULL,
-    schema_version TEXT NOT NULL,
     created_at INTEGER NOT NULL
 ) STRICT;
+
+CREATE TRIGGER release_manifests_no_update
+BEFORE UPDATE ON release_manifests BEGIN
+  SELECT RAISE(ABORT, 'RELEASE_MANIFESTS_IMMUTABLE');
+END;
+CREATE TRIGGER release_manifests_no_delete
+BEFORE DELETE ON release_manifests BEGIN
+  SELECT RAISE(ABORT, 'RELEASE_MANIFESTS_IMMUTABLE');
+END;
 
 CREATE TABLE active_releases (
     engine TEXT PRIMARY KEY CHECK (engine IN ('plan_execute','agent_loop','native_loop')),
@@ -33,7 +40,6 @@ CREATE TABLE active_releases (
 
 CREATE TABLE runs (
     run_id TEXT PRIMARY KEY,
-    schema_version TEXT NOT NULL,
     request_id TEXT NOT NULL UNIQUE,
     client_request_id TEXT NOT NULL,
     idempotency_key TEXT NOT NULL,
@@ -51,14 +57,13 @@ CREATE TABLE runs (
     input_text TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state IN (
       'ACCEPTED','DISPATCH_PENDING','RUNNING','WAITING_RETRY','WAITING_INPUT',
-      'CANCEL_REQUESTED','SUCCEEDED','FAILED','CANCELLED','TIMED_OUT','REJECTED',
-      'INCOMPATIBLE_RELEASE'
+      'CANCEL_REQUESTED','SUCCEEDED','FAILED','CANCELLED','TIMED_OUT','REJECTED'
     )),
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
     next_seq INTEGER NOT NULL DEFAULT 1 CHECK (next_seq >= 1),
     current_activity_id TEXT,
     terminal_status TEXT CHECK (terminal_status IS NULL OR terminal_status IN (
-      'SUCCEEDED','FAILED','CANCELLED','TIMED_OUT','REJECTED','INCOMPATIBLE_RELEASE'
+      'SUCCEEDED','FAILED','CANCELLED','TIMED_OUT','REJECTED'
     )),
     terminal_payload_json TEXT,
     pending_input_json TEXT,
@@ -71,7 +76,7 @@ CREATE TABLE runs (
 ) STRICT;
 
 CREATE UNIQUE INDEX uq_active_run_per_conversation ON runs(conversation_id)
-WHERE state NOT IN ('SUCCEEDED','FAILED','CANCELLED','TIMED_OUT','REJECTED','INCOMPATIBLE_RELEASE');
+WHERE state NOT IN ('SUCCEEDED','FAILED','CANCELLED','TIMED_OUT','REJECTED');
 CREATE INDEX ix_runs_status_created ON runs(state, created_at);
 
 CREATE TABLE run_requests (
@@ -115,7 +120,6 @@ CREATE INDEX ix_activities_lease ON activities(state, lease_expires_at);
 
 CREATE TABLE run_events (
     event_id TEXT PRIMARY KEY,
-    schema_version TEXT NOT NULL,
     run_id TEXT NOT NULL REFERENCES runs(run_id),
     turn_id TEXT NOT NULL,
     activity_id TEXT REFERENCES activities(activity_id),
@@ -129,7 +133,6 @@ CREATE TABLE run_events (
     sensitivity TEXT NOT NULL CHECK (sensitivity IN ('PUBLIC','PRIVATE','SENSITIVE')),
     occurred_at INTEGER NOT NULL,
     terminal_status TEXT,
-    release_fingerprint TEXT NOT NULL,
     UNIQUE (run_id, seq),
     CHECK (payload_json IS NULL OR payload_ref IS NULL)
 ) STRICT;
@@ -153,12 +156,8 @@ CREATE TABLE checkpoints (
     revision INTEGER NOT NULL CHECK (revision >= 1),
     working_state_json TEXT NOT NULL,
     engine_state_json TEXT,
-    engine_state_ref TEXT,
-    release_fingerprint TEXT NOT NULL,
-    schema_version TEXT NOT NULL,
     created_at INTEGER NOT NULL,
-    UNIQUE (run_id, revision),
-    CHECK (engine_state_json IS NULL OR engine_state_ref IS NULL)
+    UNIQUE (run_id, revision)
 ) STRICT;
 CREATE INDEX ix_checkpoints_latest ON checkpoints(run_id, revision DESC);
 

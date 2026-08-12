@@ -1,816 +1,416 @@
 # ToolBroker 详解：效应感知的持久化工具调度协议
 
-## 一、概述
+本文按当前代码解释 `ToolBroker`。它不是一个普通的工具函数路由器，而是 Runtime 对“外部动作是否发生过、能否重试、结果是什么”的持久化裁决层。
 
-**ToolBroker** 是 LLM 和外部世界之间的**可靠执行层**，负责工具调用的持久化、幂等性、超时控制和崩溃恢复。
+建议先记住一条总不变量：
 
-**官方定义**（`agent/runtime/application/tool_broker.py:57-62`）：
-```python
-"""Effect-aware durable tool dispatch protocol.
-
-The Store commits PREPARED + TOOL_CALL before this class invokes external
-code.  Blob writes happen outside SQLite; metadata, result ref and
-TOOL_RESULT are then committed together by ``settle_tool_execution``.
-"""
+```text
+每个 ToolCall 必须先持久化 stable slot 和 ToolCall 事实
+→ 才允许调用对应外部 executor
+→ ToolExecution/Artifact/Event 结算完成
+→ 才把 ToolResult 放回模型消息
 ```
 
-**核心特性**：
-- 持久化调度：工具执行状态写入数据库，支持崩溃恢复
-- 效应感知：根据工具的副作用类型（effect_class）决定重试和对账策略
-- 幂等保证：透传幂等键，支持安全重试
-- 超时控制：deadline 向下传递，超时自动中止
-- 结果管理：大结果自动存入 Artifact，返回引用
+默认 `native_early_tool_dispatch=off` 还要求完整 batch 原子 PREPARE 后才 dispatch。`experimental_heuristic` 是明确的例外：安全只读调用可以逐 slot PREPARE 后提前执行，不等待完整 batch，但仍不能绕过 durable slot。
 
----
+生产入口主要位于：
 
-## 二、核心组件
+- `agent/runtime/application/tool_catalog.py`
+- `agent/runtime/application/tool_outputs.py`
+- `agent/runtime/application/tool_broker.py`
+- `agent/runtime/adapters/brokered_tools.py`
+- `agent/runtime/adapters/sqlite/store.py`
+- `agent/runtime/domain/models.py`
 
-### 2.1 ToolManifest：工具元数据
+文中不使用易漂移的源码行号；请按类名和方法名定位。
 
-**定义**：`agent/runtime/domain/models.py:243-254`
+## 1. ToolBroker 解决什么问题
 
-```python
-class ToolManifest(BaseModel):
-    name: str                                    # 工具名称
-    release_digest: str                          # 版本摘要（用于对账）
-    effect_class: ToolEffectClass                # 效应分类
-    timeout_seconds: float                       # 单次执行超时
-    max_attempts: int = 1                        # 最大重试次数
-    supports_idempotency: bool = False           # 是否支持幂等
-    supports_reconcile: bool = False             # 是否支持对账钩子
-    supports_cancel: bool = False                # 是否支持取消
-    result_policy: str = "INLINE_OR_ARTIFACT"    # 结果存储策略
-    concurrency_safe: bool = False               # 是否支持并发执行
-    exclusive_resources: tuple[str, ...] = ()    # 独占资源列表
+LLM 只给出一个工具调用意图，例如：
+
+```json
+{
+  "name": "knowledge_search",
+  "arguments": {"query": "Tool Broker 是什么"}
+}
 ```
 
-**关键字段**：
-- `effect_class`：决定重试策略（见第三节）
-- `supports_idempotency`：幂等工具必须透传 `idempotency_key`
-- `supports_reconcile`：非幂等副作用工具若要自动恢复，必须提供对账钩子；缺失时进入 `MANUAL_REQUIRED`
-
----
-
-### 2.2 ToolEffectClass：效应分类
-
-**定义**：`agent/runtime/domain/models.py:95-99`
-
-```python
-class ToolEffectClass(StrEnum):
-    READ_ONLY = "READ_ONLY"                      # 只读，可安全重试
-    IDEMPOTENT_EFFECT = "IDEMPOTENT_EFFECT"      # 幂等副作用，透传幂等键
-    NON_IDEMPOTENT_EFFECT = "NON_IDEMPOTENT_EFFECT"  # 非幂等副作用，需谨慎
-    UNKNOWN_EFFECT = "UNKNOWN_EFFECT"            # 未知效应，保守处理
-```
-
-**处理策略对比**：
-
-| Effect Class | 可重试 | 幂等键 | 对账钩子 | 失败处理 |
-|---|---|---|---|---|
-| `READ_ONLY` | ✅ 安全重试 | ❌ 不需要 | ❌ 不需要 | 直接失败 |
-| `IDEMPOTENT_EFFECT` | ✅ 安全重试 | ✅ 必须透传 | ⚠️ 可选 | 对账确认 |
-| `NON_IDEMPOTENT_EFFECT` | ❌ 不透明重试 | ⚠️ 可选 | 自动恢复需要 | 对账或人工 |
-| `UNKNOWN_EFFECT` | ❌ 不透明重试 | ❌ 不需要 | ⚠️ 可选 | 对账或人工 |
-
-**注册校验**（`tool_broker.py:85-91`）：
-```python
-def register(self, manifest: ToolManifest, executor: ToolExecutor, ...):
-    if manifest.effect_class is ToolEffectClass.IDEMPOTENT_EFFECT and not manifest.supports_idempotency:
-        raise ValueError(f"{manifest.name}: IDEMPOTENT_EFFECT requires supports_idempotency")
-    if manifest.supports_reconcile and reconcile is None:
-        raise ValueError(f"{manifest.name}: supports_reconcile requires a hook")
-    if manifest.name in self._tools:
-        raise ValueError(f"duplicate tool manifest: {manifest.name}")
-    self._tools[manifest.name] = _RegisteredTool(manifest, executor, reconcile)
-```
-
----
-
-### 2.3 ToolCallContext：执行上下文
-
-**定义**：`tool_broker.py:28-46`
-
-```python
-@dataclass(frozen=True)
-class ToolCallContext:
-    run_id: str                          # 所属 Run ID
-    parent_activity_id: str              # 父 Activity ID
-    tool_activity_id: str                # 工具 Activity ID
-    tool_execution_id: str               # 工具执行 ID
-    idempotency_key: str                 # 幂等键（透传给下游）
-    deadline_at_ms: int                  # 截止时间（绝对 UTC）
-    attempt: int                         # 当前尝试次数
-    clock: Clock                         # 时钟（用于计算剩余时间）
-    prior_result_ref: str | None         # 上次结果引用（恢复场景）
-    prior_external_object_id: str | None # 上次外部对象 ID
-    prior_preview: Any | None            # 上次预览
-    prior_error_code: str | None         # 上次错误码
-    prior_error_message: str | None      # 上次错误消息
-    
-    @property
-    def remaining_ms(self) -> int:
-        """剩余时间预算"""
-        return max(0, self.deadline_at_ms - self.clock.now_ms())
-```
-
-**用途**：
-- 传递给 `executor` 和 `reconcile` 钩子
-- 提供执行上下文（run_id、activity_id 等）
-- 提供剩余时间预算（`remaining_ms`）
-- 提供幂等键（`idempotency_key`）
-
----
-
-### 2.4 ToolResultEnvelope：执行结果
-
-**定义**：`agent/runtime/domain/models.py:257-282`
-
-```python
-class ToolResultEnvelope(BaseModel):
-    status: ToolResultStatus             # 执行状态
-    preview: Any | None                  # 预览（小结果）
-    result_ref: str | None               # 结果引用（大结果的 Artifact ID）
-    error_code: str | None               # 错误码
-    error_message: str | None            # 错误消息
-    external_object_id: str | None       # 外部对象 ID（如工单号）
-    pending_input: dict[str, Any] | None # 中断时的待处理输入
-
-class ToolResultStatus(StrEnum):
-    SUCCESS = "SUCCESS"                  # 成功
-    FAILURE = "FAILURE"                  # 失败
-    INTERRUPT = "INTERRUPT"              # 中断（等待人工输入）
-    NO_OUTPUT = "NO_OUTPUT"              # 无输出
-    UNKNOWN = "UNKNOWN"                  # 未知（需对账）
-```
-
----
-
-## 三、状态机
-
-### 3.1 ToolEffectStatus 状态流转
-
-**定义**：`agent/runtime/domain/models.py:102-109`
-
-```python
-class ToolEffectStatus(StrEnum):
-    PREPARED = "PREPARED"                # 已准备（写入数据库）
-    DISPATCHED = "DISPATCHED"            # 已派发（调用 executor）
-    COMMITTED = "COMMITTED"              # 已提交（成功完成）
-    FAILED = "FAILED"                    # 已失败（确认失败）
-    UNKNOWN = "UNKNOWN"                  # 未知（需对账）
-    RECONCILING = "RECONCILING"          # 对账中
-    MANUAL_REQUIRED = "MANUAL_REQUIRED"  # 需人工介入
-```
-
-### 3.2 状态流转图
-
-```
-                    ┌──────────────┐
-                    │   PREPARED   │
-                    └──────┬───────┘
-                           │ mark_tool_dispatched()
-                           ↓
-                    ┌──────────────┐
-            ┌──────│  DISPATCHED  │──────┐
-            │      └──────────────┘      │
-            │                            │
-            │ executor 成功              │ executor 失败
-            ↓                            ↓
-    ┌──────────────┐              ┌──────────────┐
-    │  COMMITTED   │              │    FAILED    │
-    └──────────────┘              └──────────────┘
-            ▲                            │
-            │                            │ safe_replay = false
-            │                            ↓
-            │                    ┌──────────────┐
-            │                    │   UNKNOWN    │
-            │                    └──────┬───────┘
-            │                           │ reconcile()
-            │                           ↓
-            │                    ┌──────────────┐
-            ├────────────────────│ RECONCILING  │
-            │                    └──────┬───────┘
-            │                           │
-            │              ┌────────────┼────────────┐
-            │              │            │            │
-            │              ↓            ↓            ↓
-            │       ┌──────────┐  ┌──────────┐  ┌──────────────┐
-            │       │COMMITTED │  │  FAILED  │  │MANUAL_REQUIRED│
-            │       └──────────┘  └──────────┘  └──────────────┘
-            │
-            └──────────────────────────────────────┘
-```
-
-### 3.3 关键状态转换
-
-| 当前状态 | 触发条件 | 目标状态 | 方法 |
-|---|---|---|---|
-| `PREPARED` | 调用 `executor` 前 | `DISPATCHED` | `store.mark_tool_dispatched()` |
-| `DISPATCHED` | executor 成功 | `COMMITTED` | `store.settle_tool_execution()` |
-| `DISPATCHED` | executor 失败（READ_ONLY） | `FAILED` | `store.settle_tool_execution()` |
-| `DISPATCHED` | executor 失败（非 READ_ONLY） | `UNKNOWN` | `store.settle_tool_execution()` |
-| `UNKNOWN` | 调用 `reconcile` 前 | `RECONCILING` | `store.mark_tool_reconciling()` |
-| `RECONCILING` | reconcile 成功 | `COMMITTED` | `store.settle_tool_execution()` |
-| `RECONCILING` | reconcile 失败 | `FAILED` | `store.settle_tool_execution()` |
-| `RECONCILING` | reconcile 不确定 | `MANUAL_REQUIRED` | `store.settle_tool_execution()` |
-
----
-
-## 四、核心流程详解
-
-### 4.1 execute：工具执行主流程
-
-**入口**：`tool_broker.py:217-423`
-
-```python
-async def execute(
-    self,
-    *,
-    run_id: str,
-    parent_activity_id: str,
-    fencing_token: int,
-    logical_key: str,
-    tool_name: str,
-    arguments: dict[str, Any],
-    deadline_at_ms: int,
-    manifest_override: ToolManifest | None = None,
-    executor_override: ToolExecutor | None = None,
-    reconcile_override: ReconcileHook | None = None,
-) -> ToolResultEnvelope:
-```
-
-**执行流程**：
-
-```
-① 获取工具注册信息
-   ↓
-② 计算请求摘要（sha256_json(arguments)）
-   ↓
-③ store.prepare_tool_execution() → 状态：PREPARED
-   ↓
-④ 判断是否可安全重试（safe_replay）
-   ↓
-⑤ 检查当前状态
-   ├─ COMMITTED → 返回已提交结果
-   ├─ MANUAL_REQUIRED → 返回需人工介入
-   ├─ FAILED + 不可重试 → 返回失败结果
-   └─ DISPATCHED/UNKNOWN/RECONCILING → 进入对账流程
-   ↓
-⑥ 检查尝试次数（attempt < max_attempts）
-   ↓
-⑦ store.mark_tool_dispatched() → 状态：DISPATCHED
-   ↓
-⑧ 构建 ToolCallContext
-   ↓
-⑨ 调用 executor(arguments, ctx)
-   ├─ 成功 → _commit_result() → 状态：COMMITTED
-   ├─ 超时 → _settle_dispatch_failure() → 状态：FAILED/UNKNOWN
-   └─ 异常 → _settle_dispatch_failure() → 状态：FAILED/UNKNOWN
-   ↓
-⑩ 返回 ToolResultEnvelope
-```
-
-**关键代码片段**：
-
-```python
-# ① 获取工具
-try:
-    tool = self._tools[tool_name]
-except KeyError as exc:
-    raise RuntimeFault("TOOL_NOT_REGISTERED", f"tool is not registered: {tool_name}") from exc
-
-# ② 计算请求摘要
-request_digest = sha256_json(arguments)
-
-# ③ 持久化 PREPARED 状态
-execution = await self.store.prepare_tool_execution(
-    run_id=run_id,
-    parent_activity_id=parent_activity_id,
-    fencing_token=fencing_token,
-    logical_key=logical_key,
-    tool_name=tool_name,
-    release_digest=manifest.release_digest,
-    effect_class=manifest.effect_class,
-    request_digest=request_digest,
-    request=arguments,
-    supports_reconcile=manifest.supports_reconcile,
-    now_ms=self.clock.now_ms(),
-)
-
-# ④ 判断是否可安全重试
-frozen_effect_class = ToolEffectClass(execution["effect_class"])
-safe_replay = (
-    frozen_effect_class is ToolEffectClass.READ_ONLY
-    or (
-        frozen_effect_class is ToolEffectClass.IDEMPOTENT_EFFECT
-        and manifest.supports_idempotency
-        and bool(execution["idempotency_key"])
-    )
-)
-
-# ⑦ 标记为 DISPATCHED
-execution = await self.store.mark_tool_dispatched(
-    tool_execution_id=execution["tool_execution_id"],
-    parent_activity_id=parent_activity_id,
-    fencing_token=fencing_token,
-    now_ms=self.clock.now_ms(),
-)
-
-# ⑨ 调用 executor
-ctx = ToolCallContext(
-    run_id=run_id,
-    parent_activity_id=parent_activity_id,
-    tool_activity_id=execution["activity_id"],
-    tool_execution_id=execution["tool_execution_id"],
-    idempotency_key=execution["idempotency_key"],
-    deadline_at_ms=deadline_at_ms,
-    attempt=execution["attempt"],
-    clock=self.clock,
-    **_prior_context(execution),
-)
-timeout = min(manifest.timeout_seconds, remaining_ms / 1000)
-try:
-    async with asyncio.timeout(timeout):
-        value = tool.executor(arguments, ctx)
-        if inspect.isawaitable(value):
-            value = await value
-except TimeoutError as exc:
-    result, execution = await self._settle_dispatch_failure(...)
-except Exception as exc:
-    result, execution = await self._settle_dispatch_failure(...)
-else:
-    result = _normalize_tool_result(value)
-    if result.status not in {FAILURE, UNKNOWN}:
-        return await self._commit_result(...)
-```
-
----
-
-### 4.2 _commit_result：提交结果
-
-**入口**：`tool_broker.py:617-716`
-
-**职责**：
-- 处理大结果：超过 `inline_result_max_bytes`（默认 8KiB）存入 Artifact
-- 处理 Evidence：knowledge_search 工具的 EvidenceSet 特殊处理
-- 持久化结果：调用 `store.settle_tool_execution()` → 状态：`COMMITTED`
-- 返回结果：根据 `return_full` 决定返回完整结果或预览
-
-**关键逻辑**：
-
-```python
-async def _commit_result(self, execution, parent_activity_id, fencing_token, result, *, return_full=False):
-    serialized = canonical_json(result.model_dump(mode="json")).encode("utf-8")
-    
-    # 大结果存入 Artifact
-    if len(serialized) > self.inline_result_max_bytes:
-        ref = await self.artifact_store.put_bytes(
-            serialized,
-            purpose=ArtifactPurpose.INTERNAL,
-            media_type="application/json",
-            filename=f"{execution['tool_execution_id']}.json",
-        )
-        result_ref = ref.artifact_id
-        preview = serialized[:self.inline_result_max_bytes].decode("utf-8", errors="replace")
-        stored = result.model_copy(update={"preview": preview, "result_ref": result_ref})
-    else:
-        stored = result
-    
-    # 持久化到数据库
-    settled_execution = await self.store.settle_tool_execution(
-        tool_execution_id=execution["tool_execution_id"],
-        parent_activity_id=parent_activity_id,
-        fencing_token=fencing_token,
-        effect_status="COMMITTED",
-        result=stored.model_dump(mode="json"),
-        result_ref=result_ref,
-        error=None,
-        external_object_id=result.external_object_id,
-        now_ms=self.clock.now_ms(),
-    )
-    
-    return _tool_result_from_ledger(settled_execution)
-```
-
-**Artifact 存储策略**：
-- `INLINE_OR_ARTIFACT`：小结果内联，大结果存 Artifact
-- `ARTIFACT_BOUNDED_READ`：始终存 Artifact，返回时从 Artifact 读取
-
----
-
-### 4.3 _resolve_uncertain：对账不确定状态
-
-**入口**：`tool_broker.py:519-558`
-
-**触发条件**：
-- 状态为 `DISPATCHED`/`UNKNOWN`/`RECONCILING`
-- 工具注册了 `reconcile` 钩子
-- 未超过 deadline
-
-**对账流程**：
-
-```python
-async def _resolve_uncertain(self, tool, execution, parent_activity_id, fencing_token, deadline_at_ms):
-    # 前置检查
-    if (
-        execution["effect_status"] == "MANUAL_REQUIRED"
-        or tool.reconcile is None
-        or self.clock.now_ms() >= deadline_at_ms
-    ):
-        return None
-    
-    # 标记为 RECONCILING
-    execution = await self.store.mark_tool_reconciling(
-        tool_execution_id=execution["tool_execution_id"],
-        parent_activity_id=parent_activity_id,
-        fencing_token=fencing_token,
-        now_ms=self.clock.now_ms(),
-    )
-    
-    # 构建上下文
-    ctx = ToolCallContext(
-        run_id=execution["run_id"],
-        parent_activity_id=parent_activity_id,
-        tool_activity_id=execution["activity_id"],
-        tool_execution_id=execution["tool_execution_id"],
-        idempotency_key=execution["idempotency_key"],
-        deadline_at_ms=deadline_at_ms,
-        attempt=execution["attempt"],
-        clock=self.clock,
-        **_prior_context(execution),
-    )
-    
-    # 调用 reconcile 钩子
-    timeout = (deadline_at_ms - self.clock.now_ms()) / 1000
-    try:
-        async with asyncio.timeout(timeout):
-            value = tool.reconcile(ctx)
-            if inspect.isawaitable(value):
-                value = await value
-            return value
-    except Exception:
-        return None
-```
-
-**对账结果处理**：
-- `SUCCESS`/`NO_OUTPUT` → 提交结果，状态：`COMMITTED`
-- `FAILURE` → 标记失败，状态：`FAILED`
-- `UNKNOWN` → 标记未知，状态：`UNKNOWN`，可能进入 `MANUAL_REQUIRED`
-- 异常或超时 → 返回 `None`，进入 `MANUAL_REQUIRED`
-
----
-
-### 4.4 _require_manual：进入人工介入
-
-**入口**：`tool_broker.py:455-517`
-
-**触发条件**：
-- 对账失败或不确定
-- 超过最大重试次数
-- 非幂等副作用工具失败
-
-**处理逻辑**：
-
-```python
-async def _require_manual(self, execution, parent_activity_id, fencing_token, *, code, message):
-    # 构建 MANUAL_REQUIRED 结果
-    manual = ToolResultEnvelope(
-        status=ToolResultStatus.UNKNOWN,
-        error_code=code,
-        error_message=message,
-    )
-    
-    # 持久化到数据库
-    settled_execution = await self.store.settle_tool_execution(
-        tool_execution_id=execution["tool_execution_id"],
-        parent_activity_id=parent_activity_id,
-        fencing_token=fencing_token,
-        effect_status="MANUAL_REQUIRED",
-        result=manual.model_dump(mode="json"),
-        result_ref=manual.result_ref,
-        error={"code": manual.error_code, "message": manual.error_message},
-        external_object_id=manual.external_object_id,
-        now_ms=self.clock.now_ms(),
-    )
-    
-    return _tool_result_from_ledger(settled_execution)
-```
-
-**后续处理**：
-- 通过 `tool_reconciliation` signal 进行人工对账
-- 支持三种操作：`mark_committed`、`mark_failed`、`reconcile`
-
----
-
-## 五、注册工具示例
-
-### 5.1 READ_ONLY 工具
-
-```python
-from agent.runtime.domain.models import ToolManifest, ToolEffectClass
-
-manifest = ToolManifest(
-    name="knowledge_search",
-    release_digest="abc123...",
-    effect_class=ToolEffectClass.READ_ONLY,
-    timeout_seconds=10.0,
-    max_attempts=3,
-    supports_idempotency=False,
-    supports_reconcile=False,
-    result_policy="INLINE_OR_ARTIFACT",
-    concurrency_safe=True,
-)
-
-async def knowledge_search_executor(arguments: dict, ctx: ToolCallContext):
-    query = arguments["query"]
-    # 调用 ARAG 检索
-    results = await arag_client.search(query)
-    return ToolResultEnvelope(
-        status=ToolResultStatus.SUCCESS,
-        preview={"hits": results},
-    )
-
-broker.register(manifest, knowledge_search_executor)
-```
-
----
-
-### 5.2 IDEMPOTENT_EFFECT 工具
-
-```python
-manifest = ToolManifest(
-    name="create_ticket",
-    release_digest="def456...",
-    effect_class=ToolEffectClass.IDEMPOTENT_EFFECT,
-    timeout_seconds=30.0,
-    max_attempts=3,
-    supports_idempotency=True,  # 必须为 True
-    supports_reconcile=False,
-    result_policy="INLINE_OR_ARTIFACT",
-    concurrency_safe=False,
-)
-
-async def create_ticket_executor(arguments: dict, ctx: ToolCallContext):
-    # 透传幂等键
-    idempotency_key = ctx.idempotency_key
-    ticket_id = await ticket_system.create(
-        title=arguments["title"],
-        idempotency_key=idempotency_key,  # 透传给下游
-    )
-    return ToolResultEnvelope(
-        status=ToolResultStatus.SUCCESS,
-        preview={"ticket_id": ticket_id},
-        external_object_id=ticket_id,
-    )
-
-broker.register(manifest, create_ticket_executor)
-```
-
----
-
-### 5.3 NON_IDEMPOTENT_EFFECT 工具（需对账）
-
-```python
-manifest = ToolManifest(
-    name="send_email",
-    release_digest="ghi789...",
-    effect_class=ToolEffectClass.NON_IDEMPOTENT_EFFECT,
-    timeout_seconds=20.0,
-    max_attempts=1,  # 不重试
-    supports_idempotency=False,
-    supports_reconcile=True,  # 需要同时注册 reconcile hook；否则会进入 MANUAL_REQUIRED
-    result_policy="INLINE_OR_ARTIFACT",
-    concurrency_safe=False,
-)
-
-async def send_email_executor(arguments: dict, ctx: ToolCallContext):
-    message_id = await email_system.send(
-        to=arguments["to"],
-        subject=arguments["subject"],
-        body=arguments["body"],
-    )
-    return ToolResultEnvelope(
-        status=ToolResultStatus.SUCCESS,
-        preview={"message_id": message_id},
-        external_object_id=message_id,
-    )
-
-async def send_email_reconcile(ctx: ToolCallContext):
-    # 查询邮件是否已发送
-    message_id = ctx.prior_external_object_id
-    if message_id:
-        status = await email_system.get_status(message_id)
-        if status == "SENT":
-            return ToolResultEnvelope(
-                status=ToolResultStatus.SUCCESS,
-                preview={"message_id": message_id},
-                external_object_id=message_id,
-            )
-        elif status == "FAILED":
-            return ToolResultEnvelope(
-                status=ToolResultStatus.FAILURE,
-                error_code="EMAIL_SEND_FAILED",
-                error_message="email delivery failed",
-            )
-    # 不确定状态
-    return ToolResultEnvelope(
-        status=ToolResultStatus.UNKNOWN,
-        error_code="EMAIL_STATUS_UNKNOWN",
-        error_message="cannot confirm email delivery status",
-    )
-
-broker.register(manifest, send_email_executor, reconcile=send_email_reconcile)
-```
-
----
-
-## 六、与其他组件的关系
-
-### 6.1 架构位置
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Engine Adapter                        │
-│  (plan_execute / agent_loop / native_loop)               │
-└────────────────────┬────────────────────────────────────┘
-                     │ execute(tool_name, arguments)
-                     ↓
-┌─────────────────────────────────────────────────────────┐
-│                      ToolBroker                          │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
-│  │   register   │  │   execute    │  │  reconcile   │  │
-│  └──────────────┘  └──────────────┘  └──────────────┘  │
-└────────┬─────────────────┬─────────────────┬───────────┘
-         │                 │                 │
-         ↓                 ↓                 ↓
-┌────────────────┐  ┌──────────────┐  ┌──────────────────┐
-│  RuntimeStore  │  │ ArtifactStore│  │  External Tools  │
-│  (SQLite)      │  │ (CAS)        │  │  (HTTP/gRPC/...) │
-└────────────────┘  └──────────────┘  └──────────────────┘
-```
-
-### 6.2 关键依赖
-
-| 组件 | 用途 |
+但生产执行还必须回答：
+
+- 崩溃发生在外部请求前还是请求后？
+- 重启后同一模型位置是否仍是同一个工具和参数？
+- 这个工具能否安全重试？
+- 超时后下游究竟成功了还是没成功？
+- 大结果和 Evidence 的权威字节在哪里？
+- 旧 Worker 的迟到结果是否仍有写入资格？
+- 并发工具完成顺序不同，如何保持模型历史和 durable event 顺序稳定？
+
+这些问题不能由模型消息、HTTP 超时、Trace 或进程内 task 回答。当前实现的权威分别是：
+
+| 事实 | Authority |
 |---|---|
-| `RuntimeStore` | 持久化工具执行状态（`tool_executions` 表） |
-| `ArtifactStore` | 存储大结果（超过 8KiB） |
-| `Clock` | 计算剩余时间预算 |
-| `ToolExecutor` | 实际的工具执行函数 |
-| `ReconcileHook` | 对账钩子（可选） |
+| 调用身份与效应状态 | `tool_executions` |
+| ToolCall/ToolResult 公开投影 | committed `run_events` |
+| 大结果字节 | Artifact SHA-256 CAS |
+| Evidence | 严格 `EvidenceSet` Artifact |
+| 当前执行资格 | Activity lease、fencing token、revision |
+| 工具版本与策略 | immutable `ToolCatalog` + Run release |
 
----
+因此，`ToolBroker` 的职责是把一次不可靠的外部调用变成一条可恢复、可审计、效应感知的持久化协议。
 
-## 七、最佳实践
+## 2. Worker 启动时先冻结唯一 ToolCatalog
 
-### 7.1 Effect Class 选择
+生产 Worker 在 `agent/runtime/worker/main.py::build_worker` 中按以下顺序启动：
 
-| 工具类型 | 推荐 Effect Class | 理由 |
+```text
+加载 builtin / Skill / Claude Skill / A2A / read_artifact
+→ 收集 native_loop 与 agent_loop 的公开工具面
+→ 校验两者 name/description/schema/effect policy 完全一致
+→ build_runtime_tool_catalog(...)
+→ register_tool_catalog(broker, catalog)
+→ 用 catalog digest 计算三份 ReleaseManifest
+→ 创建两个 AdkEngineAdapter 与一个 NativeLoopAdapter
+→ 原子激活三份 release
+```
+
+### 2.1 ToolBinding
+
+`ToolBinding` 冻结一个工具的完整运行契约：
+
+- `name`
+- `description`
+- Draft 2020-12 object 参数 schema
+- `ToolManifest`
+- executor
+- 协议专属 result adapter
+- implementation identity
+
+`ToolManifest` 进一步声明：
+
+- `release_digest`
+- `effect_class`
+- timeout、max attempts
+- idempotency、reconcile、cancel 能力
+- result policy
+- `concurrency_safe`
+- `exclusive_resources`
+
+每个 binding 有独立 tool release digest；整个目录又有确定性的 catalog digest。catalog digest 被写进 release manifest，所以不同工具声明、实现、结果适配器或策略的 Worker，不会被视为同一 release。
+
+### 2.2 fail-fast 规则
+
+以下情况直接阻止 Worker 启动，不会跳过单个坏工具：
+
+- 重复名称；
+- 空 description；
+- 非 object 根 schema 或没有 `properties`；
+- 非法 Draft 2020-12 schema；
+- schema 含不可序列化值；
+- executor/result adapter 不可调用；
+- tool release digest 非 SHA-256；
+- 非 READ_ONLY 工具却声明 `concurrency_safe=true`；
+- 重复 exclusive resource；
+- agent_loop/native_loop 公开声明或结果协议不一致。
+
+可选远程 Skill/A2A 连接失败仍可按既有 best-effort 返回空目录；但一旦目录请求成功，任何畸形条目都必须使启动失败。这不是旧 schema 兼容层，当前代码只接受唯一 current catalog。
+
+## 3. Broker 内部唯一输出契约
+
+executor 的原始返回值不能直接进入 Broker 账本。所有协议入口都必须先得到：
+
+```text
+ToolExecutionOutput
+├─ result: ToolResultEnvelope
+└─ evidence: EvidenceSet | null
+```
+
+定义位于 `agent/runtime/domain/models.py`，适配位于 `agent/runtime/application/tool_outputs.py`。
+
+### 3.1 协议适配只发生一次
+
+| 工具来源 | result adapter | 责任 |
 |---|---|---|
-| 知识检索、数据库查询 | `READ_ONLY` | 无副作用，可安全重试 |
-| 创建工单、发送通知（支持幂等） | `IDEMPOTENT_EFFECT` | 有副作用，但幂等键保证安全 |
-| 发送邮件、支付（不支持幂等） | `NON_IDEMPOTENT_EFFECT` | 有副作用，需对账确认 |
-| 第三方 API（不确定） | `UNKNOWN_EFFECT` | 保守处理，需对账或人工 |
+| builtin/普通 Python | `plain_json_output` | JSON → SUCCESS；`None` → NO_OUTPUT |
+| Skill Center | `skill_center_output` | 只在这里解释 `isError/errorCode/content` |
+| Claude Skill | `claude_skill_output` | 只在这里解释 `SkillCallResult` |
+| A2A | `a2a_output` | 只在这里解释 A2A error 对象 |
 
-### 7.2 幂等键透传
+Broker 核心不再猜测任意 dict 的别名。即使 executor 返回已经构造好的 Pydantic 对象，边界仍会重新验证，防止 `model_construct` 等绕过校验。
 
-```python
-async def executor(arguments: dict, ctx: ToolCallContext):
-    # 必须透传 ctx.idempotency_key
-    result = await external_api.call(
-        **arguments,
-        idempotency_key=ctx.idempotency_key,  # 关键！
-    )
-    return ToolResultEnvelope(status=ToolResultStatus.SUCCESS, preview=result)
+严格 JSON 约束会拒绝：
+
+- bytes、tuple；
+- 非字符串 object key；
+- NaN、Infinity；
+- 非法 UTF-8；
+- 循环引用；
+- 与当前 DTO 不匹配的额外字段。
+
+违反结果契约统一为 `TOOL_RESULT_CONTRACT_INVALID`，不能被包装成普通的、可继续推理的工具错误。
+
+### 3.2 ToolResultEnvelope
+
+状态词汇只有：
+
+| 状态 | 含义 |
+|---|---|
+| `SUCCESS` | 已确认成功 |
+| `NO_OUTPUT` | 已确认执行完成且无正文 |
+| `FAILURE` | 已确认失败，必须有 code/message |
+| `INTERRUPT` | 等待输入，必须有 `pending_input` |
+| `UNKNOWN` | 外部效应不确定，必须有 code/message |
+
+`result_ref` 是小写 SHA-256 Artifact ID。`NO_OUTPUT` 不允许携带 preview/ref；`FAILURE` 和 `UNKNOWN` 必须说明稳定错误码与消息。
+
+### 3.3 Evidence 不允许补造
+
+`EvidenceSet`/`EvidenceItem` 使用 `strict=True + extra="forbid"`。producer 必须给出完整：
+
+- query/query id；
+- run/activity/tool execution identity；
+- principal、dataset scope、scope；
+- document/version/index/content hash；
+- page/span/source/score；
+- retrieval status、rewrites、degraded reasons、retrieved time。
+
+Broker 只核对身份和内部一致性，不从普通 hits 猜 provenance，不识别任何隐藏 Evidence 载体，也不会填合成的默认版本或 scope。缺失或矛盾统一报 `EVIDENCE_CONTRACT_INVALID`。
+
+## 4. stable slot：恢复身份不是 provider call id
+
+模型供应商给出的 function-call id 只用于本 attempt 的关联，不能成为跨 attempt 的业务身份。当前稳定 slot 由引擎位置确定：
+
+```text
+Native: native:turn:{turn_ordinal}:call:{call_ordinal}
+ADK:    adk:turn:{turn_ordinal}:call:{call_ordinal}
 ```
 
-### 7.3 对账钩子设计
+slot 冻结：
+
+- logical key；
+- tool name；
+- normalized arguments 的 request digest；
+- tool release digest；
+- effect class。
+
+恢复或重放时，只要同一 slot 的名称、参数摘要、release 或 effect 漂移，就以 `TOOL_REPLAY_MISMATCH` fail-closed。Broker 不会用“参数看起来相似”或 provider id 猜测是同一次调用。
+
+## 5. PREPARE 是外部执行的硬屏障
+
+批入口是：
 
 ```python
-async def reconcile(ctx: ToolCallContext):
-    # 1. 检查 prior_external_object_id
-    if ctx.prior_external_object_id:
-        status = await check_status(ctx.prior_external_object_id)
-        if status == "SUCCESS":
-            return ToolResultEnvelope(status=ToolResultStatus.SUCCESS, ...)
-        elif status == "FAILED":
-            return ToolResultEnvelope(status=ToolResultStatus.FAILURE, ...)
-    
-    # 2. 不确定时返回 UNKNOWN
-    return ToolResultEnvelope(
-        status=ToolResultStatus.UNKNOWN,
-        error_code="STATUS_UNKNOWN",
-        error_message="cannot confirm status",
-    )
+await broker.prepare_batch(
+    run_id=...,
+    parent_activity_id=...,
+    fencing_token=...,
+    calls=(ToolBatchCall(...), ...),
+)
 ```
 
-### 7.4 超时控制
+Store 在一个短 `BEGIN IMMEDIATE` 中完成：
 
-```python
-# executor 中必须检查剩余时间
-async def executor(arguments: dict, ctx: ToolCallContext):
-    if ctx.remaining_ms <= 0:
-        return ToolResultEnvelope(
-            status=ToolResultStatus.FAILURE,
-            error_code="DEADLINE_EXPIRED",
-            error_message="deadline expired before execution",
-        )
-    
-    # 使用 async with asyncio.timeout 控制超时
-    async with asyncio.timeout(ctx.remaining_ms / 1000):
-        result = await long_running_task()
-    
-    return ToolResultEnvelope(status=ToolResultStatus.SUCCESS, preview=result)
+1. 校验当前 Activity lease/fencing；
+2. 为每个 stable slot 创建或核对 `ToolExecution`；
+3. 写 `PREPARED` 状态；
+4. 追加对应 `TOOL_CALL_COMMITTED` 事件；
+5. 整批提交，失败则整批回滚。
+
+只有事务成功后，`PreparedToolExecution` 才会发布给执行层。`execute_prepared` 再次从 ledger 核对 slot 与 catalog，然后才可能进入外部 executor。
+
+这条屏障保证：
+
+```text
+看不到 ToolCall 事实 → 外部动作一定尚未被本批派发
 ```
 
-### 7.5 大结果处理
+反过来并不成立：崩溃可能发生在 `DISPATCHED` 后、结果结算前，所以需要 effect/reconcile 状态机。
 
-```python
-# 大结果自动存入 Artifact
-async def executor(arguments: dict, ctx: ToolCallContext):
-    large_result = await fetch_large_data()
-    
-    # ToolBroker 会自动判断大小
-    # 超过 8KiB 存入 Artifact，返回 result_ref
-    return ToolResultEnvelope(
-        status=ToolResultStatus.SUCCESS,
-        preview=large_result,  # 如果太大，会自动截断
-    )
+## 6. effect-aware 状态机
+
+`ToolEffectStatus` 的核心状态为：
+
+```text
+PREPARED
+  → DISPATCHED
+      → COMMITTED
+      → FAILED
+      → UNKNOWN → RECONCILING → COMMITTED | FAILED | MANUAL_REQUIRED
 ```
 
----
+实际恢复还可能直接读取已经 `COMMITTED`/`FAILED` 的 slot，而不重新派发。
 
-## 八、常见问题与陷阱
+### 6.1 不同效应的策略
 
-### 8.1 幂等键未透传
+| effect class | 透明重试 | 关键约束 |
+|---|---|---|
+| `READ_ONLY` | 可以 | 仍受 max attempts、deadline、cancel 限制 |
+| `IDEMPOTENT_EFFECT` | 可以 | manifest 必须声明 idempotency，稳定 key 必须透传下游 |
+| `NON_IDEMPOTENT_EFFECT` | 不可以 | DISPATCHED 后不确定必须 reconcile 或人工 |
+| `UNKNOWN_EFFECT` | 不可以 | 采用最保守策略，不能赌“应该没成功” |
 
-**问题**：`IDEMPOTENT_EFFECT` 工具未透传 `idempotency_key`，导致重试时产生重复副作用。
+`ToolCallContext.idempotency_key` 来源于持久化 ToolExecution，不会随 Worker attempt 改变。下游 executor 对幂等副作用必须真正使用它；仅在本地算一个 hash 不构成下游幂等。
 
-**解决**：
-```python
-# ❌ 错误
-async def executor(arguments, ctx):
-    result = await api.call(**arguments)  # 未透传幂等键
+### 6.2 timeout 不是“失败证明”
 
-# ✅ 正确
-async def executor(arguments, ctx):
-    result = await api.call(**arguments, idempotency_key=ctx.idempotency_key)
+在外部请求派发之后出现 timeout、断连或 ACK 丢失，只能证明本地不知道结果，不能证明下游没有执行。因此：
+
+- 有 reconcile hook：进入查询式对账；
+- 无 hook或仍不确定：进入 `MANUAL_REQUIRED`；
+- 不能透明重试非幂等动作。
+
+人工处置只接受严格 `tool_reconciliation` signal：`mark_committed`、`mark_failed`、`reconcile`。它与 Tool Activity、ToolExecution Event、父 Run 推进在短事务内完成；人工确认失败是 sticky 的。
+
+## 7. 并发执行与有序结算是两件事
+
+Native 对完整 batch 中满足以下条件的调用允许并发执行：
+
+- `READ_ONLY`；
+- `concurrency_safe=true`；
+- 没有独占资源冲突。
+
+副作用或 UNKNOWN 工具串行。并发上限由 `native_max_tool_concurrency` 控制。
+
+即使外部 executor 并发，模型结果和 durable settlement 仍必须按 call ordinal 排序。`ToolSettlementOrder`/`ToolSettlementTurn` 实现这个 gate：
+
+```text
+call 0 executor ─────────────完成慢────┐
+call 1 executor ──完成快──等待 ordinal 0│
+                                      ▼
+durable settle: call 0 → call 1
+model messages: call 0 → call 1
 ```
 
----
+首次 durable settle 前，每个调用等待自己的 turn；一次调用的 retry/manual 流程在其 turn 内完成。cancel、ownership loss 或控制故障会 abort 整个 gate，唤醒并终止所有 waiter，避免孤儿 task。
 
-### 8.2 对账钩子缺失
+## 8. 结算、Artifact 与恢复
 
-**问题**：`NON_IDEMPOTENT_EFFECT` 工具未提供 `reconcile` 钩子，失败后无法恢复。
+### 8.1 小结果
 
-**解决**：
-```python
-# ✅ 注册时提供 reconcile 钩子
-broker.register(manifest, executor, reconcile=reconcile_hook)
+小结果以有界 preview 写入 ToolExecution，并追加 `TOOL_RESULT_COMMITTED`。事件是公开投影，ToolExecution ledger 才是 effect authority。
+
+### 8.2 普通大结果
+
+Broker 把完整 current `ToolResultEnvelope` 写入 Artifact CAS：
+
+```text
+temp bytes
+→ SHA-256/size
+→ fsync + atomic rename + fsync dir
+→ Artifact metadata/link
+→ ledger 保存有界 preview + result_ref + full_result_ref 标记
+→ TOOL_RESULT_COMMITTED
 ```
 
----
+恢复时 `materialize_committed_result` 从 CAS 分片读取、校验 digest/size/media type、按当前 DTO 解析完整 envelope，并与 ledger 的状态字段核对。它不会把被截断的 ledger preview 当作模型恢复输入，也不会再次调用原 executor。
 
-### 8.3 超时未检查
+### 8.3 read_artifact
 
-**问题**：executor 未检查 `ctx.remaining_ms`，导致超期执行。
+`read_artifact` 是特殊的有界读取工具。恢复时根据已提交 ToolExecution 的原始请求，通过已注册 current catalog executor 重新物化该切片；它不会把大文件复制进 checkpoint。
 
-**解决**：
-```python
-async def executor(arguments, ctx):
-    if ctx.remaining_ms <= 0:
-        return ToolResultEnvelope(
-            status=ToolResultStatus.FAILURE,
-            error_code="DEADLINE_EXPIRED",
-            error_message="deadline expired",
-        )
-    # 继续执行...
+### 8.4 Evidence
+
+EvidenceSet 作为独立 Artifact/索引事实在 Broker 结算时持久化。citation 不在结算事务中生成；成功收口时，`store.finalize_success()` 才根据最终回答的引用标记和 committed Evidence index 派生 `CITATION_SET_COMMITTED`。Event、Checkpoint、Trace 只携带有界信息或引用，不能成为大结果/Evidence 的第二份事实源。
+
+## 9. Native 与 ADK 如何接入 Broker
+
+### 9.1 Native 生产默认：`off`
+
+`NativeLoopAdapter` 直接持有 `RuntimeIO` 和 mandatory Broker。默认时序是：
+
+```text
+provider 显式结束完整 model stream
+→ 严格校验 ToolCall batch
+→ MODEL_RESPONSE_COMMITTED checkpoint
+→ prepare_native_batch（整批原子 PREPARE）
+→ TOOL_BATCH_COMMITTED checkpoint
+→ begin_native_settlement_batch
+→ 外部执行（安全只读可并发）
+→ Broker 按 ordinal 结算
+→ TOOL_RESULT_COMMITTED checkpoint
+→ NEXT_TURN
 ```
 
----
+Native 不经过 ADK `RunContext`、旧的 runner merge queue 或 authority 路由。Skill 进度仍通过 awaited RuntimeIO sink 实时提交，最终 ToolResult 仍一次性权威结算。
 
-### 8.4 状态机混乱
+### 9.2 Native 实验模式
 
-**问题**：在 executor 中直接修改数据库状态，绕过 ToolBroker 的状态机。
+`experimental_heuristic` 保留基于流式 fragment 的提前派发，但不属于默认生产保证：
 
-**解决**：
-- executor 只负责执行工具逻辑
-- 状态变更由 ToolBroker 通过 `store.settle_tool_execution()` 管理
-- 不要在 executor 中直接调用 `store` 方法
+- 只允许已评审的安全 READ_ONLY；
+- 每个 early call 仍必须先建立 stable slot 和 PREPARED/ToolCall 事实；
+- 使用固定 worker + 有界队列并受全局并发/参数/调用数限制；
+- 完整 batch 到达后再次核对；后续 fragment 漂移报 `TOOL_REPLAY_MISMATCH`；
+- EOF、cancel、lease loss 后必须关闭 provider 并 await 所有 worker。
 
----
+`provider_block_complete` 是未来接口；当前 OpenAI-compatible client 不声明该 capability，配置此值时 Worker 在 release 激活前以 `EARLY_DISPATCH_CAPABILITY_UNAVAILABLE` 启动失败。
 
-## 九、总结
+### 9.3 两个 ADK 引擎
 
-ToolBroker 是 LLM 与外部世界之间的**可靠执行层**，核心价值在于：
+`AdkToolBatch` 在 ADK 的完整非 partial model response 回调中收集整批 function call，先 flush 前置文本，再 `prepare_batch`。`BrokeredAdkTool` 只允许执行已经关联到 stable slot 的调用。
 
-1. **持久化保证**：工具执行状态写入数据库，支持崩溃恢复
-2. **效应感知**：根据副作用类型决定重试和对账策略
-3. **幂等控制**：透传幂等键，支持安全重试
-4. **超时管理**：deadline 向下传递，超时自动中止
-5. **结果管理**：大结果自动存入 Artifact，返回引用
+保留的 `ToolBroker.execute(...)` 是 ADK 单调用包装：内部仍遵守 PREPARE/execute-prepared 协议，不代表 ADK 可以绕过 batch 屏障。
 
-**设计原则**：
-- **显式声明**：工具必须声明 `effect_class` 和能力（幂等/对账/取消）
-- **保守处理**：不确定的副作用进入 `MANUAL_REQUIRED`，等待人工介入
-- **状态机驱动**：所有状态变更通过 ToolBroker 管理，保证一致性
+## 10. 取消、deadline 与 ownership fault
+
+所有 deadline 都是 Run 的绝对 UTC 时间；`ToolCallContext.remaining_ms` 只是对同一绝对 deadline 的计算，不会在每层重开一个完整 timeout。
+
+以下控制故障必须向 Worker 冒泡，不能变成可喂回模型的普通 ToolResult：
+
+- stale fencing；
+- lease loss；
+- checkpoint CAS conflict；
+- `AttemptOwnershipLost`；
+- `TOOL_REPLAY_MISMATCH`；
+- ToolResult/Evidence contract fault。
+
+cancel、deadline、GeneratorExit、Adapter 异常或 ownership loss 时，Native 会关闭 provider stream，取消并 await 工具 task、HTTP 调用与 Skill 子进程。旧 Worker 的迟到结算会被 fencing 拒绝。
+
+## 11. 一次 Native 工具轮次的完整时序
+
+```text
+NativeLoopAdapter       RuntimeIO/Store        ToolBroker          Executor/Artifact
+       │                       │                    │                      │
+       │ MODEL_RESPONSE ckpt   │                    │                      │
+       ├──────────────────────>│ COMMIT             │                      │
+       │                       │                    │                      │
+       │ prepare_batch                              │                      │
+       ├───────────────────────────────────────────>│                      │
+       │                       │<─ PREPARED + TOOL_CALL batch txn ────────│
+       │<───────────────────────────────────────────┤                      │
+       │ TOOL_BATCH ckpt       │                    │                      │
+       ├──────────────────────>│                    │                      │
+       │                       │                    │                      │
+       │ execute_prepared (N)                       │──并发安全只读────────>│
+       │                       │                    │<────raw result────────│
+       │                       │                    │ protocol adapter       │
+       │                       │                    │ strict output/evidence │
+       │                       │                    │ Artifact if large      │
+       │                       │<─ ordinal settle + TOOL_RESULT txn ──────│
+       │<───────────────────────────────────────────┤ ToolResultEnvelope   │
+       │ TOOL_RESULT/NEXT ckpt│                    │                      │
+       ├──────────────────────>│                    │                      │
+       │ 下一次 model request  │                    │                      │
+```
+
+SQLite 写事务中不会等待模型、工具、网络或文件系统；外部工作与 blob 写入在事务外，只有权威 metadata/ledger/event 在短事务中结算。
+
+## 12. 阅读与排障顺序
+
+建议按以下顺序阅读：
+
+1. `agent/runtime/domain/models.py`：effect/result/evidence DTO；
+2. `agent/runtime/application/tool_catalog.py`：启动期目录不变量；
+3. `agent/runtime/application/tool_outputs.py`：四种协议的唯一适配点；
+4. `agent/runtime/application/tool_broker.py`：prepare、execute、reconcile、materialize；
+5. `agent/runtime/adapters/brokered_tools.py`：Native/ADK bridge；
+6. `agent/runtime/adapters/sqlite/store.py`：ToolExecution 事务；
+7. `agent/engine/native_loop/engine.py`：生产 Native 调度顺序；
+8. `tests/reliability/test_brokered_tool_adapters.py` 及 Native recovery/RuntimeIO 测试：冻结不变量。
+
+排障时优先查看 ToolExecution 的 stable slot、effect status、effect revision、request/release digest、Activity fencing，再看 committed events。Trace 只用于诊断，不能反向裁决工具是否执行过。
+
+## 13. 当前能力边界
+
+当前 SQLite + 本机 Artifact CAS 能保证本机多进程恢复，不等于跨主机 HA。真正跨节点部署至少需要共享事务数据库、共享对象存储、跨节点 lease/fencing 与一致的 release/catalog 发布机制。
+
+这个边界不影响本文的不变量：无论底层以后换成 PostgreSQL、对象存储还是工作流系统，都必须继续保持“先持久化稳定意图、效应感知执行、权威结算、有序恢复”。

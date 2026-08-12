@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.reliability.support.runtime_releases import activate_test_release
+
 import json
 import uuid
 
@@ -23,9 +25,8 @@ from agent.runtime.domain.models import (
 async def test_bounded_artifact_read_is_materialized_for_model_but_not_copied_to_ledger(tmp_path):
     store = SqliteRuntimeStore(RuntimeDatabase(tmp_path / "runtime.db"))
     await store.initialize()
-    await store.register_release(
+    await activate_test_release(store,
         ReleaseManifest(engine="native_loop", components={"artifact-read": "v1"}),
-        activate=True,
     )
     run = (await AdmissionService(store).create(
         CreateRunInput(
@@ -41,6 +42,7 @@ async def test_bounded_artifact_read_is_materialized_for_model_but_not_copied_to
         idempotency_key="artifact-read-run",
     )).run
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="artifact-worker",
         lease_ms=30_000,
         now_ms=run.envelope.created_at,

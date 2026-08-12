@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.reliability.support.runtime_releases import activate_test_release
+
 import asyncio
 import uuid
 from dataclasses import dataclass
@@ -20,18 +22,27 @@ from pydantic import PrivateAttr
 from agent.config import AgentSettings
 from agent.engine.base import RunContext
 from agent.engine.loop_tools.task_plan_tool import update_task_plan
+from agent.engine.native_loop import executor as native_executor
+from agent.engine.native_loop.messages import ToolCall
 from agent.engine.native_loop.tools import NativeToolContext, ToolRegistry, ToolSpec
 from agent.runtime.adapters.brokered_tools import (
     AdkToolBatch,
     BrokeredAdkTool,
+    NativeBrokerSession,
     broker_adk_tools,
-    broker_native_registry,
+    build_brokered_native_registry,
+    build_runtime_tool_catalog,
+    prepare_native_batch,
 )
 from agent.runtime.adapters.filesystem_artifact import FilesystemArtifactStore
 from agent.runtime.adapters.sqlite import RuntimeDatabase, SqliteRuntimeStore
 from agent.runtime.application.admission import AdmissionService, CreateRunInput
 from agent.runtime.application.events import CommittedEventSink
-from agent.runtime.application.tool_broker import ToolBroker
+from agent.runtime.application.tool_broker import (
+    ToolBatchCall,
+    ToolBroker,
+    ToolSettlementOrder,
+)
 from agent.runtime.domain.errors import RuntimeFault
 from agent.runtime.domain.models import (
     EventType,
@@ -66,9 +77,8 @@ async def _runtime_context(tmp_path, *, engine: str = "native_loop"):
     clock = FakeClock()
     store = SqliteRuntimeStore(RuntimeDatabase(tmp_path / "runtime.db"))
     await store.initialize()
-    release = await store.register_release(
+    release = await activate_test_release(store,
         ReleaseManifest(engine=engine, components={"broker-wrapper-test": "v1"}),
-        activate=True,
     )
     admitted = await AdmissionService(
         store,
@@ -88,10 +98,10 @@ async def _runtime_context(tmp_path, *, engine: str = "native_loop"):
         idempotency_key=f"wrapper-{engine}-{uuid.uuid4()}",
     )
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="wrapper-worker",
         lease_ms=30_000,
         now_ms=clock.now_ms(),
-        engines=(engine,),
     )
     assert claim is not None
     activity = await store.mark_activity_running(
@@ -140,6 +150,27 @@ def _native_spec(name: str, invoke) -> ToolSpec:
     )
 
 
+def _broker_native(
+    registry: ToolRegistry,
+    rc: RunContext,
+    *,
+    early_capacity: int | None = 64,
+) -> ToolRegistry:
+    catalog = build_runtime_tool_catalog(registry)
+    return build_brokered_native_registry(
+        registry,
+        NativeBrokerSession(
+            run_id=rc.run_id,
+            activity_id=rc.activity_id,
+            fencing_token=rc.fencing_token,
+            deadline_at_ms=rc.deadline_at_ms,
+            tool_broker=rc.tool_broker,
+            catalog=catalog,
+            early_settlement_capacity=early_capacity,
+        ),
+    )
+
+
 def _adk_response(*calls: tuple[str, str, dict]) -> SimpleNamespace:
     parts = []
     for framework_id, name, arguments in calls:
@@ -161,13 +192,13 @@ async def test_native_wrapper_replays_committed_slot_without_redispatch(tmp_path
         calls.append((dict(args), context.function_call_id))
         return {"doubled": args["value"] * 2}
 
-    registry = broker_native_registry(
+    registry = _broker_native(
         ToolRegistry([_native_spec("calculator", calculator)]),
         rc,
     )
     wrapped = registry.get("calculator")
     assert wrapped is not None
-    logical_key = "native:model:0:call:0"
+    logical_key = "native:turn:0:call:0"
 
     first = await wrapped.run(
         {"value": 7},
@@ -212,14 +243,14 @@ async def test_native_wrapper_preserves_external_only_success_on_committed_repla
             external_object_id="provider-object-42",
         )
 
-    wrapped = broker_native_registry(
+    wrapped = _broker_native(
         ToolRegistry([_native_spec("calculator", create_external)]), rc,
     ).get("calculator")
     assert wrapped is not None
     context = NativeToolContext(
         function_call_id="native-external-first",
         invocation_id=rc.run_id,
-        logical_key="native:model:external:0",
+        logical_key="native:turn:0:call:0",
     )
 
     first = await wrapped.run({"value": 1}, context)
@@ -233,13 +264,464 @@ async def test_native_wrapper_preserves_external_only_success_on_committed_repla
 
 
 @pytest.mark.asyncio
+async def test_native_propagates_strict_tool_result_contract_fault(tmp_path):
+    store, rc = await _runtime_context(tmp_path)
+
+    async def invalid_typed_output(_args, _context):
+        return ToolResultEnvelope(
+            status=ToolResultStatus.SUCCESS,
+            preview={"payload": b"not-json"},
+        )
+
+    source_registry = ToolRegistry([
+        _native_spec("invalid_result", invalid_typed_output)
+    ])
+    session = NativeBrokerSession(
+        run_id=rc.run_id,
+        activity_id=rc.activity_id,
+        fencing_token=rc.fencing_token,
+        deadline_at_ms=rc.deadline_at_ms,
+        tool_broker=rc.tool_broker,
+        catalog=build_runtime_tool_catalog(source_registry),
+    )
+    await prepare_native_batch(session, source_registry, [
+        ToolBatchCall(
+            logical_key="native:model:invalid-result:0",
+            tool_name="invalid_result",
+            arguments={"value": 1},
+            framework_call_id="provider-invalid-result",
+        )
+    ])
+    registry = build_brokered_native_registry(source_registry, session)
+    call = ToolCall(
+        id="provider-invalid-result",
+        name="invalid_result",
+        arguments='{"value":1}',
+        logical_key="native:model:invalid-result:0",
+    )
+
+    with pytest.raises(RuntimeFault) as malformed:
+        await native_executor.execute_one(
+            call,
+            registry,
+            invocation_id=rc.run_id,
+            state={},
+        )
+
+    assert malformed.value.code == "TOOL_RESULT_CONTRACT_INVALID"
+    events = await store.list_events(rc.run_id, visibility=None)
+    committed = [
+        event
+        for event in events
+        if event.event_type is EventType.TOOL_RESULT_COMMITTED
+    ]
+    assert len(committed) == 1
+    assert committed[0].payload["result"]["error_code"] == (
+        "TOOL_RESULT_CONTRACT_INVALID"
+    )
+
+
+@pytest.mark.asyncio
+async def test_experimental_native_calls_prepare_slots_and_settle_in_stream_order(tmp_path):
+    store, rc = await _runtime_context(tmp_path)
+    release_first = asyncio.Event()
+    second_executed = asyncio.Event()
+
+    async def slow_first(args, _context):
+        await release_first.wait()
+        return {"value": args["value"]}
+
+    async def fast_second(args, _context):
+        second_executed.set()
+        return {"value": args["value"]}
+
+    registry = ToolRegistry([
+        _native_spec("calculator", slow_first),
+        _native_spec("text_stats", fast_second),
+    ])
+    session = NativeBrokerSession(
+        run_id=rc.run_id,
+        activity_id=rc.activity_id,
+        fencing_token=rc.fencing_token,
+        deadline_at_ms=rc.deadline_at_ms,
+        tool_broker=rc.tool_broker,
+        catalog=build_runtime_tool_catalog(registry),
+        early_settlement_capacity=4,
+    )
+    wrapped = build_brokered_native_registry(registry, session)
+    first_tool = wrapped.get("calculator")
+    second_tool = wrapped.get("text_stats")
+    assert first_tool is not None and second_tool is not None
+
+    settled_ids: list[str] = []
+    original_settle = store.settle_tool_execution
+
+    async def record_settlement(**kwargs):
+        settled_ids.append(str(kwargs["tool_execution_id"]))
+        return await original_settle(**kwargs)
+
+    store.settle_tool_execution = record_settlement
+    first = asyncio.create_task(first_tool.run(
+        {"value": 1},
+        NativeToolContext(
+            function_call_id="experimental-0",
+            invocation_id=rc.run_id,
+            logical_key="native:turn:0:call:0",
+        ),
+    ))
+    second = asyncio.create_task(second_tool.run(
+        {"value": 2},
+        NativeToolContext(
+            function_call_id="experimental-1",
+            invocation_id=rc.run_id,
+            logical_key="native:turn:0:call:1",
+        ),
+    ))
+
+    await asyncio.wait_for(second_executed.wait(), timeout=1)
+    await asyncio.sleep(0.05)
+    assert settled_ids == []
+
+    release_first.set()
+    assert await asyncio.wait_for(asyncio.gather(first, second), timeout=1) == [
+        {"value": 1},
+        {"value": 2},
+    ]
+    events = await store.list_events(rc.run_id, visibility=None)
+    calls = [event for event in events if event.event_type is EventType.TOOL_CALL_COMMITTED]
+    results = [event for event in events if event.event_type is EventType.TOOL_RESULT_COMMITTED]
+    assert [event.tool_execution_id for event in results] == [
+        event.tool_execution_id for event in calls
+    ]
+    assert settled_ids == [event.tool_execution_id for event in calls]
+
+
+@pytest.mark.asyncio
+async def test_native_batch_executes_concurrently_but_settles_in_call_order(tmp_path):
+    store, rc = await _runtime_context(tmp_path)
+    release_first = asyncio.Event()
+    second_executed = asyncio.Event()
+
+    async def slow_first(args, _context):
+        await release_first.wait()
+        return {"value": args["value"]}
+
+    async def fast_second(args, _context):
+        second_executed.set()
+        return {"value": args["value"]}
+
+    registry = ToolRegistry([
+        _native_spec("calculator", slow_first),
+        _native_spec("text_stats", fast_second),
+    ])
+    session = NativeBrokerSession(
+        run_id=rc.run_id,
+        activity_id=rc.activity_id,
+        fencing_token=rc.fencing_token,
+        deadline_at_ms=rc.deadline_at_ms,
+        tool_broker=rc.tool_broker,
+        catalog=build_runtime_tool_catalog(registry),
+    )
+    prepared = await prepare_native_batch(session, registry, [
+        ToolBatchCall(
+            logical_key="native:model:0:call:0",
+            tool_name="calculator",
+            arguments={"value": 1},
+        ),
+        ToolBatchCall(
+            logical_key="native:model:0:call:1",
+            tool_name="text_stats",
+            arguments={"value": 2},
+        ),
+    ])
+    wrapped = build_brokered_native_registry(registry, session)
+
+    settled_ids: list[str] = []
+    original_settle = store.settle_tool_execution
+
+    async def record_settlement(**kwargs):
+        settled_ids.append(str(kwargs["tool_execution_id"]))
+        return await original_settle(**kwargs)
+
+    store.settle_tool_execution = record_settlement
+    first_tool = wrapped.get("calculator")
+    second_tool = wrapped.get("text_stats")
+    assert first_tool is not None and second_tool is not None
+    first = asyncio.create_task(first_tool.run(
+        {"value": 1},
+        NativeToolContext(
+            function_call_id="call-0",
+            invocation_id=rc.run_id,
+            logical_key="native:model:0:call:0",
+        ),
+    ))
+    second = asyncio.create_task(second_tool.run(
+        {"value": 2},
+        NativeToolContext(
+            function_call_id="call-1",
+            invocation_id=rc.run_id,
+            logical_key="native:model:0:call:1",
+        ),
+    ))
+
+    await asyncio.wait_for(second_executed.wait(), timeout=1)
+    await asyncio.sleep(0.05)
+    assert settled_ids == []
+
+    release_first.set()
+    assert await asyncio.wait_for(asyncio.gather(first, second), timeout=1) == [
+        {"value": 1},
+        {"value": 2},
+    ]
+    assert settled_ids == [item.tool_execution_id for item in prepared]
+
+    events = await store.list_events(rc.run_id, visibility=None)
+    results = [
+        event for event in events
+        if event.event_type is EventType.TOOL_RESULT_COMMITTED
+    ]
+    assert [event.tool_execution_id for event in results] == [
+        item.tool_execution_id for item in prepared
+    ]
+
+
+@pytest.mark.asyncio
+async def test_native_ordered_settlement_cancellation_aborts_all_waiters(tmp_path):
+    store, rc = await _runtime_context(tmp_path)
+    release_first = asyncio.Event()
+    second_executed = asyncio.Event()
+
+    async def slow_first(args, _context):
+        await release_first.wait()
+        return {"value": args["value"]}
+
+    async def fast_second(args, _context):
+        second_executed.set()
+        return {"value": args["value"]}
+
+    registry = ToolRegistry([
+        _native_spec("calculator", slow_first),
+        _native_spec("text_stats", fast_second),
+    ])
+    session = NativeBrokerSession(
+        run_id=rc.run_id,
+        activity_id=rc.activity_id,
+        fencing_token=rc.fencing_token,
+        deadline_at_ms=rc.deadline_at_ms,
+        tool_broker=rc.tool_broker,
+        catalog=build_runtime_tool_catalog(registry),
+    )
+    await prepare_native_batch(session, registry, [
+        ToolBatchCall(
+            logical_key="native:model:0:call:0",
+            tool_name="calculator",
+            arguments={"value": 1},
+        ),
+        ToolBatchCall(
+            logical_key="native:model:0:call:1",
+            tool_name="text_stats",
+            arguments={"value": 2},
+        ),
+    ])
+    wrapped = build_brokered_native_registry(registry, session)
+    first_tool = wrapped.get("calculator")
+    second_tool = wrapped.get("text_stats")
+    assert first_tool is not None and second_tool is not None
+    first = asyncio.create_task(first_tool.run(
+        {"value": 1},
+        NativeToolContext(
+            function_call_id="cancel-0",
+            invocation_id=rc.run_id,
+            logical_key="native:model:0:call:0",
+        ),
+    ))
+    second = asyncio.create_task(second_tool.run(
+        {"value": 2},
+        NativeToolContext(
+            function_call_id="cancel-1",
+            invocation_id=rc.run_id,
+            logical_key="native:model:0:call:1",
+        ),
+    ))
+
+    await asyncio.wait_for(second_executed.wait(), timeout=1)
+    second.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await second
+    release_first.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(first, timeout=1)
+
+    events = await store.list_events(rc.run_id, visibility=None)
+    assert not [
+        event for event in events
+        if event.event_type is EventType.TOOL_RESULT_COMMITTED
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ordered_settlement_preserves_ownership_fault_for_every_waiter():
+    order = ToolSettlementOrder(2)
+    first = order.turn(0)
+    second = order.turn(1)
+    waiting = asyncio.create_task(second.acquire())
+    await asyncio.sleep(0)
+    second.abort(RuntimeFault(
+        "STALE_FENCING_TOKEN",
+        "attempt ownership moved",
+        409,
+    ))
+
+    with pytest.raises(RuntimeFault) as later:
+        await asyncio.wait_for(waiting, timeout=1)
+    with pytest.raises(RuntimeFault) as earlier:
+        await asyncio.wait_for(first.acquire(), timeout=1)
+    assert later.value.code == earlier.value.code == "STALE_FENCING_TOKEN"
+
+
+@pytest.mark.asyncio
+async def test_native_ordered_settlement_retries_failure_before_next_call(tmp_path):
+    store, rc = await _runtime_context(tmp_path)
+    attempts = 0
+
+    async def failing_first(_args, _context):
+        nonlocal attempts
+        attempts += 1
+        raise ValueError("expected tool failure")
+
+    async def successful_second(args, _context):
+        return {"value": args["value"]}
+
+    registry = ToolRegistry([
+        _native_spec("calculator", failing_first),
+        _native_spec("text_stats", successful_second),
+    ])
+    session = NativeBrokerSession(
+        run_id=rc.run_id,
+        activity_id=rc.activity_id,
+        fencing_token=rc.fencing_token,
+        deadline_at_ms=rc.deadline_at_ms,
+        tool_broker=rc.tool_broker,
+        catalog=build_runtime_tool_catalog(registry),
+    )
+    prepared = await prepare_native_batch(session, registry, [
+        ToolBatchCall(
+            logical_key="native:model:0:call:0",
+            tool_name="calculator",
+            arguments={"value": 1},
+        ),
+        ToolBatchCall(
+            logical_key="native:model:0:call:1",
+            tool_name="text_stats",
+            arguments={"value": 2},
+        ),
+    ])
+    wrapped = build_brokered_native_registry(registry, session)
+    first_tool = wrapped.get("calculator")
+    second_tool = wrapped.get("text_stats")
+    assert first_tool is not None and second_tool is not None
+
+    results = await asyncio.wait_for(asyncio.gather(
+        first_tool.run(
+            {"value": 1},
+            NativeToolContext(
+                function_call_id="failure-0",
+                invocation_id=rc.run_id,
+                logical_key="native:model:0:call:0",
+            ),
+        ),
+        second_tool.run(
+            {"value": 2},
+            NativeToolContext(
+                function_call_id="failure-1",
+                invocation_id=rc.run_id,
+                logical_key="native:model:0:call:1",
+            ),
+        ),
+    ), timeout=1)
+
+    assert attempts == 2
+    assert results[0]["isError"] is True
+    assert results[1] == {"value": 2}
+    events = await store.list_events(rc.run_id, visibility=None)
+    result_ids = [
+        event.tool_execution_id for event in events
+        if event.event_type is EventType.TOOL_RESULT_COMMITTED
+    ]
+    assert result_ids == [
+        prepared[0].tool_execution_id,
+        prepared[0].tool_execution_id,
+        prepared[1].tool_execution_id,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_later_ownership_fault_promptly_cancels_slow_native_sibling():
+    slow_started = asyncio.Event()
+    slow_cancelled = asyncio.Event()
+
+    async def slow(_args, _context):
+        slow_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            slow_cancelled.set()
+
+    async def lose_ownership(_args, _context):
+        await slow_started.wait()
+        raise RuntimeFault(
+            "STALE_FENCING_TOKEN",
+            "attempt ownership moved",
+            409,
+        )
+
+    registry = ToolRegistry([
+        _native_spec("calculator", slow),
+        _native_spec("text_stats", lose_ownership),
+    ])
+    calls = [
+        ToolCall(
+            id="ownership-0",
+            name="calculator",
+            arguments='{"value": 1}',
+            logical_key="native:model:0:call:0",
+        ),
+        ToolCall(
+            id="ownership-1",
+            name="text_stats",
+            arguments='{"value": 2}',
+            logical_key="native:model:0:call:1",
+        ),
+    ]
+
+    async def consume() -> None:
+        async for _outcome in native_executor.run_calls(
+            calls,
+            registry,
+            invocation_id="run-ownership",
+            state={},
+            max_concurrency=2,
+        ):
+            pass
+
+    with pytest.raises(RuntimeFault) as fault:
+        await asyncio.wait_for(consume(), timeout=1)
+    assert fault.value.code == "STALE_FENCING_TOKEN"
+    assert slow_cancelled.is_set()
+
+
+@pytest.mark.asyncio
 async def test_adk_wrapper_does_not_overwrite_preview_external_object_key(tmp_path):
     store, rc = await _runtime_context(tmp_path, engine="agent_loop")
+    real_broker = rc.tool_broker
 
     class ExternalResultBroker:
         def __init__(self):
             self.store = store
-            self.clock = rc.tool_broker.clock
+            self.clock = real_broker.clock
+
+        async def prepare_batch(self, **kwargs):
+            return await real_broker.prepare_batch(**kwargs)
 
         async def execute(self, **_kwargs):
             return ToolResultEnvelope(
@@ -286,7 +768,6 @@ async def test_adk_plan_tool_persists_runtime_working_state_once(tmp_path):
     rc.runtime_io = sink
     rc.runtime_working_state = WorkingState(
         goal="make a plan",
-        release_fingerprint=rc.release_fingerprint,
     )
     batch = AdkToolBatch(rc)
     wrapped = broker_adk_tools(
@@ -332,7 +813,7 @@ async def test_native_wrapper_fails_closed_when_stable_slot_changes(tmp_path):
         stats_calls += 1
         return args["value"]
 
-    registry = broker_native_registry(
+    registry = _broker_native(
         ToolRegistry(
             [
                 _native_spec("calculator", calculator),
@@ -347,7 +828,7 @@ async def test_native_wrapper_fails_closed_when_stable_slot_changes(tmp_path):
     context = NativeToolContext(
         function_call_id="native-call-0",
         invocation_id=rc.run_id,
-        logical_key="native:model:0:call:0",
+        logical_key="native:turn:0:call:0",
     )
     await calculator_tool.run({"value": 3}, context)
 

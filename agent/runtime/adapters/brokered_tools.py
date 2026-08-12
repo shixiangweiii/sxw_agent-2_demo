@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import time
-from dataclasses import replace
+import re
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from google.adk.tools import BaseTool, FunctionTool
@@ -11,6 +11,19 @@ from agent.engine.base import RunContext
 from agent.engine.loop_tools import TASK_PLAN_KEY
 from agent.engine.native_loop.tools import NativeToolContext, ToolRegistry, ToolSpec
 from agent.runtime.domain.errors import RuntimeFault
+from agent.runtime.application.tool_outputs import (
+    ToolResultAdapter,
+    a2a_output,
+    adapter_for_tool,
+    claude_skill_output,
+    plain_json_output,
+    skill_center_output,
+)
+from agent.runtime.application.tool_catalog import (
+    ToolBinding,
+    ToolCatalog,
+    tool_release_digest,
+)
 from agent.runtime.domain.models import ToolEffectClass, ToolManifest, ToolResultEnvelope, ToolResultStatus
 from agent.runtime.domain.models import WorkingState, sha256_json
 from agent.runtime.ports.store import ToolExecutionPreparation
@@ -30,6 +43,23 @@ _READ_ONLY = frozenset({
 
 def manifest_for(name: str, rc: RunContext, *, concurrency_safe: bool = False,
                  exclusive_resources: tuple[str, ...] = ()) -> ToolManifest:
+    return _manifest_for(
+        name,
+        release_fingerprint=rc.release_fingerprint or rc.engine,
+        deadline_at_ms=rc.deadline_at_ms,
+        concurrency_safe=concurrency_safe,
+        exclusive_resources=exclusive_resources,
+    )
+
+
+def _manifest_for(
+    name: str,
+    *,
+    release_fingerprint: str,
+    deadline_at_ms: int,
+    concurrency_safe: bool = False,
+    exclusive_resources: tuple[str, ...] = (),
+) -> ToolManifest:
     if name == "update_task_plan":
         effect = ToolEffectClass.IDEMPOTENT_EFFECT
         supports_idempotency = True
@@ -41,12 +71,11 @@ def manifest_for(name: str, rc: RunContext, *, concurrency_safe: bool = False,
         supports_idempotency = False
     return ToolManifest(
         name=name,
-        release_digest=f"{rc.release_fingerprint or rc.engine}:{name}:v1",
+        release_digest=f"{release_fingerprint}:{name}:v1",
         effect_class=effect,
-        timeout_seconds=max(
-            0.001,
-            min(120.0, (rc.deadline_at_ms - int(time.time() * 1000)) / 1000),
-        ) if rc.deadline_at_ms else 120.0,
+        # Absolute Run budget is applied independently at dispatch.  A Tool
+        # manifest is immutable release semantics, never "remaining time now".
+        timeout_seconds=120.0,
         max_attempts=2 if effect in {ToolEffectClass.READ_ONLY, ToolEffectClass.IDEMPOTENT_EFFECT} else 1,
         supports_idempotency=supports_idempotency,
         result_policy="ARTIFACT_BOUNDED_READ" if name == "read_artifact" else "INLINE_OR_ARTIFACT",
@@ -61,6 +90,302 @@ def manifest_for(name: str, rc: RunContext, *, concurrency_safe: bool = False,
     )
 
 
+@dataclass(frozen=True)
+class NativeBrokerSession:
+    run_id: str
+    activity_id: str
+    fencing_token: int
+    deadline_at_ms: int
+    tool_broker: Any
+    catalog: ToolCatalog
+    early_settlement_capacity: int | None = None
+    prepared_by_logical_key: dict[str, Any] = field(
+        default_factory=dict,
+        compare=False,
+        repr=False,
+    )
+    settlement_turn_by_logical_key: dict[str, Any] = field(
+        default_factory=dict,
+        compare=False,
+        repr=False,
+    )
+    early_settlement_order_by_turn: dict[int, Any] = field(
+        default_factory=dict,
+        compare=False,
+        repr=False,
+    )
+    early_prepare_order_by_turn: dict[int, Any] = field(
+        default_factory=dict,
+        compare=False,
+        repr=False,
+    )
+    prepare_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock,
+        compare=False,
+        repr=False,
+    )
+
+
+def build_runtime_tool_catalog(
+    tools: list[Any] | ToolRegistry,
+    *,
+    max_bytes: int = 1024 * 1024,
+) -> ToolCatalog:
+    """Build the one strict post-discovery catalog used by both loop engines."""
+
+    from agent.engine.native_loop.tools import build_registry  # noqa: PLC0415
+
+    registry = tools if isinstance(tools, ToolRegistry) else build_registry(tools)
+    bindings: list[ToolBinding] = []
+    for spec in registry.all():
+        adapter = _native_result_adapter(spec.result_protocol)
+
+        async def execute(
+            arguments: dict[str, Any],
+            broker_context: Any,
+            *,
+            tool_spec: ToolSpec = spec,
+        ) -> Any:
+            native_context = NativeToolContext(
+                function_call_id=broker_context.tool_execution_id,
+                invocation_id=broker_context.run_id,
+                logical_key=str(broker_context.tool_execution_id),
+            )
+            return await tool_spec.run(arguments, native_context)
+
+        provisional = _manifest_for(
+            spec.name,
+            release_fingerprint="catalog",
+            deadline_at_ms=0,
+            concurrency_safe=spec.concurrency_safe,
+            exclusive_resources=spec.exclusive_resources,
+        )
+        policy = provisional.model_dump(mode="json", exclude={"release_digest"})
+        policy["implementation"] = spec.implementation
+        digest = tool_release_digest(
+            name=spec.name,
+            description=spec.description,
+            parameters=spec.parameters,
+            policy=policy,
+            executor=execute,
+            result_adapter=adapter,
+        )
+        manifest = provisional.model_copy(update={"release_digest": digest})
+        bindings.append(ToolBinding(
+            name=spec.name,
+            description=spec.description,
+            parameters=spec.parameters,
+            manifest=manifest,
+            executor=execute,
+            result_adapter=adapter,
+            implementation=spec.implementation or type(spec.run).__qualname__,
+        ))
+    return ToolCatalog(bindings, max_bytes=max_bytes)
+
+
+def register_tool_catalog(broker: Any, catalog: ToolCatalog) -> None:
+    """Install one already-validated catalog into Broker; duplicates fail."""
+
+    if getattr(broker, "catalog", None) is not None:
+        raise ValueError("ToolBroker already has a ToolCatalog")
+    for binding in catalog.all():
+        broker.register(
+            binding.manifest,
+            binding.executor,
+            result_adapter=binding.result_adapter,
+        )
+    broker.catalog = catalog
+
+
+def native_manifest_for(spec: ToolSpec, session: NativeBrokerSession) -> ToolManifest:
+    binding = session.catalog.get(spec.name)
+    if binding is None:
+        raise RuntimeFault(
+            "TOOL_NOT_REGISTERED", f"tool is not registered: {spec.name}",
+        )
+    if (
+        binding.description != spec.description
+        or binding.parameter_schema() != spec.parameters
+        or binding.result_adapter is not _native_result_adapter(spec.result_protocol)
+        or binding.implementation != spec.implementation
+        or binding.manifest.exclusive_resources != spec.exclusive_resources
+    ):
+        raise RuntimeFault(
+            "TOOL_CATALOG_MISMATCH",
+            "Native ToolSpec disagrees with the activated ToolCatalog",
+            500,
+            {"tool_name": spec.name},
+        )
+    return binding.manifest
+
+
+async def prepare_native_batch(
+    session: NativeBrokerSession,
+    registry: ToolRegistry,
+    calls: tuple[Any, ...] | list[Any],
+) -> tuple[Any, ...]:
+    """Prepare a full Native batch and publish its slots only after commit.
+
+    ``calls`` are ``ToolBatchCall`` values.  Callers omit manifest_override;
+    this boundary derives the frozen manifest from the exact registry spec.
+    """
+
+    from agent.runtime.application.tool_broker import ToolBatchCall  # noqa: PLC0415
+
+    prepared_calls: list[ToolBatchCall] = []
+    for call in calls:
+        if not isinstance(call, ToolBatchCall):
+            raise TypeError("Native batch calls must be ToolBatchCall values")
+        spec = registry.get(call.tool_name)
+        if spec is None:
+            raise RuntimeFault(
+                "TOOL_NOT_REGISTERED", f"tool is not registered: {call.tool_name}",
+            )
+        prepared_calls.append(ToolBatchCall(
+            logical_key=call.logical_key,
+            tool_name=call.tool_name,
+            arguments=call.arguments,
+            framework_call_id=call.framework_call_id,
+            manifest_override=native_manifest_for(spec, session),
+        ))
+    async with session.prepare_lock:
+        prepared = await session.tool_broker.prepare_batch(
+            run_id=session.run_id,
+            parent_activity_id=session.activity_id,
+            fencing_token=session.fencing_token,
+            calls=tuple(prepared_calls),
+        )
+        # Make the entire batch visible to execution only after Broker's atomic
+        # transaction succeeded.  A mismatch never publishes a partial map.
+        session.prepared_by_logical_key.update({
+            item.logical_key: item for item in prepared
+        })
+        if session.early_settlement_capacity is None:
+            begin_native_settlement_batch(
+                session,
+                [item.logical_key for item in prepared],
+            )
+        else:
+            session.settlement_turn_by_logical_key.update({
+                item.logical_key: _native_early_turn(
+                    session,
+                    item.logical_key,
+                    session.early_settlement_order_by_turn,
+                )
+                for item in prepared
+            })
+    return prepared
+
+
+def begin_native_settlement_batch(
+    session: NativeBrokerSession,
+    calls_or_logical_keys: list[Any] | tuple[Any, ...],
+) -> None:
+    """Order settlement for exactly the Native calls executed in this pass.
+
+    Recovery prepares the complete historical batch but may execute only its
+    still-unpaired suffix, so the adapter calls this again with that subset
+    immediately before creating its concurrent tasks.
+    """
+
+    from agent.runtime.application.tool_broker import ToolSettlementOrder  # noqa: PLC0415
+
+    logical_keys = [
+        str(item) if isinstance(item, str) else str(item.logical_key)
+        for item in calls_or_logical_keys
+    ]
+    if not logical_keys:
+        session.settlement_turn_by_logical_key.clear()
+        return
+    if len(logical_keys) != len(set(logical_keys)):
+        raise RuntimeFault(
+            "TOOL_REPLAY_MISMATCH",
+            "Native batch contains duplicate logical ToolCall slots",
+            409,
+        )
+    missing = [
+        logical_key for logical_key in logical_keys
+        if logical_key not in session.prepared_by_logical_key
+    ]
+    if missing:
+        raise RuntimeFault(
+            "TOOL_BATCH_NOT_PREPARED",
+            "Native execution cannot start before the complete batch is prepared",
+            409,
+            {"logical_keys": missing},
+        )
+    order = ToolSettlementOrder(len(logical_keys))
+    session.settlement_turn_by_logical_key.clear()
+    session.settlement_turn_by_logical_key.update({
+        logical_key: order.turn(ordinal)
+        for ordinal, logical_key in enumerate(logical_keys)
+    })
+
+
+def _native_early_turn(
+    session: NativeBrokerSession,
+    logical_key: str,
+    orders: dict[int, Any],
+) -> Any | None:
+    """Return the experimental turn gate for one streamed stable slot.
+
+    Early calls are a contiguous safe prefix, but they become visible one at a
+    time before the provider closes the batch.  Allocate a bounded order per
+    model turn so external work may overlap while every durable settlement
+    still waits for the model call ordinal.
+    """
+
+    capacity = session.early_settlement_capacity
+    if capacity is None:
+        return None
+    match = re.fullmatch(r"native:turn:(\d+):call:(\d+)", logical_key)
+    if match is None:
+        raise RuntimeFault(
+            "TOOL_REPLAY_MISMATCH",
+            "experimental Native dispatch requires a canonical stable slot",
+            409,
+            {"logical_key": logical_key},
+        )
+    turn_ordinal = int(match.group(1))
+    call_ordinal = int(match.group(2))
+    if call_ordinal >= capacity:
+        raise RuntimeFault(
+            "TOOL_CALL_LIMIT_EXCEEDED",
+            "experimental Native ToolCall ordinal exceeds the frozen turn limit",
+            409,
+            {"logical_key": logical_key, "limit": capacity},
+        )
+    from agent.runtime.application.tool_broker import ToolSettlementOrder  # noqa: PLC0415
+
+    order = orders.get(turn_ordinal)
+    if order is None:
+        order = ToolSettlementOrder(capacity)
+        orders[turn_ordinal] = order
+    return order.turn(call_ordinal)
+
+
+def _native_early_settlement_turn(
+    session: NativeBrokerSession,
+    logical_key: str,
+) -> Any | None:
+    return _native_early_turn(
+        session,
+        logical_key,
+        session.early_settlement_order_by_turn,
+    )
+
+
+def _native_early_prepare_turn(
+    session: NativeBrokerSession,
+    logical_key: str,
+) -> Any | None:
+    return _native_early_turn(
+        session,
+        logical_key,
+        session.early_prepare_order_by_turn,
+    )
+
+
 class AdkToolBatch:
     """Bridge ADK's aggregated model callback to durable ToolCall slots.
 
@@ -71,16 +396,22 @@ class AdkToolBatch:
     its already prepared slot.
     """
 
-    def __init__(self, rc: RunContext) -> None:
+    def __init__(self, rc: RunContext, *, catalog: ToolCatalog | None = None) -> None:
         if rc.tool_broker is None:
             raise ValueError("ADK ToolCall batching requires a ToolBroker")
         self._rc = rc
+        self._catalog = catalog or getattr(rc.tool_broker, "catalog", None)
         self._manifests: dict[str, ToolManifest] = {}
         self._active_slots: dict[str, tuple[str, str, str]] = {}
         self._prepared_turns: dict[int, tuple[tuple[str, str, str], ...]] = {}
         self._lock = asyncio.Lock()
 
     def register(self, manifest: ToolManifest) -> None:
+        if self._catalog is not None:
+            binding = self._catalog.get(manifest.name)
+            if binding is None:
+                raise ValueError(f"ADK tool is absent from ToolCatalog: {manifest.name}")
+            manifest = binding.manifest
         prior = self._manifests.get(manifest.name)
         if prior is not None and prior != manifest:
             raise ValueError(f"duplicate ADK tool manifest: {manifest.name}")
@@ -164,12 +495,22 @@ class AdkToolBatch:
             # becomes committed before any TOOL_CALL_COMMITTED event appears.
             if self._rc.runtime_io is not None:
                 await self._rc.runtime_io.force_flush()
-            await self._rc.tool_broker.store.prepare_tool_execution_batch(
+            from agent.runtime.application.tool_broker import ToolBatchCall  # noqa: PLC0415
+
+            await self._rc.tool_broker.prepare_batch(
                 run_id=self._rc.run_id,
                 parent_activity_id=self._rc.activity_id,
                 fencing_token=self._rc.fencing_token,
-                preparations=preparations,
-                now_ms=self._rc.tool_broker.clock.now_ms(),
+                calls=tuple(
+                    ToolBatchCall(
+                        logical_key=item.logical_key,
+                        tool_name=item.tool_name,
+                        arguments=item.request,
+                        framework_call_id=item.framework_call_id,
+                        manifest_override=self._manifests[item.tool_name],
+                    )
+                    for item in preparations
+                ),
             )
             # Publish correlation only after the whole SQLite transaction
             # commits.  Tool callbacks can never observe a half-prepared batch.
@@ -212,6 +553,7 @@ class BrokeredAdkTool(BaseTool):
         rc: RunContext,
         batch: AdkToolBatch,
         manifest: ToolManifest,
+        result_adapter: ToolResultAdapter,
     ) -> None:
         super().__init__(
             name=tool.name,
@@ -222,6 +564,7 @@ class BrokeredAdkTool(BaseTool):
         self._rc = rc
         self._batch = batch
         self._manifest = manifest
+        self._result_adapter = result_adapter
 
     def _get_declaration(self):
         return self._tool._get_declaration()  # noqa: SLF001 - delegate an ADK tool contract
@@ -250,6 +593,7 @@ class BrokeredAdkTool(BaseTool):
             deadline_at_ms=self._rc.deadline_at_ms,
             manifest_override=self._manifest,
             executor_override=invoke,
+            result_adapter_override=self._result_adapter,
         )
         if self.name == "update_task_plan":
             await _persist_adk_plan(self._rc, result)
@@ -274,41 +618,113 @@ def broker_adk_tools(
             concurrency_safe=bool(getattr(base, "concurrency_safe", False)),
             exclusive_resources=tuple(getattr(base, "exclusive_resources", ()) or ()),
         )
+        catalog = getattr(rc.tool_broker, "catalog", None)
+        if catalog is not None:
+            binding = catalog.get(base.name)
+            if binding is None:
+                raise ValueError(f"ADK tool is absent from ToolCatalog: {base.name}")
+            # The catalog was built from this exact post-discovery surface.
+            # Re-check the public declaration here so an adapter cannot drift.
+            from agent.engine.native_loop.tools import (
+                from_adk_tool,
+                from_function,
+            )  # noqa: PLC0415
+            projected = (
+                from_function(tool)
+                if callable(tool) and not hasattr(tool, "run_async")
+                else from_adk_tool(tool)
+            )
+            if (
+                binding.description != projected.description
+                or binding.parameter_schema() != projected.parameters
+            ):
+                raise ValueError(f"ADK tool declaration disagrees with catalog: {base.name}")
+            manifest = binding.manifest
         batch.register(manifest)
-        out.append(BrokeredAdkTool(base, rc, batch, manifest))
+        out.append(BrokeredAdkTool(
+            base, rc, batch, manifest, adapter_for_tool(base),
+        ))
     return out
 
 
-def broker_native_registry(registry: ToolRegistry, rc: RunContext) -> ToolRegistry:
-    if rc.tool_broker is None:
-        return registry
+def build_brokered_native_registry(
+    registry: ToolRegistry,
+    session: NativeBrokerSession,
+) -> ToolRegistry:
+    """Bind the Runtime-independent Native registry to durable Broker slots."""
+
+    if session.tool_broker is None:
+        raise ValueError("Native Runtime execution requires a ToolBroker")
     wrapped: list[ToolSpec] = []
     for original in registry.all():
-        manifest = manifest_for(
-            original.name, rc,
-            concurrency_safe=original.concurrency_safe,
-            exclusive_resources=original.exclusive_resources,
-        )
+        manifest = native_manifest_for(original, session)
+        result_adapter = _native_result_adapter(original.result_protocol)
 
         async def run(
             args: dict[str, Any], context: NativeToolContext, *, spec: ToolSpec = original,
             tool_manifest: ToolManifest = manifest,
+            adapter: ToolResultAdapter = result_adapter,
         ) -> Any:
             async def invoke(arguments: dict[str, Any], broker_context: Any) -> Any:
                 return await _with_tool_request_context(
                     broker_context, spec.run(arguments, context),
                 )
 
-            result = await rc.tool_broker.execute(
-                run_id=rc.run_id,
-                parent_activity_id=rc.activity_id,
-                fencing_token=getattr(rc, "fencing_token", 0),
-                logical_key=context.logical_key or f"native:call:{context.function_call_id}",
-                tool_name=spec.name,
-                arguments=args,
-                deadline_at_ms=rc.deadline_at_ms,
+            logical_key = context.logical_key or f"native:call:{context.function_call_id}"
+            prepared = session.prepared_by_logical_key.get(logical_key)
+            if prepared is not None and (
+                prepared.tool_name != spec.name
+                or prepared.request_digest != sha256_json(args)
+            ):
+                raise RuntimeFault(
+                    "TOOL_REPLAY_MISMATCH",
+                    "Native stable slot changed tool name or arguments",
+                    409,
+                    {"logical_key": logical_key},
+                )
+            if prepared is None:
+                if session.early_settlement_capacity is None:
+                    raise RuntimeFault(
+                        "TOOL_BATCH_NOT_PREPARED",
+                        "Native execution cannot start before batch PREPARE",
+                        409,
+                        {"logical_key": logical_key},
+                    )
+                prepare_turn = _native_early_prepare_turn(session, logical_key)
+                assert prepare_turn is not None
+                try:
+                    await prepare_turn.acquire()
+                    from agent.runtime.application.tool_broker import (  # noqa: PLC0415
+                        ToolBatchCall,
+                    )
+                    prepared = (
+                        await prepare_native_batch(
+                            session,
+                            registry,
+                            [ToolBatchCall(
+                                logical_key=logical_key,
+                                tool_name=spec.name,
+                                arguments=args,
+                                framework_call_id=context.function_call_id,
+                            )],
+                        )
+                    )[0]
+                    prepare_turn.complete()
+                except BaseException as exc:
+                    prepare_turn.abort(exc)
+                    raise
+            result = await session.tool_broker.execute_prepared(
+                prepared=prepared,
+                parent_activity_id=session.activity_id,
+                fencing_token=session.fencing_token,
+                deadline_at_ms=session.deadline_at_ms,
                 manifest_override=tool_manifest,
                 executor_override=invoke,
+                result_adapter_override=adapter,
+                settlement_turn=session.settlement_turn_by_logical_key.pop(
+                    logical_key,
+                    None,
+                ),
             )
             if spec.name == "update_task_plan":
                 _restore_native_plan_mirror(context, result)
@@ -321,8 +737,23 @@ def broker_native_registry(registry: ToolRegistry, rc: RunContext) -> ToolRegist
             run=run,
             concurrency_safe=manifest.concurrency_safe,
             exclusive_resources=original.exclusive_resources,
+            result_protocol=original.result_protocol,
+            implementation=original.implementation,
         ))
     return ToolRegistry(wrapped)
+
+
+def _native_result_adapter(protocol: str) -> ToolResultAdapter:
+    adapters = {
+        "plain": plain_json_output,
+        "skill-center": skill_center_output,
+        "claude-skill": claude_skill_output,
+        "a2a": a2a_output,
+    }
+    try:
+        return adapters[protocol]
+    except KeyError as exc:
+        raise ValueError(f"unsupported Native tool result protocol: {protocol}") from exc
 
 
 def _model_result(result: ToolResultEnvelope) -> Any:
@@ -418,7 +849,6 @@ async def _persist_adk_plan(rc: RunContext, result: ToolResultEnvelope) -> None:
         if not isinstance(state, WorkingState):
             state = WorkingState(
                 goal="",
-                release_fingerprint=rc.release_fingerprint,
             )
         if state.model_plan == model_plan:
             return

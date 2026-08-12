@@ -39,12 +39,15 @@ API 返回 `202 Accepted` 只表示 Run 已提交到 `runtime.db`。HTTP 或 SSE
 - `Idempotency-Key` 在 `(principal_id, agent_id)` 范围内唯一；相同 key 与相同请求返回原 Run，不同请求返回 `409 IDEMPOTENCY_KEY_REUSE`。
 - 同一 conversation 同时最多一个非终态 Run；真正的新 Run 冲突返回 `409 CONVERSATION_BUSY`。
 - Worker 用 Activity lease、revision 和 fencing token 防止过期执行者迟到提交；进程丢失触发恢复，不直接把 Run 判为失败。
+- Worker 启动时原子激活三份 immutable release；存在不同 fingerprint 的非终态 Run 时拒绝切换。claim 必须同时精确匹配 `(engine, release_fingerprint)`，不匹配的 Worker 不能领取 Run，Run 由绝对 deadline 最终收口。
 - Canonical Event 是 append-only；同 Run 的 `seq` 单调，只有 committed event 能被 SSE 读取。
 - 最终 assistant message、citation 和成功 terminal 原子提交；部分 delta 即使可见，也不会自动进入后续 conversation history。
 - Tool Broker 区分 `READ_ONLY / IDEMPOTENT_EFFECT / NON_IDEMPOTENT_EFFECT / UNKNOWN_EFFECT`。副作用 ACK 不明时保留 `UNKNOWN` 并 reconcile/manual，不能盲目重复。
+- Worker 只在工具目录完整、JSON Schema/effect policy 合法且无重名后计算 release；Native 的所有生产工具调用必须经过 Tool Broker 的稳定 slot 与 effect 账本。
+- builtin、Skill、Claude Skill 和 A2A 在各自边界产生 strict `ToolExecutionOutput`；Broker 核心不解析协议别名或补造 Evidence provenance。Evidence 缺少/矛盾时以 `EVIDENCE_CONTRACT_INVALID` fail-closed。
 - Artifact 以 SHA-256 内容寻址，写入采用临时文件、fsync、原子 rename；读取前校验 digest。非图片附件先给模型 8KiB preview，后续通过有界 `read_artifact` 读取；图片从已校验 CAS 物化为 attempt-local 多模态输入。rename 后 metadata 事务失败留下的 blob 会在超过 24 小时且仍无引用时由 Worker 清理。
 - 首版 Delivery 只承诺 committed/AVAILABLE + 客户端 cursor；没有服务端投递确认，也不保存服务端观看位置。
-- Trace 是诊断事实，关闭或丢失不影响恢复。
+- Trace 是诊断事实，关闭或丢失不影响恢复；payload 默认 `summary`，`full` 只用于受控本机排障。
 
 ## 三代引擎：每个 Run 选择
 
@@ -54,11 +57,15 @@ CreateRun 的 `engine` 必填，可选：
 |---|---|---|---|
 | `plan_execute` | decision plan + execution | 前置规划、过程可解释 | decision plan/整个 ADK attempt；不承诺模型调用中途确定性重放 |
 | `agent_loop` | Google ADK `BaseLlmFlow` | ADK 驱动 Tool-Use Loop，插件与 LiteLlm 加固 | 整个 ADK invocation；不承诺模型调用中途确定性重放 |
-| `native_loop` | 自研 `while` | 只读工具分批并发、流式工具执行、上下文压缩 | `native-kernel-v1` checkpoint：model request、完整 ToolCall batch、每个 ToolResult、next-turn/completed |
+| `native_loop` | 直接 `NativeLoopAdapter` | 模型正文流式、工具进度流式、完整 batch 后受控只读并发、上下文压缩 | 唯一 strict current checkpoint codec：model request/response、ToolCall batch、每个 ToolResult、next-turn/completed |
 
 三者共享 RuntimeEnvelope、Canonical Event、Tool/Skill/RAG 下游与公开 SSE 契约。`SUB_AGENT_ENGINE` 取 `auto` 时跟随当前 Run 的 engine（`plan_execute` 映射到 ADK 子 Runner）；远端 A2A 使用自身 ADK，不受该设置影响。
 
-`native_loop` 从最后 committed checkpoint 恢复；崩溃发生在半个 model stream 时会重放该 model slot，已提交的 ToolExecution 由稳定 slot 和 Tool Broker 复用。这不是 provider token 级或逐字节流重放承诺。`/reliability-demo` 在通用 kernel checkpoint 之上增加确定性的 WAITING_INPUT、signal 和独立幂等副作用纵切。
+`native_loop` 直接实现 `EngineAdapter.execute(request, RuntimeIO)`，不经过 ADK event merge 队列。它从最后 committed checkpoint 恢复；崩溃发生在半个 model stream 时创建新 generation 重做该 model slot，已提交的 ToolExecution 由稳定 slot 和 Tool Broker 复用。这不是 provider token 级或逐字节流重放承诺。
+
+工具提前派发默认为 `off`：模型流显式以 `tool_calls` 完整结束、整批校验并 PREPARE 后才允许执行。这不会关闭模型正文流式或 Skill/Claude Skill 运行进度流式。`experimental_heuristic` 仅供显式可靠性实验，仍强制逐项稳定 slot PREPARE、有界 worker 与 ordinal settlement，不在默认生产保证内；当前 provider 不支持 `provider_block_complete`。
+
+Native 硬限默认为：并发 10，ToolCall 每轮 64/每 Run 256，单调用/单 batch 参数 64/256KiB，每 generation 模型输出 1MiB，checkpoint 2MiB，ToolCatalog 1MiB，单 Skill event 64KiB/每 Run 2000 条且总计 8MiB。体积按 UTF-8 bytes 计算；模型调用硬上限为 `MAX_LOOP_ITERS + 2`，默认 10。
 
 ## 快速开始
 
@@ -129,7 +136,7 @@ curl -N -H 'Last-Event-ID: 17' \
 SSE 的 `id` 是 opaque、单调 cursor；visibility 过滤可能产生跳号。公开投影包括：
 
 ```text
-text · tool_call · tool_result · plan_step · skill_event · citation
+text_start · text · tool_call · tool_result · plan_step · skill_event · citation
 user_message · assistant_message · run_status · activity_status · terminal
 ```
 
@@ -183,7 +190,7 @@ curl -X POST "http://127.0.0.1:8000/api/v1/runs/$RUN_ID/signals" \
 
 同一 Run 有多个 unresolved effect 时一次 signal 只解决一个，最后一个才恢复普通执行。cancel 已先提交时仍可发送相同的严格处置信号：Run 始终保持 `CANCEL_REQUESTED`，最后一个 effect 确定后才 `CANCELLED`；hook 中断/无结论会回到人工边界，绝不会借恢复重发原副作用。具体操作与排障见 [RUNBOOK](RUNBOOK.md)。
 
-通用 `native_loop` 会在 model request、完整 ToolCall batch、每个 ToolResult、next-turn/completed 边界写 kernel checkpoint；大 `read_artifact` 切片不复制进 checkpoint，而是依靠 Artifact 与已提交 ToolExecution 在恢复时重新物化。确定性长任务演示以 `/reliability-demo` 开头：前两次只读 lookup 失败后恢复，checkpoint 进入 `WAITING_INPUT`，signal 后以稳定幂等 key 在独立 `effects.db` 创建 demo task，并把大结果保存为 Artifact。
+通用 `native_loop` 会在 model request/response、完整 ToolCall batch、每个 ToolResult、next-turn/completed 边界写 strict checkpoint；大 ToolResult 不复制进 checkpoint，而保存 `LedgerToolResultRef`，恢复时在所有历史位置通过 Tool Broker/Artifact 重新物化。确定性 WAITING_INPUT 与幂等外部副作用纵切只保留为 reliability test fixture，生产 Worker 没有特殊 prompt 路由。
 
 ## ARAG：durable index job
 
@@ -213,10 +220,9 @@ ARAG 会周期校验 active chunk 的 embedding model、维度与 checksum。向
 | `local_storage/arag/rag.db` | Document/version/chunk/index-job 权威及可重算 embedding rows |
 | `local_storage/arag/documents/sha256/` | 原始文档内容寻址字节 |
 | `local_storage/artifacts/sha256/` | Runtime Artifact 完整字节 |
-| `local_storage/demo_effects/effects.db` | 模拟外部副作用系统，故意不与 Runtime 做跨库原子事务 |
 | `local_storage/traces/` | 诊断轨迹，不参与恢复 |
 
-Runtime SQLite 每连接启用 WAL、`synchronous=FULL`、foreign keys 和 busy timeout；数据库只支持当前 schema，identity（版本/checksum）不符会 fail-fast 并提示显式删库重建。该方案只承诺本机正常进程崩溃恢复，不承诺磁盘损坏、主机丢失、多机 HA 或共享盘部署。
+Runtime SQLite 每连接启用 WAL、`synchronous=FULL`、foreign keys 和 busy timeout；Runtime 与 ARAG 数据库只支持各自的单一 current `schema.sql`，`schema_meta.schema_digest` 是完整文件字节的 SHA-256。非空库 digest 不符会以 `CURRENT_SCHEMA_MISMATCH` fail-fast 并提示显式删库重建，没有 migration/upgrader/兼容 codec。该方案只承诺本机正常进程崩溃恢复，不承诺磁盘损坏、主机丢失、多机 HA 或共享盘部署。
 
 ## RAG、Skill 与 A2A
 

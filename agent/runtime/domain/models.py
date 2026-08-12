@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -26,7 +27,6 @@ class RunStatus(StrEnum):
     CANCELLED = "CANCELLED"
     TIMED_OUT = "TIMED_OUT"
     REJECTED = "REJECTED"
-    INCOMPATIBLE_RELEASE = "INCOMPATIBLE_RELEASE"
 
 
 TERMINAL_RUN_STATUSES = frozenset({
@@ -35,7 +35,6 @@ TERMINAL_RUN_STATUSES = frozenset({
     RunStatus.CANCELLED,
     RunStatus.TIMED_OUT,
     RunStatus.REJECTED,
-    RunStatus.INCOMPATIBLE_RELEASE,
 })
 
 
@@ -66,6 +65,7 @@ class EventType(StrEnum):
     USER_MESSAGE_COMMITTED = "USER_MESSAGE_COMMITTED"
     RUN_STATUS_CHANGED = "RUN_STATUS_CHANGED"
     ACTIVITY_STATUS_CHANGED = "ACTIVITY_STATUS_CHANGED"
+    OUTPUT_GENERATION_STARTED = "OUTPUT_GENERATION_STARTED"
     OUTPUT_DELTA_COMMITTED = "OUTPUT_DELTA_COMMITTED"
     MODEL_MESSAGE_COMMITTED = "MODEL_MESSAGE_COMMITTED"
     TOOL_CALL_COMMITTED = "TOOL_CALL_COMMITTED"
@@ -117,6 +117,14 @@ class ToolResultStatus(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+class RetrievalStatus(StrEnum):
+    HIT = "HIT"
+    MISS = "MISS"
+    DEGRADED = "DEGRADED"
+    DENIED = "DENIED"
+    ERROR = "ERROR"
+
+
 class EngineOutcomeKind(StrEnum):
     COMPLETED = "COMPLETED"
     RETRYABLE_FAILURE = "RETRYABLE_FAILURE"
@@ -128,7 +136,7 @@ class EngineOutcomeKind(StrEnum):
 class RuntimeEnvelope(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    schema_version: str = SCHEMA_VERSION
+    schema_version: Literal["1"] = SCHEMA_VERSION
     request_id: str
     client_request_id: str
     idempotency_key: str
@@ -158,14 +166,13 @@ class WorkingState(BaseModel):
     budget: dict[str, Any] = Field(default_factory=dict)
     artifact_refs: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
-    release_fingerprint: str
 
 
 class CanonicalEvent(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     event_id: str
-    schema_version: str = SCHEMA_VERSION
+    schema_version: Literal["1"] = SCHEMA_VERSION
     run_id: str
     turn_id: str
     activity_id: str | None = None
@@ -226,9 +233,6 @@ class CheckpointRecord(BaseModel):
     revision: int
     working_state: WorkingState
     engine_state: dict[str, Any] | None = None
-    engine_state_ref: str | None = None
-    release_fingerprint: str
-    schema_version: str = SCHEMA_VERSION
     created_at: int
 
 
@@ -241,6 +245,8 @@ class EngineOutcome(BaseModel):
 
 
 class ToolManifest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     name: str
     release_digest: str
     effect_class: ToolEffectClass
@@ -257,7 +263,7 @@ class ToolManifest(BaseModel):
 class ToolResultEnvelope(BaseModel):
     """Public v1 Tool result vocabulary, kept isomorphic to its frozen schema."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     status: ToolResultStatus
     preview: Any | None = None
@@ -279,6 +285,117 @@ class ToolResultEnvelope(BaseModel):
         if self.status is ToolResultStatus.NO_OUTPUT:
             if self.preview is not None or self.result_ref is not None:
                 raise ValueError("NO_OUTPUT forbids preview and result_ref")
+        require_json_value(self.preview, field="preview")
+        require_json_value(self.pending_input, field="pending_input")
+        return self
+
+
+class EvidenceItem(BaseModel):
+    """One fully attributable retrieval fact.
+
+    No field has a synthetic default.  The retrieval boundary must provide the
+    complete current provenance or reject the result before it reaches the
+    durable Tool ledger.
+    """
+
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+    n: int = Field(ge=1)
+    evidence_id: str = Field(min_length=1, max_length=255)
+    chunk_id: str = Field(min_length=1, max_length=255)
+    doc_id: str = Field(min_length=1, max_length=1024)
+    title: str = Field(max_length=8192)
+    document_id: str = Field(min_length=1, max_length=255)
+    document_version_id: str = Field(min_length=1, max_length=255)
+    index_version: str = Field(min_length=1, max_length=255)
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    dataset_id: str = Field(min_length=1, max_length=255)
+    scope: str = Field(min_length=1, max_length=255)
+    query_id: str = Field(min_length=1, max_length=255)
+    page: int | None = Field(default=None, ge=0)
+    span_start: int = Field(ge=0)
+    span_end: int = Field(ge=0)
+    content: str
+    score: float = Field(allow_inf_nan=False)
+    source: str = Field(min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_span(self) -> "EvidenceItem":
+        if self.span_end < self.span_start:
+            raise ValueError("span_end must be greater than or equal to span_start")
+        return self
+
+
+class EvidenceSet(BaseModel):
+    """Current-only, lossless Evidence Artifact contract."""
+
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+    schema_version: Literal["1"] = "1"
+    query: str = Field(max_length=32768)
+    query_id: str = Field(min_length=1, max_length=255)
+    run_id: str = Field(pattern=r"^run_[0-9a-f]{32}$")
+    activity_id: str = Field(pattern=r"^act_[0-9a-f]{32}$")
+    principal_id: str = Field(min_length=1, max_length=255)
+    dataset_scope: tuple[str, ...] = Field(min_length=1, max_length=256)
+    scope: str = Field(min_length=1, max_length=255)
+    retrieval_status: RetrievalStatus
+    rewrites: tuple[str, ...] = Field(max_length=64)
+    cost_ms: int | None = Field(default=None, ge=0)
+    degraded_reasons: tuple[str, ...] = Field(max_length=128)
+    tool_execution_id: str = Field(pattern=r"^tool_[0-9a-f]{32}$")
+    evidence: tuple[EvidenceItem, ...] = Field(max_length=10000)
+    retrieved_at: str = Field(pattern=r"Z$")
+
+    @model_validator(mode="after")
+    def validate_evidence_contract(self) -> "EvidenceSet":
+        if len(set(self.dataset_scope)) != len(self.dataset_scope):
+            raise ValueError("dataset_scope entries must be unique")
+        if any(not item for item in self.dataset_scope):
+            raise ValueError("dataset_scope entries must be non-empty")
+        if self.retrieval_status is RetrievalStatus.HIT and not self.evidence:
+            raise ValueError("HIT requires at least one EvidenceItem")
+        if self.retrieval_status in {
+            RetrievalStatus.MISS,
+            RetrievalStatus.DENIED,
+            RetrievalStatus.ERROR,
+        } and self.evidence:
+            raise ValueError(f"{self.retrieval_status.value} forbids EvidenceItem entries")
+        ordinals = [item.n for item in self.evidence]
+        if ordinals != list(range(1, len(ordinals) + 1)):
+            raise ValueError("EvidenceItem.n must be contiguous and ordered from 1")
+        evidence_ids = [item.evidence_id for item in self.evidence]
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValueError("evidence_id must be unique within one EvidenceSet")
+        for item in self.evidence:
+            if item.query_id != self.query_id:
+                raise ValueError("EvidenceItem query_id disagrees with EvidenceSet")
+            if item.dataset_id not in self.dataset_scope:
+                raise ValueError("EvidenceItem dataset_id is outside dataset_scope")
+            if item.scope != self.scope:
+                raise ValueError("EvidenceItem scope disagrees with EvidenceSet")
+        return self
+
+
+class ToolExecutionOutput(BaseModel):
+    """The only value accepted by ToolBroker's post-executor boundary."""
+
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+    result: ToolResultEnvelope
+    evidence: EvidenceSet | None = None
+
+    @model_validator(mode="after")
+    def validate_evidence_result(self) -> "ToolExecutionOutput":
+        if not isinstance(self.result, ToolResultEnvelope):
+            raise ValueError("result must be a ToolResultEnvelope")
+        # Re-check the raw values here as well.  Pydantic's ``model_copy`` and
+        # ``model_construct`` are intentionally able to bypass nested model
+        # validation; neither is allowed to weaken the Broker boundary.
+        require_json_value(self.result.preview, field="result.preview")
+        require_json_value(self.result.pending_input, field="result.pending_input")
+        if self.evidence is not None and self.result.status is not ToolResultStatus.SUCCESS:
+            raise ValueError("EvidenceSet requires a SUCCESS ToolResultEnvelope")
         return self
 
 
@@ -382,10 +499,9 @@ class ToolReconciliationPayload(BaseModel):
 
 
 class ReleaseManifest(BaseModel):
-    schema_version: str = SCHEMA_VERSION
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     engine: EngineName
-    runtime_contract: str = "canonical-runtime-v1"
-    engine_contract: str = "engine-adapter-v1"
     components: dict[str, str]
 
     def fingerprint(self) -> str:
@@ -401,15 +517,15 @@ RUN_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
     # conditional edge used only when the Store finds a DISPATCHED/UNKNOWN (or
     # reconciling/manual) ToolEffect: that uncertainty must be reconciled or
     # timed out before the Run may claim CANCELLED.
-    RunStatus.DISPATCH_PENDING: frozenset({RunStatus.RUNNING, RunStatus.CANCEL_REQUESTED, RunStatus.CANCELLED, RunStatus.TIMED_OUT, RunStatus.INCOMPATIBLE_RELEASE}),
-    RunStatus.RUNNING: frozenset({RunStatus.WAITING_RETRY, RunStatus.WAITING_INPUT, RunStatus.CANCEL_REQUESTED, RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.TIMED_OUT, RunStatus.INCOMPATIBLE_RELEASE}),
+    RunStatus.DISPATCH_PENDING: frozenset({RunStatus.RUNNING, RunStatus.CANCEL_REQUESTED, RunStatus.CANCELLED, RunStatus.TIMED_OUT}),
+    RunStatus.RUNNING: frozenset({RunStatus.WAITING_RETRY, RunStatus.WAITING_INPUT, RunStatus.CANCEL_REQUESTED, RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.TIMED_OUT}),
     RunStatus.WAITING_RETRY: frozenset({
         RunStatus.DISPATCH_PENDING, RunStatus.CANCEL_REQUESTED, RunStatus.CANCELLED,
-        RunStatus.TIMED_OUT, RunStatus.INCOMPATIBLE_RELEASE,
+        RunStatus.TIMED_OUT,
     }),
     RunStatus.WAITING_INPUT: frozenset({
         RunStatus.DISPATCH_PENDING, RunStatus.CANCEL_REQUESTED, RunStatus.CANCELLED,
-        RunStatus.TIMED_OUT, RunStatus.INCOMPATIBLE_RELEASE,
+        RunStatus.TIMED_OUT,
     }),
     RunStatus.CANCEL_REQUESTED: frozenset({RunStatus.CANCELLED, RunStatus.TIMED_OUT}),
     **{state: frozenset() for state in TERMINAL_RUN_STATUSES},
@@ -459,6 +575,67 @@ ACTIVITY_TRANSITIONS: dict[ActivityStatus, frozenset[ActivityStatus]] = {
     ActivityStatus.FAILED: frozenset(),
     ActivityStatus.CANCELLED: frozenset(),
 }
+
+
+def require_json_value(value: Any, *, field: str = "value") -> None:
+    """Reject Python-shaped values that are not strict, finite UTF-8 JSON.
+
+    ``json.dumps`` is deliberately permissive: it accepts tuples, integer
+    object keys and NaN/Infinity.  Tool results cross a durable protocol
+    boundary, so accepting those values would make their digest, SQLite JSON
+    and provider projection disagree.  Validate the actual Python shape before
+    any serializer has a chance to coerce it.
+    """
+
+    active: set[int] = set()
+
+    def walk(item: Any, path: str) -> None:
+        item_type = type(item)
+        if item is None or item_type in {bool, int}:
+            return
+        if item_type is float:
+            if not math.isfinite(item):
+                raise ValueError(f"{path} must contain only finite numbers")
+            return
+        if item_type is str:
+            try:
+                item.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ValueError(f"{path} must contain valid UTF-8 text") from exc
+            return
+        if item_type is list:
+            identity = id(item)
+            if identity in active:
+                raise ValueError(f"{path} contains a cycle")
+            active.add(identity)
+            try:
+                for index, nested in enumerate(item):
+                    walk(nested, f"{path}[{index}]")
+            finally:
+                active.remove(identity)
+            return
+        if item_type is dict:
+            identity = id(item)
+            if identity in active:
+                raise ValueError(f"{path} contains a cycle")
+            active.add(identity)
+            try:
+                for key, nested in item.items():
+                    if type(key) is not str:
+                        raise ValueError(f"{path} object keys must be strings")
+                    walk(key, f"{path}.<key>")
+                    walk(nested, f"{path}.{key}")
+            finally:
+                active.remove(identity)
+            return
+        raise ValueError(
+            f"{path} contains non-JSON value {item_type.__name__}"
+        )
+
+    try:
+        walk(value, field)
+    except RecursionError as exc:
+        raise ValueError(f"{field} exceeds JSON nesting capacity") from exc
 
 
 def canonical_json(value: Any) -> str:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.reliability.support.runtime_releases import activate_test_release
+
 import uuid
 
 import pytest
@@ -11,9 +13,8 @@ from agent.runtime.ports.store import EventDraft
 
 
 async def _run(store):
-    await store.register_release(
+    await activate_test_release(store,
         ReleaseManifest(engine="native_loop", components={"test": "events-v1"}),
-        activate=True,
     )
     return (await AdmissionService(store).create(
         CreateRunInput(

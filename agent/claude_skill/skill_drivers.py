@@ -145,11 +145,16 @@ async def drive_native(
             max_iters=max(1, max_llm_calls - 1),      # 留一轮给收尾输出
             hard_cap=max_llm_calls,
             max_tool_concurrency=settings.native_max_tool_concurrency,
-            streaming_tool_exec=settings.native_streaming_tool_exec,
+            early_tool_dispatch=settings.native_early_tool_dispatch,
             tool_result_max_chars=settings.native_tool_result_max_chars,
             context_window_tokens=settings.context_window_tokens,
             compact_buffer_tokens=settings.compact_buffer_tokens,
             compact_preserve_units=settings.compact_preserve_units,
+            max_tool_calls_per_turn=settings.native_max_tool_calls_per_turn,
+            max_tool_calls_per_run=settings.native_max_tool_calls_per_run,
+            max_tool_argument_bytes=settings.native_max_tool_argument_bytes,
+            max_tool_batch_argument_bytes=settings.native_max_tool_batch_argument_bytes,
+            max_model_output_bytes=settings.native_max_model_output_bytes,
         ),
     )
 

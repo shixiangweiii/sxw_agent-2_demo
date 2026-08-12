@@ -4,7 +4,7 @@ from agent.engine.native_loop import executor
 from agent.engine.native_loop.loop import LoopConfig, NativeLoop
 from agent.engine.native_loop.messages import Msg, ToolCall
 from agent.engine.native_loop.tools import ToolRegistry, ToolSpec
-from agent.runtime.adapters.legacy_engines import _broker_owns_tool_projection
+from agent.runtime.adapters.adk_engines import _broker_owns_tool_projection
 
 
 async def _never_run(_args, _context):
@@ -16,7 +16,7 @@ def _loop() -> NativeLoop:
         ToolSpec(
             name="known",
             description="known tool",
-            parameters={"type": "object"},
+            parameters={"type": "object", "properties": {}},
             run=_never_run,
         )
     ])
@@ -28,7 +28,7 @@ def _loop() -> NativeLoop:
             max_iters=1,
             hard_cap=2,
             max_tool_concurrency=1,
-            streaming_tool_exec=False,
+            early_tool_dispatch="off",
             tool_result_max_chars=1000,
             context_window_tokens=1000,
             compact_buffer_tokens=100,
@@ -71,4 +71,3 @@ def test_native_only_suppresses_tool_projections_owned_by_broker() -> None:
     assert not _broker_owns_tool_projection(unknown_call, broker)
     assert not _broker_owns_tool_projection(unknown_result, broker)
     assert not _broker_owns_tool_projection(valid_call, None)
-

@@ -6,6 +6,8 @@ from agent.skills.request_context import (
     set_request_context,
 )
 from agent.tools.knowledge_search import _retrieval_request
+from agent.runtime.domain.errors import RuntimeFault
+import pytest
 
 
 def test_retrieval_context_is_stable_and_carries_runtime_budget() -> None:
@@ -31,6 +33,7 @@ def test_retrieval_context_is_stable_and_carries_runtime_budget() -> None:
         "query_id": first["query_id"],
         "run_id": "run_123",
         "activity_id": "act_tool_123",
+        "idempotency_key": "tool_execution_123",
         "principal_id": "demo-user",
         "scope": "public",
         "datasets": ["default"],
@@ -39,10 +42,7 @@ def test_retrieval_context_is_stable_and_carries_runtime_budget() -> None:
     assert first["query_id"].startswith("qry_")
 
 
-def test_retrieval_context_has_safe_non_runtime_defaults() -> None:
-    assert _retrieval_request("hello") == {
-        "query": "hello",
-        "top_k": 6,
-        "scope": "public",
-        "datasets": ["default"],
-    }
+def test_retrieval_context_requires_runtime_tool_identity() -> None:
+    with pytest.raises(RuntimeFault) as raised:
+        _retrieval_request("hello")
+    assert raised.value.code == "EVIDENCE_CONTRACT_INVALID"

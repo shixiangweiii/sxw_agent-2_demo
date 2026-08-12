@@ -6,13 +6,16 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from agent.stream.event_converters import StreamEvent
 
 _queue_var: contextvars.ContextVar[Optional["asyncio.Queue[StreamEvent]"]] = contextvars.ContextVar(
     "skill_ui_queue", default=None,
 )
+_sink_var: contextvars.ContextVar[
+    Optional[Callable[[StreamEvent], Awaitable[None]]]
+] = contextvars.ContextVar("skill_ui_sink", default=None)
 
 
 def set_ui_queue(
@@ -29,8 +32,25 @@ def get_ui_queue() -> Optional["asyncio.Queue[StreamEvent]"]:
     return _queue_var.get()
 
 
+def set_ui_sink(
+    sink: Callable[[StreamEvent], Awaitable[None]],
+) -> contextvars.Token[Optional[Callable[[StreamEvent], Awaitable[None]]]]:
+    """Install Native's direct awaited Runtime sink for the current attempt."""
+    return _sink_var.set(sink)
+
+
+def reset_ui_sink(
+    token: contextvars.Token[Optional[Callable[[StreamEvent], Awaitable[None]]]],
+) -> None:
+    _sink_var.reset(token)
+
+
 async def emit_skill_event(event: StreamEvent) -> None:
-    """把技能展示帧推入当前请求的 UI 队列；队列未设置（未接引擎）则静默丢弃。"""
+    """Await Native's durable sink, else use the ADK attempt-local queue."""
+    sink = _sink_var.get()
+    if sink is not None:
+        await sink(event)
+        return
     queue = _queue_var.get()
     if queue is not None:
         await queue.put(event)

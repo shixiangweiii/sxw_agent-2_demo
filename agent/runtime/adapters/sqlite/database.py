@@ -10,12 +10,7 @@ from typing import AsyncIterator
 
 import aiosqlite
 
-from agent.runtime.domain.models import SCHEMA_VERSION
-from common.sqlite_schema import SchemaIdentityError, ensure_current_schema
-
-
-class SchemaCompatibilityError(RuntimeError):
-    pass
+from common.sqlite_schema import ensure_current_schema
 
 
 class RuntimeDatabase:
@@ -80,12 +75,9 @@ class RuntimeDatabase:
         try:
             await ensure_current_schema(
                 conn,
-                schema_sql=self._schema_path.read_text(encoding="utf-8"),
-                schema_version=SCHEMA_VERSION,
+                schema_bytes=self._schema_path.read_bytes(),
                 db_path=self.path,
                 label="runtime",
             )
-        except SchemaIdentityError as exc:
-            raise SchemaCompatibilityError(str(exc)) from exc
         finally:
             await conn.close()

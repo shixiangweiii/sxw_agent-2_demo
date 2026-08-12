@@ -24,7 +24,6 @@ async def load_skill_tools(
     url = f"{base_url}/api/v1/skills/runtime/list"
     request = SkillListRequest(tenantId=agent_uuid, snapshotTag=snapshot_tag)
     client = SkillCenterClient(settings)
-    tools: list[SelectedSkillTool] = []
     try:
         async with httpx.AsyncClient(timeout=settings.skill_center_timeout_ms / 1000.0) as http:
             resp = await http.post(
@@ -32,20 +31,26 @@ async def load_skill_tools(
                 headers={"X-Trace-Id": get_trace_id() or "", "Content-Type": "application/json"},
             )
             resp.raise_for_status()
-            data = resp.json()
-        result = SkillListResult(**data["result"])
-        for skill in result.skills:
-            for tool in skill.tools:
-                tools.append(SelectedSkillTool(
-                    skill_id=skill.skill_id,
-                    tool_name=tool.name,
-                    description=f"{skill.name}：{tool.description}",
-                    input_schema=tool.input_schema,
-                    client=client,
-                ))
-        log_kv(logger, logging.INFO, "SkillCatalog", "loaded",
-               count=len(tools), snapshot=snapshot_tag)
-    except Exception as exc:  # noqa: BLE001 - skill-center 不可用不阻断启动
+    except httpx.HTTPError as exc:
         log_kv(logger, logging.WARNING, "SkillCatalog", "load failed (skill-center down?), skip",
                error=type(exc).__name__)
+        return []
+
+    # A source that answered successfully is authoritative catalog data.  JSON,
+    # DTO, declaration, or duplicate failures must stop Worker startup instead
+    # of silently shrinking the tool surface.
+    data = resp.json()
+    result = SkillListResult.model_validate(data["result"])
+    tools: list[SelectedSkillTool] = []
+    for skill in result.skills:
+        for tool in skill.tools:
+            tools.append(SelectedSkillTool(
+                skill_id=skill.skill_id,
+                tool_name=tool.name,
+                description=f"{skill.name}：{tool.description}",
+                input_schema=tool.input_schema,
+                client=client,
+            ))
+    log_kv(logger, logging.INFO, "SkillCatalog", "loaded",
+           count=len(tools), snapshot=snapshot_tag)
     return tools

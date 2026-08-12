@@ -1,351 +1,118 @@
-# CommittedEventSink 锁机制与 tool_call 抢占锁的正确性分析
+# CommittedEventSink 锁机制与 ToolCall 边界的正确性分析
 
-本文档专门回答关于 `CommittedEventSink` 事件写入锁的三个核心问题：
+本文对照当前 `agent/runtime/application/events.py`、`agent/runtime/adapters/adk_engines.py`、`agent/engine/native_loop/engine.py` 与 Tool Broker/Store 实现，说明 `CommittedEventSink` 的锁到底保护什么，以及 ToolCall 为什么会形成 text 的提交边界。
 
-1. 事件不是按 SSE 流顺序走的吗，为什么会有并发？
-2. 既然 OpenAI / DashScope 返回的流本身有顺序，为什么还要加 `asyncio.Lock`？
-3. 如果 `tool_call` 先抢到锁，前面正在缓冲的 text delta 会不会丢、顺序会不会乱？
+## 1. 先记住两个不同的写入权威
 
-结论先行：**`tool_call` 先抢到锁不仅不会出错，反而正是设计想要的行为**。下面从源码出发逐层解释。
+当前实现不是“所有事件都进 Sink”：
 
-> 范围说明：注册工具的 Broker-owned `tool_call/tool_result` 归 ToolBroker/Store 所有，并由 ToolExecution 准备/结算事务提交；`LegacyEngineAdapter` 对这类草稿只 `force_flush()` 后跳过 `io.emit()`。对 `native_loop` 的 `tool_call` 而言，Broker prepare 发生在草稿被跳过、生成器恢复之后，不能笼统说成适配器看到草稿时“已经提交”。下文关于 Sink 抢锁和即时写库的分析，适用于真正进入 `CommittedEventSink.emit()` 的 engine-owned 事件；不把 Sink 锁当作 Broker 工具账本的并发控制。
+- engine-owned 事件：如 text、`OUTPUT_GENERATION_STARTED`、plan、Skill UI 帧和模型未进入 Broker 的合成工具错误，由 `RuntimeIO.emit()` 或 `RuntimeIO.checkpoint(..., events=...)` 提交。
+- Broker-owned 工具事实：正常 ToolCall 由 Store 的 batch PREPARE 事务同时写入 ToolExecution、Tool Activity 和 `TOOL_CALL_COMMITTED`；ToolResult 由结算事务同时更新账本并写入 `TOOL_RESULT_COMMITTED`。
 
----
+因此，Sink 锁不是 ToolExecution 的并发锁，也不能代替 SQLite 事务、fencing 或 checkpoint CAS。它只保护单个 attempt 内 Sink 自己的 text buffer 及 engine-owned 事件顺序。
 
-## 目录
+## 2. 为什么单条模型流仍然需要锁
 
-- [1. 常见困惑的澄清](#1-常见困惑的澄清)
-- [2. 并发从哪来：单条 Run 内部的三个写入源](#2-并发从哪来单条-run-内部的三个写入源)
-- [3. 锁到底在保护什么](#3-锁到底在保护什么)
-- [4. tool_call 先抢到锁的完整分析](#4-tool_call-先抢到锁的完整分析)
-- [5. 三种竞争情形的时序图](#5-三种竞争情形的时序图)
-- [6. 关键不变量](#6-关键不变量)
-- [7. 常见疑问](#7-常见疑问)
-- [8. 相关源码位置](#8-相关源码位置)
+provider chunk 本身有顺序，但 Sink 内部至少有两个可能竞争的协程：
 
----
+1. 主流程在 `emit_text()` 中追加 delta，达到 2 KiB 时立即 flush；
+2. 首个未达阈值的 delta 会启动延迟任务，默认 100 ms 后 flush。
 
-## 1. 常见困惑的澄清
+同时，主流程还可以进入 `emit()`、`force_flush()`、`checkpoint()` 或 `close()`。如果不共用一把 `asyncio.Lock`，就可能出现：
 
-### 1.1 “SSE 流”是只读投影，不是写入通道
+- timer 与主流程同时 join/clear buffer；
+- message/generation 标识与 text 被错配；
+- 非 text 事件已入库，它之前的 text 还留在内存。
 
-很多开发者第一反应是：前端订阅的 SSE 流是有顺序的，所以写入端也应该天然顺序执行。但仓库里 SSE 的逻辑只是从 `run_events` 表做 replay/tail（`after_seq` / `Last-Event-ID`）。
-
-`CommittedEventSink` 是**写入端**，它决定事件以什么顺序、什么粒度写进 `runtime.db`；SSE 只是读取已经落库的事件。因此并发问题不在 SSE，而在 engine 写入侧。
-
-### 1.2 OpenAI 返回的流有顺序，但 Runtime 内部做了“异步聚合”
-
-模型 provider 的流顺序是正确的：
+锁保护的共享状态是：
 
 ```text
-delta1 → delta2 → tool_call → delta3 → tool_result → ...
+_buffer / _buffer_bytes
+_buffer_message_id / _buffer_generation_id
+_timer
+以及“flush 旧 text → 写入新的 engine-owned 事件”的临界区
 ```
 
-但 Runtime 为了性能，对 `text` 做了特殊处理：
+`_full_text` 是 attempt 内的累计投影；Native 的最终语义不再依赖这个累加值，而由 `set_final_assistant(text, message_id, generation_id)` 显式指定。
 
-- **text delta**：先攒到 buffer，按 `100ms / 2KiB` 聚合后再写库；
-- **进入 Sink 的非 text 事件（engine-owned tool_call/tool_result、plan_step、error 等）**：立即写库；Broker-owned 工具事件由 ToolBroker/Store 负责提交。
+## 3. `emit()` 的临界区
 
-这就引入了一个时间差：`delta1` 和 `delta2` 可能被合并成一条 `OUTPUT_DELTA_COMMITTED`，而进入 Sink 的 engine-owned `tool_call` 必须在它们之后落库。**聚合策略 + 立即提交策略之间需要同步**，这就是锁存在的原因。
-
----
-
-## 2. 并发从哪来：单条 Run 内部的三个写入源
-
-`CommittedEventSink` 内部有三个可能同时尝试写事件的协程入口，它们都共用同一个 `asyncio.Lock`。
-
-### 2.1 主事件流：模型源源不断地产生事件
-
-位置：`agent/runtime/application/events.py:130`
-
-```python
-async def emit(self, event_type: str, payload: dict[str, Any]) -> None:
-    ...
-    if event_type in {"text", EventType.OUTPUT_DELTA_COMMITTED}:
-        await self.emit_text(str(payload.get("delta", "")))
-        return
-    async with self._lock:
-        await self._flush_locked()
-        ...
-```
-
-引擎产生 engine-owned `tool_call`、`tool_result`、`error`、`plan_step` 等非 text 事件时，会进入 `emit()` 的锁保护分支；Broker-owned 工具事件在适配器层被跳过。
-
-### 2.2 text 聚合后台定时器：`_flush_after_delay`
-
-位置：`agent/runtime/application/events.py:211-221`
-
-```python
-async def _flush_after_delay(self) -> None:
-    try:
-        await asyncio.sleep(self.flush_ms / 1000)
-        async with self._lock:
-            self._timer = None
-            await self._flush_locked()
-    except asyncio.CancelledError:
-        raise
-    except BaseException as exc:
-        self._background_error = exc
-```
-
-`emit_text()` 在 text 未达 `flush_bytes` 时会创建一个后台 Task，100ms 后自动触发 flush。这个 Task 与主事件流是**并行**的。
-
-### 2.3 text 达到阈值时的立即 flush
-
-位置：`agent/runtime/application/events.py:180-192`
-
-```python
-async def emit_text(self, delta: str) -> None:
-    ...
-    async with self._lock:
-        self._buffer.append(delta)
-        self._buffer_bytes += len(delta.encode("utf-8"))
-        if self._buffer_bytes >= self.flush_bytes:
-            await self._flush_locked()
-        elif self._timer is None:
-            self._timer = asyncio.create_task(self._flush_after_delay())
-```
-
-当单个 text delta 使 buffer 超过 2KiB 时，主流程会立即 flush，不需要等 timer。
-
----
-
-## 3. 锁到底在保护什么
-
-`asyncio.Lock` 保护的是两类东西：
-
-### 3.1 可变状态的一致性
-
-- `_buffer`：待聚合的 text delta 列表
-- `_buffer_bytes`：当前 buffer 的字节数
-- `_timer`：后台 flush Task 的引用
-- `_full_text`：完整回答的累积（用于最终拼接）
-
-如果没有锁，下面这种情况就可能发生：
-
-```text
-主协程正在 _flush_locked() 里执行 "".join(self._buffer)
-后台 timer 也刚好醒来执行 _flush_locked()
-两者同时看到 buffer=["你好", "，我"]
-两者都生成 OUTPUT_DELTA_COMMITTED "你好，我"
-两者都 clear buffer
-结果：同一段文本被提交两次，seq 推进混乱。
-```
-
-### 3.2 事件落库顺序
-
-更重要的是，锁保证了**语义顺序**：
-
-> **`tool_call` 落库之前，所有已经产生的 text delta 必须先落库。**
-
-看 `emit()` 的锁内逻辑：
+当事件不是 text 时，核心顺序是：
 
 ```python
 async with self._lock:
-    await self._flush_locked()          # 先把 text buffer 落库
-    await self.store.append_events(...) # 再写 tool_call
+    await self._flush_locked()
+    # 然后处理 skill_event / error / citation / canonical event
 ```
 
-这是“切换 message/Tool/checkpoint/terminal 前 flush”原则的具体实现。不加锁的话，`tool_call` 可能在积攒的 text 还没落库时就先写进去了，导致 SSE 客户端看到：
+这保证：一旦一个非 text 事件在 Sink 中提交，所有在它之前已交给 Sink 的 text 必定已先提交。
+
+不同分支的行为不同：
+
+- `skill_event` 先核对持久化配额，再写 `SKILL_UI_FRAME_COMMITTED`；
+- `error` 只写 INTERNAL 诊断事件，不决定 Run 终态；
+- `citation` 只收集 attempt-local 投影，最终 citation 由 Store 从已提交 Evidence 派生；
+- 其他 engine-owned 事件映射为 Canonical Event 并调用 `append_events()`。
+
+## 4. ToolCall “抢到锁”的准确理解
+
+假设逻辑顺序是：
 
 ```text
-TOOL_CALL_COMMITTED search
-OUTPUT_DELTA_COMMITTED "你好，我"
+text("A") → ToolCall(search) → text("B")
 ```
 
-这违反了模型输出的因果顺序。
-
----
-
-## 4. tool_call 先抢到锁的完整分析
-
-### 4.1 抢到锁后会发生什么
-
-位置：`agent/runtime/application/events.py:142-178`
-
-```python
-async with self._lock:                       # tool_call 拿到锁
-    await self._flush_locked()               # 先把 buffer 里已有的 text 刷到 DB
-    ...
-    await self.store.append_events(          # 再写 tool_call
-        self.run_id,
-        [EventDraft(EventType.TOOL_CALL_COMMITTED, dict(payload), ...)],
-        ...
-    )
-```
-
-`tool_call` 抢到锁后做的第一件事就是**强制 flush text buffer**，然后才写 `TOOL_CALL_COMMITTED`。
-
-### 4.2 这会不会导致 text 丢失？
-
-**不会。** `_flush_locked()` 只是把当前 buffer 里已有的 text 提交到 DB；buffer 被清空后，后续到达的 text delta 会 append 到新的 buffer，等待下一次 flush。
-
-同时，`emit_text()` 内部的 `async with self._lock` 会让晚到的 text delta 在锁外等待。等 `tool_call` 写完释放锁后，它们才能进入 buffer。因此：
-
-- `tool_call` 之前的 text → 被 `_flush_locked()` 带走；
-- `tool_call` 之后的 text → 在锁外等待，进入新 buffer。
-
-分界线就是 `tool_call` 这个事件本身，天然正确。
-
-### 4.3 这会不会导致顺序错乱？
-
-**不会，反而保证顺序正确。**
-
-假设模型实际输出顺序是：
+如果这个 ToolCall 是真正进入 Sink 的 engine-owned 事件，则锁内顺序为：
 
 ```text
-"你好" → "，我" → tool_call("search") → "结果" → "如下"
+buffer("A")
+  → ToolCall 获取锁
+  → flush OUTPUT_DELTA_COMMITTED("A")
+  → 提交 ToolCall 事件
+  → 释放锁
+  → text("B") 进入新 buffer
 ```
 
-如果 `tool_call` 先抢到锁，DB 里的事件顺序变成：
+不会丢 text，只会让原本可能合并的一段 text 在语义边界处提前结束。新 delta 不能在“flush A → 写 ToolCall”之间插入，因为 `emit_text()` 也必须获取同一把锁。
 
-```text
-OUTPUT_DELTA_COMMITTED "你好，我"      ← 被 tool_call 强制 flush
-TOOL_CALL_COMMITTED search
-OUTPUT_DELTA_COMMITTED "结果如下"      ← 后续 text 继续聚合后 flush
-```
+但生产路径中的正常工具事件属于 Broker：
 
-完全符合模型语义。
+- ADK 两引擎在 Broker PREPARE 之前显式 `force_flush()`，之后 Adapter 不会重复 emit Broker 投影；
+- Native 每个 text 帧都等待 `io.emit()` 并紧接着 `force_flush()`，模型完整结束后又先提交 `MODEL_RESPONSE_COMMITTED` checkpoint，再进入 Broker batch PREPARE。
 
-### 4.4 唯一的“副作用”
+所以对 Broker-owned ToolCall，正确的因果屏障是“先 flush/checkpoint，再由 Broker 事务提交工具事实”，而不是让 ToolCall 与 text 去争 Sink 锁。
 
-`tool_call` 可能会让一次 text 聚合**提前结束**。例如：
+## 5. Native 与 ADK 的并发差异
 
-- 原本 100ms 内能攒够一段 3KiB 的文本，合并成一次 `OUTPUT_DELTA_COMMITTED`；
-- 中间插进来一个 `tool_call`，只能先把 tool_call 之前的 0.5KiB flush 出去。
+### Native
 
-这只是**聚合粒度变小**，不影响语义顺序和事件完整性。
+`NativeLoopAdapter` 直接循环消费 Native kernel 的 `StreamEvent`，每次都 `await io.emit(...)` 完成后才能拉取下一个事件。Skill UI sink 也直接 await 同一 RuntimeIO。这是自然背压：Runtime 提交被阻塞时，provider 拉流、checkpoint 和工具派发都不能绕过。Native 不经过后台无界队列。
 
----
+### ADK
 
-## 5. 三种竞争情形的时序图
+`AdkEngineAdapter` 只服务 `plan_execute` 和 `agent_loop`。这两个引擎保留 ADK 内部的 event queue/merge 路径；Adapter 在消费合并后事件时仍然逐个 await RuntimeIO，并在 Broker-owned 工具投影处只做 flush。这个队列路径不再被 Native 共用。
 
-### 情形 A：text buffer 达到阈值，主流程自己 flush
+## 6. 锁无法提供的保证
 
-```text
-时间轴 ──────────────────────────────────────────────▶
+`asyncio.Lock` 只在当前进程、当前 Sink 对象内有效。下列保证来自其他层：
 
-主事件流：emit_text("delta1") → emit_text("delta2") → emit("tool_call")
-                │                     │                      │
-                ▼                     ▼                      ▼
-            append to           append to, bytes>=2KiB   async with _lock:
-            buffer                 _flush_locked()         _flush_locked()
-                                                          （发现 buffer 已空）
-                                                          append_events(TOOL_CALL)
-```
+- 多 Worker 或 stale attempt 写入拒绝：Activity lease + fencing token；
+- checkpoint 不被旧 attempt 覆盖：revision CAS；
+- ToolCall 批次全有或全无：Broker/Store 的 SQLite 写事务；
+- Event seq 无回滚空洞：`runs.next_seq` 与 event batch 同事务；
+- 丢失 attempt ownership 后不再写库：`abort()` 取消 timer 并丢弃未提交 buffer。
 
-结果：`tool_call` 进去时发现 buffer 已空，直接写 `TOOL_CALL_COMMITTED`。**正确**。
+## 7. 必须保持的不变量
 
-### 情形 B：后台 `_timer` 先抢到锁
+1. text buffer 不能跨 message_id 或 generation_id 聚合。
+2. 任何进入 Sink 的非 text 事件提交前，必须先 flush 已接收 text。
+3. 正常工具账本事实只能由 Broker/Store 提交一次。
+4. Native 必须等待前一个 RuntimeIO 提交，才能拉取下一个 provider 事件。
+5. SSE 只读已提交 `run_events`，Sink 锁不参与 SSE 订阅者协调。
 
-```text
-时间轴 ──────────────────────────────────────────────▶
+## 8. 建议的源码阅读顺序
 
-主事件流：emit_text("delta1") → emit_text("delta2") ─┬─▶ emit("tool_call")
-                │                     │              │        │
-                ▼                     ▼              │        ▼
-            start timer            timer 还在跑      │    async with _lock:
-                                                     │    （挂起等待）
-后台 timer：                                         ▼
-                                          100ms 后醒来
-                                          async with _lock:
-                                          _flush_locked()
-                                          写 OUTPUT_DELTA_COMMITTED
-                                          释放锁
-                                                     │
-                                                     ▼
-                                              主事件流获得锁
-                                              _flush_locked() 看到 buffer 空
-                                              写 TOOL_CALL_COMMITTED
-```
-
-结果：timer 先 flush text，然后 `tool_call` 再落库。**正确**。
-
-### 情形 C：`tool_call` 先抢到锁
-
-```text
-时间轴 ──────────────────────────────────────────────▶
-
-主事件流：emit_text("delta1") → emit_text("delta2") ─┬─▶ emit("tool_call")
-                │                     │              │        │
-                ▼                     ▼              │        ▼
-            start timer            timer 还在跑      │    async with _lock:
-                                                     │    _flush_locked()
-                                                     │    写 OUTPUT_DELTA_COMMITTED "delta1+delta2"
-                                                     │    写 TOOL_CALL_COMMITTED
-                                                     │    释放锁
-后台 timer：                                         │
-                                          100ms 后醒来   │
-                                          async with _lock:│
-                                          （buffer 已空，无事可做）
-                                                     │
-                                                     ▼
-                                              后续 emit_text("delta3")
-                                              append 到新 buffer
-```
-
-结果：`tool_call` 强制把前面 text flush 后再写自己。**正确**。
-
----
-
-## 6. 关键不变量
-
-| 不变量 | 说明 |
-|---|---|
-| **先 commit，后 SSE 可见** | 所有事件先写入 `run_events` 表（同一事务更新 `runs.next_seq`），SSE 只读已提交事件。 |
-| **text 聚合，Sink 内非 text 即时** | text 按 100ms/2KiB 聚合；进入 Sink 的 engine-owned tool_call 等事实事件立即落库，Broker-owned 工具事件由 Broker 事务落库。 |
-| **切换事件类型前必须 flush** | 写 tool_call/tool_result/plan_step/terminal 前，必须先 `_flush_locked()` 清空 text buffer。 |
-| **单 Run 内写入串行化** | 所有对 `_buffer` / `_timer` / `store.append_events` 的访问必须通过同一把 `asyncio.Lock`。 |
-| **fencing token 保证所有权** | `store.append_events` 带 `fencing_token`，旧 Worker 的结果即使抢到锁也会被拒绝。 |
-
----
-
-## 7. 常见疑问
-
-### Q1：那把锁会阻塞模型流很久吗？
-
-不会。`_flush_locked()` 做的是内存拼接 + 一次 SQLite `append_events`，通常在毫秒级。text 聚合阈值（2KiB）和 timer（100ms）也保证了 buffer 不会特别大。
-
-### Q2：如果 `tool_call` 来的时候 buffer 本来就是空的，`_flush_locked()` 不是白执行吗？
-
-是的，但这是正确的“白执行”。看 `_flush_locked()` 开头：
-
-```python
-async def _flush_locked(self) -> None:
-    if not self._buffer:
-        return
-    ...
-```
-
-空 buffer 直接返回，成本极低。这种设计的好处是调用方不需要判断 buffer 是否为空，逻辑统一。
-
-### Q3：`emit_text` 里也加了同一把锁，那 text delta 之间也会互相阻塞吗？
-
-会短暂串行，但这是必要的。每个 text delta 都要修改 `_buffer`、`_buffer_bytes`、可能创建 `_timer`，这些操作不能交错。不过由于每个 delta 的处理极快，实际不会形成瓶颈。
-
-### Q4：这把锁能防多个 Worker 同时写一个 Run 吗？
-
-**不能，也不负责这个。** 多 Worker 写同一 Run 的防护在 `store.append_events` 的 `fencing_token` 里。`CommittedEventSink` 的锁只解决**单 attempt 内部多个协程**的并发问题。
-
----
-
-## 8. 相关源码位置
-
-- `agent/runtime/application/events.py:55` —— `CommittedEventSink` 类定义
-- `agent/runtime/application/events.py:130` —— `emit()` 主入口
-- `agent/runtime/application/events.py:142` —— 非 text 事件加锁分支
-- `agent/runtime/application/events.py:180` —— `emit_text()` text 聚合入口
-- `agent/runtime/application/events.py:211` —— `_flush_after_delay()` 后台 timer
-- `agent/runtime/application/events.py:222` —— `_flush_locked()` 实际 flush 逻辑
-- `agent/runtime/application/coordinator.py:241` —— `CommittedEventSink` 创建位置
-- `agent/runtime/application/events.py#L246` —— `_raise_background_error()` 后台错误传播
-
----
-
-## 总结
-
-> `tool_call` 先抢到锁不会导致 text 丢失或顺序错乱，反而会把已有 text 强制落库后再写 `tool_call`——这正是“切换事件类型前必须 flush”的设计目的。
->
-> 锁的存在不是因为 SSE 或多用户并发，而是因为单条 Run 内部有**多个 asyncio 协程**（主事件流、100ms 后台 timer、阈值 flush）在同时操作共享 buffer 和 DB。锁保证了 buffer 状态一致，并强制 text 事件在 tool_call 等事实事件之前落库。
->
-> 谁先抢到锁并不重要，重要的是：任何非 text 事件落库前，都必须先完成 `_flush_locked()`。
+1. `agent/runtime/application/events.py`：`emit_text`、`_flush_after_delay`、`_flush_locked`、`emit`。
+2. `agent/runtime/adapters/adk_engines.py`：两个 ADK 引擎的事件消费与 Broker 投影去重。
+3. `agent/engine/native_loop/engine.py`：直接 awaited RuntimeIO 与 Skill UI sink。
+4. `agent/runtime/application/tool_broker.py` 及 `agent/runtime/adapters/sqlite/store.py`：ToolCall PREPARE 和 ToolResult 结算事务。

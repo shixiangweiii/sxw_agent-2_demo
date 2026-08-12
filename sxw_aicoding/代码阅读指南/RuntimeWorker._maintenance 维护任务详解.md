@@ -2,18 +2,25 @@
 
 ## 1. 方法定位
 
-`RuntimeWorker._maintenance(now)` 是 Runtime Worker 主调度循环每次轮询前执行的**后台 housekeeping（家务）方法**。它负责在真正领取并执行 Run 之前，把系统中需要定期推进的状态一次性处理掉，保证：
+`RuntimeWorker._maintenance(now)` 位于 `agent/runtime/worker/dispatcher.py`，是 Worker 主调度循环每次尝试 claim 之前执行的 durable housekeeping。
 
-- 到期的定时器被触发；
-- 因 Worker 崩溃而 lease 过期的 Activity 能被重新领取；
-- 超出绝对 deadline 的 Run/Activity 被推进到终态；
-- 不再被引用的 Artifact 孤儿被回收；
-- Worker 自身心跳持续刷新，让外部知道它还活着。
+```python
+while not self._stop.is_set():
+    now = self.clock.now_ms()
+    await self._maintenance(now)
+    while len(self._tasks) < self.concurrency:
+        claim = await self.store.claim_next(
+            worker_id=self.worker_id,
+            lease_ms=self.lease_ms,
+            now_ms=self.clock.now_ms(),
+            release_map=self.release_map,
+        )
+        # ...
+```
 
-## 2. 源码位置
+它的职责是把“时间已经发生、但原执行者可能不在”的持久化状态向前推进。它不执行 LLM 或原工具，也不负责重新计算 release。
 
-- 调用点：`agent/runtime/worker/dispatcher.py` 第 70 行
-- 实现：`agent/runtime/worker/dispatcher.py` 第 105–148 行
+## 2. 当前执行顺序
 
 ```python
 async def _maintenance(self, now: int) -> None:
@@ -22,149 +29,158 @@ async def _maintenance(self, now: int) -> None:
     expire = getattr(self.store, "expire_deadlines", None)
     if expire is not None:
         await expire(now_ms=now)
-    # ... Artifact 孤儿清理 ...
-    if now - self._last_heartbeat >= 5_000:
-        await self.store.heartbeat_worker(...)
-        self._last_heartbeat = now
+    # 按周期做 Artifact 孤儿回收
+    # 每 5 秒写 ACTIVE Worker 心跳
 ```
 
-## 3. 职责总览
+| 顺序 | 操作 | 权威对象 |
+|---:|---|---|
+| 1 | `fire_due_timers` | `schedule_retry()` 写入的到期 `RETRY` timer |
+| 2 | `recover_expired` | lease 过期的 `CLAIMED/RUNNING` Activity 与关联 ToolEffect |
+| 3 | `expire_deadlines` | 已超过绝对 deadline 但无活动 Worker 裁决的 Run |
+| 4 | `cleanup_orphans` | Artifact CAS 中超过保护期且无持久引用的 blob |
+| 5 | `heartbeat_worker` | `runtime_workers` 中本 Worker 的 state/release map/heartbeat |
 
-`_maintenance` 按顺序完成 5 类任务：
+这个顺序不是优先级队列，但能保证在 claim 新工作之前，已到期工作、失联 attempt 和 deadline 都有机会被推进。
 
-| 顺序 | 任务 | 对应 Store 操作 | 作用 |
-|---|---|---|---|
-| 1 | 触发到期定时器 | `fire_due_timers` | 执行 `runtime.db` 中到期的 Timer |
-| 2 | 恢复过期 Activity | `recover_expired` | 把 lease 过期、原 Worker 可能崩溃的 Activity 重新变为可领取 |
-| 3 | 处理 deadline 超时 | 可选的 `expire_deadlines` Store 能力（SQLite 实现） | 将超出绝对 deadline 的 Run/Activity 推进到 `TIMED_OUT` 等终态 |
-| 4 | Artifact 孤儿清理 | `cleanup_orphans` | 删除超过 24 小时且不再被 metadata 引用的 Artifact blob |
-| 5 | Worker 心跳 | `heartbeat_worker` | 每 5 秒写入 `ACTIVE` 心跳与当前 release map |
+## 3. fire_due_timers
 
-## 4. 各步骤详细说明
+Runtime 的 retry Timer 是持久化时间事实，不是 `asyncio.sleep()`。当 Coordinator 安排可重试失败时，`schedule_retry()` 写入 `kind='RETRY'` 的 scheduled timer，同时把 Run/Activity 置为 `WAITING_RETRY`。
 
-### 4.1 触发到期定时器
+`fire_due_timers(now_ms=now)` 当前只处理这条已实现路径：
 
-```python
-await self.store.fire_due_timers(now_ms=now)
+```text
+timer:    SCHEDULED -> FIRED
+Activity: WAITING_RETRY -> PENDING
+Run:      WAITING_RETRY -> DISPATCH_PENDING
+append Activity/Run status events
 ```
 
-Runtime 内部会注册一些基于绝对时间的 Timer（例如延迟重试、等待信号的超时）。`_maintenance` 每次循环都会检查当前时间 `now` 之前有哪些 Timer 到期，并将它们触发，推进对应 Activity 或 Run 的状态。
+`timers.kind` 的 current schema 词汇仍列出其他时间类型，但当前 Store 没有将它们装配成 `fire_due_timers()` 的独立行为。绝对 deadline 由后面的 `expire_deadlines()` 统一扫描；`WAITING_INPUT` 由 signal 唤醒，或由同一绝对 deadline 收口。不应把 schema 词汇误读为已实现的 Timer 能力。
 
-### 4.2 恢复过期 Activity
+因为 retry Timer 在 SQLite 中，Worker 重启后仍能继续扫描。进程内时钟只是发起这次扫描的观察值，不是 Timer authority。
 
-```python
-await self.store.recover_expired(now_ms=now)
+## 4. recover_expired
+
+### 4.1 为什么需要恢复
+
+Worker 执行 Activity 时持有有限期 lease。如果进程崩溃、事件循环卡死或续租不再成功，Activity 不能永远留在 `CLAIMED/RUNNING`。
+
+`recover_expired()` 使用库内的 `lease_expires_at` 判定失联 attempt，再由短写事务推进。它不依赖原 Worker 的内存状态。
+
+### 4.2 不是一律回到 PENDING
+
+恢复时必须优先看持久化 ToolEffect：
+
+```text
+lease 过期
+  ├─ deadline 已到 -> TIMED_OUT
+  ├─ cancel-owned 且无未决 effect -> CANCELLED
+  ├─ 无未决 effect -> Activity PENDING，可重新 claim
+  ├─ 所有 effect 均可安全重放 -> Activity PENDING
+  └─ 存在不确定/不可透明重放 effect -> RECONCILE/MANUAL
 ```
 
-Worker 执行 Activity 时会持有 lease（租约）。如果 Worker 进程崩溃或网络分区，lease 会在 `lease_ms`（默认 30 秒）后过期。`_maintenance` 由新的 Worker 调用时，会把这些过期的 Activity 重新释放出来，让其他 Worker 能够 `claim_next` 并恢复执行。
+可安全自动重放的 effect 只有 READ_ONLY，或已经具备稳定 Runtime idempotency key 的 IDEMPOTENT_EFFECT。NON_IDEMPOTENT/UNKNOWN 已派发后不会因租约过期而盲目再调一次。
 
-这是 Runtime **进程崩溃恢复**的关键路径之一。
+### 4.3 恢复后仍要 exact claim
 
-### 4.3 处理 deadline 超时
+Activity 即使被重置为 `PENDING`，新 Worker 仍必须使用完整 `release_map` 通过 `(run.engine, run.release_fingerprint)` 精确匹配才能领取。
 
-```python
-expire = getattr(self.store, "expire_deadlines", None)
-if expire is not None:
-    await expire(now_ms=now)
+wrong-release Worker 不会领取、不会读 checkpoint、也不会将 Run 写成某个不匹配终态。Run 保持 pending，直到 matching Worker 出现或 absolute deadline 收口。
+
+## 5. expire_deadlines
+
+CreateRun 将 deadline 以 UTC epoch ms 的绝对时间写入 Run。向下游传递的是剩余时间，不是每层新建一个完整 timeout。
+
+`expire_deadlines()` 扫描已过期 Run，主要覆盖没有活跃 attempt 可在 Coordinator 内检查 deadline 的情况，例如：
+
+- 长期没有 matching-release Worker 的 `DISPATCH_PENDING` Run。
+- `WAITING_RETRY` / `WAITING_INPUT` 超时。
+- 需要根据 ToolEffect 不确定性收口的 cancel/reconcile 状态。
+
+注意实现使用 `getattr(self.store, "expire_deadlines", None)`。这是为了让精简的测试 fake 可以不实现扩展方法；生产 SQLite Store 提供了该能力，不能把 deadline 解释为进程内最佳努力。
+
+## 6. Artifact 孤儿回收
+
+Artifact 的权威关系是：
+
+```text
+CAS blob bytes
+  + artifact_metadata
+  + artifact_links / ToolResult ref / Event ref
 ```
 
-CreateRun 时可以传入绝对 `deadline_at`，缺省使用 `RUNTIME_DEFAULT_DEADLINE_SECONDS`（默认 600 秒）。`_maintenance` 会扫描超出 deadline 的 Run/Activity，并将它们推进到 `TIMED_OUT` 等终态。
+Runtime 使用 temp -> digest/size -> fsync -> atomic rename -> fsync dir 的写入边界，因此可能在“blob 已安全落盘，metadata/link 还未提交”时崩溃，留下无引用 blob。
 
-使用 `getattr` 做防御性判断，是为了让测试用的 fake store 可以省略该可选能力；生产 SQLite Store 实现了 `expire_deadlines`，不能据此把 deadline 扫描理解为进程内状态。
+`_maintenance` 按 `artifact_cleanup_interval_ms` 节流：
 
-### 4.4 Artifact 孤儿清理
+1. 先设置 `_last_artifact_cleanup=now`，避免文件系统异常把 250ms 调度循环变成 cleanup 热循环。
+2. 从 Store 取 `referenced_artifact_ids()`。
+3. 只删除无引用且早于 `now - artifact_orphan_age_ms` 的 CAS blob。
+4. 记录删除数量和回收字节数。
 
-```python
-if (
-    self.artifact_store is not None
-    and (
-        self._last_artifact_cleanup is None
-        or now - self._last_artifact_cleanup >= self.artifact_cleanup_interval_ms
-    )
-):
-    self._last_artifact_cleanup = now
-    try:
-        referenced = await self.store.referenced_artifact_ids()
-        result = await self.artifact_store.cleanup_orphans(
-            referenced_artifact_ids=referenced,
-            older_than=datetime.fromtimestamp(
-                (now - self.artifact_orphan_age_ms) / 1000,
-                tz=timezone.utc,
-            ),
-        )
-        if result.deleted:
-            log_kv(logger, logging.INFO, "ArtifactGC", "orphans reclaimed", ...)
-    except Exception as exc:
-        log_kv(logger, logging.WARNING, "ArtifactGC", "cleanup failed", ...)
+cleanup 异常会被记录为 warning，不阻断 Run dispatch。这个容忍性只属于孤儿回收；Run、lease、checkpoint 和 ToolEffect 权威写入不会以相同方式吞错。
+
+## 7. Worker 心跳与 release map
+
+`RuntimeWorker.run()` 启动时会先立即写一次 `ACTIVE` heartbeat，但当前不会同步更新 `_last_heartbeat`；因此首轮 `_maintenance()` 可能紧接着再写一次。进入稳定主循环后，maintenance 才按 5 秒阈值节流：
+
+```text
+runtime_workers
+  worker_id
+  release_map_json
+  state = ACTIVE | DRAINING | STOPPED
+  started_at
+  heartbeat_at
 ```
 
-Artifact 采用内容寻址（SHA-256）。写入流程是：temp 文件 → fsync → atomic rename → fsync 目录。如果 rename 成功后 metadata 事务失败，就可能留下没有被引用的 blob。
+`release_map_json` 必须是本 Worker 实际构造的三个 Adapter fingerprint，它同时用于：
 
-`_maintenance` 默认**每小时**扫描一次 Artifact 目录：
+- `claim_next()` 的 exact `(engine, fingerprint)` 筛选。
+- `scripts/run_all.sh` 的 Worker readiness 判定。
 
-1. 先从 `runtime.db` 查出所有被引用的 `artifact_id`；
-2. 再让 `artifact_store.cleanup_orphans(...)` 删除超过 `artifact_orphan_age_ms`（默认 24 小时）且不在引用集合中的 blob。
+readiness 不能只看库里已经存在的三个 active pointer，因为它们可能来自上次 Worker。正确判定还要求：
 
-关键设计：先更新 `self._last_artifact_cleanup = now`，再执行清理。这样即使某次文件系统异常，也不会让 250 ms 的主循环变成清理热循环。
-
-另外，Artifact GC 失败会被捕获并记录为 WARNING，**不会阻塞 Run 的调度执行**。
-
-### 4.5 Worker 心跳
-
-```python
-if now - self._last_heartbeat >= 5_000:
-    await self.store.heartbeat_worker(
-        worker_id=self.worker_id, release_map=self.release_map,
-        state="ACTIVE", now_ms=now,
-    )
-    self._last_heartbeat = now
+```text
+本次启动后的新鲜 ACTIVE heartbeat
++ heartbeat release_map 与三个 active pointer 完全一致
 ```
 
-每 5 秒向 `runtime_workers` 表写入一条 `ACTIVE` 心跳，携带当前 Worker 支持的 `release_map`（三引擎 release 的 digest）。
+## 8. maintenance 不负责的事
 
-心跳有两个用途：
+### 8.1 不负责 schema 升级
 
-1. **`scripts/run_all.sh` readiness 判断**：脚本会等待本次启动后的新鲜 `ACTIVE` heartbeat，且三种 release 的 active pointer 与 Worker 注册的 release_map 完全一致，才认为 Worker ready。
-2. **管理面/排障**：可以通过 `runtime_workers` 表查看哪个 Worker 还活着、它加载了哪些 release。
+schema 身份在 API/Worker 启动时由 `store.initialize()` 校验。非空 DB 必须与 current `schema.sql` 字节 digest 完全一致，否则启动失败。`_maintenance` 不改表、不改 `schema_meta`。
 
-## 5. 设计要点
+### 8.2 不负责 release 激活
 
-### 5.1 与 Run 执行分离
+三份 release 在 Worker 完成 ToolCatalog 和 Adapter 构造后，由 `activate_current_releases()` 一次性原子激活。maintenance 只上报已冻结的 `self.release_map`，不重新计算或切换 pointer。
 
-`_maintenance` 只负责状态推进和 housekeeping，真正执行 Run 的逻辑在 `_execute(claim)` 中。二者解耦：
+### 8.3 不负责活跃 attempt 续租
 
-- `_maintenance` 在领取前执行；除 Artifact GC 外的 Store 操作异常会传播到 Worker 主循环，因此可能阻止本轮领取并触发 Worker drain；
-- `_execute` 在独立 task 中运行，其异常由 Worker 收口，不会改变已经提交的维护事务。
+续租是 `_execute()` 为每个 Claim 单独创建的 `_renew_lease()` task，不在 `_maintenance` 内。续租失败会 cancel 对应 attempt；如果 Store 写入后续发现 stale fence/lease/checkpoint CAS 冲突，则以 `AttemptOwnershipLost` 冒泡到 Worker，不会把 Run 收成业务失败。
 
-### 5.2 错误隔离
+## 9. 错误处理分类
 
-除了 Artifact GC 用 `try/except` 捕获外，其他 Store 操作（fire_timers/recover_expired/expire_deadlines/heartbeat）通常由 Store 内部保证事务安全。如果某一步抛出异常，会向上传播到 `run()` 的 `try/finally`，最终触发 `_drain()` 优雅停机。
+| 任务 | 异常时的原则 |
+|---|---|
+| Timer/lease/deadline authority 推进 | 不在 `_maintenance` 统一吞掉；写入失败应暴露给调度循环/进程监督 |
+| Artifact GC | best-effort，记 warning，不停 dispatch |
+| heartbeat | 是 readiness/运维事实，写入失败不应伪装 Worker 健康 |
+| attempt ownership loss | 终止当地 attempt，交给 durable recovery，不 terminalize Run |
 
-### 5.3 时间基准统一
+## 10. 调度与扩展边界
 
-所有操作都使用同一个 `now = self.clock.now_ms()`，避免在 250 ms 的轮询窗口内因时间不一致导致边界判断错误。
+`_maintenance` 在每个 Worker 循环中都可执行，所以 Store 操作必须是幂等/CAS/事务化的，不能依赖“只有一个 maintenance owner”。
 
-### 5.4 测试入口
+当前 SQLite `BEGIN IMMEDIATE` 可在本机多进程中串行化这些写入。这不是跨主机分布式调度；若进化到跨节点 HA，Timer、lease、fencing、release activation 和 Artifact 引用都需迁移到共享权威存储，不能用各节点本地 SQLite 拼接出一致性。
 
-`run_once()` 也调用 `_maintenance(now)`，因此单步测试会推进定时器、恢复过期 Activity，并在满足同一个 5 秒门槛时刷新心跳；`run()` 启动时另有一次显式初始 heartbeat。
+## 11. 源码阅读索引
 
-## 6. 相关配置参数
-
-| 配置项 | 默认值 | 含义 |
-|---|---|---|
-| `RUNTIME_WORKER_POLL_MS` | 250 ms | 主循环轮询间隔 |
-| `RUNTIME_LEASE_SECONDS` | 30 s | Activity lease 时长 |
-| `RUNTIME_LEASE_RENEW_SECONDS` | 10 s | lease 续租间隔 |
-| `RUNTIME_ARTIFACT_CLEANUP_INTERVAL_SECONDS` | 3600 s | Artifact 孤儿清理间隔 |
-| `RUNTIME_ARTIFACT_ORPHAN_AGE_HOURS` | 24 h | Artifact blob 成为孤儿的最短保留时间 |
-
-## 7. 相关文件
-
-- `agent/runtime/worker/dispatcher.py` — Worker 调度器主循环与 `_maintenance` 实现
-- `agent/runtime/adapters/sqlite/store.py` — `fire_due_timers`、`recover_expired`、`expire_deadlines`、`heartbeat_worker`、`referenced_artifact_ids` 等 Store 操作实现
-- `agent/runtime/adapters/filesystem_artifact.py` — Artifact CAS 与 `cleanup_orphans` 实现
-- `scripts/run_all.sh` — 通过心跳与 release map 判断 Worker readiness
-
-## 8. 一句话总结
-
-`_maintenance` 是 Runtime Worker 每次轮询前的"管家"：推进定时器、回收崩溃 Worker 的 Activity、处理 deadline 超时、清理 Artifact 孤儿、刷新自身心跳——确保系统状态持续收敛，同时不影响新 Activity 的领取与执行。
+- `agent/runtime/worker/dispatcher.py`：主循环、`_maintenance()`、`_execute()`、`_renew_lease()` 和 drain。
+- `agent/runtime/ports/store.py`：Timer/recovery/heartbeat 端口。
+- `agent/runtime/adapters/sqlite/store.py`：`fire_due_timers()`、`recover_expired()`、`expire_deadlines()`、`heartbeat_worker()`。
+- `agent/runtime/adapters/sqlite/schema.sql`：`timers`、`activities`、`runtime_workers` 表约束。
+- `agent/runtime/worker/main.py`：三 release 原子激活和 Worker `release_map` 构造。
+- `agent/runtime/domain/errors.py`：`AttemptOwnershipLost`。

@@ -20,10 +20,12 @@
 Harness 采集的公开投影：
 
 ```text
-text · tool_call · tool_result · plan_step · citation · skill_event · terminal
+text_start · text · tool_call · tool_result · plan_step · citation · skill_event · terminal
 ```
 
 `CollectedRun` 保存 `run_id/terminal_status/last_seq`、文本、ToolCall/Result、citation、skill frame、plan step、TTFT、总时延、transport error 和 raw events。seq 是 opaque cursor；可见 seq 允许跳号。
+
+Native 的 `text_start` 标识新 generation；retry/recovery/reactive compact 时只重置当前回答正文，工具和 Skill 过程投影保留。Harness 最终以 committed assistant message/terminal 为权威，不把旧 generation partial delta 拼成最终答案。
 
 SSE 断开不取消 Run。客户端以 committed cursor 重连；最终还会 GET Run status，避免把传输层关闭误判成业务成功。
 
@@ -84,7 +86,7 @@ Case 主要字段：
 }
 ```
 
-当前主数据集列出 `agent_loop` 24 项、`plan_execute` 20 项，没有声明 `native_loop` case。因此 Runner 虽支持 `--engine native_loop`，直接对当前文件执行会跳过全部；不得把这解释成 native 已评测或零失败。要评测 native，先显式把经过审查的 case 加入其 `engines` 列表，并单独报告。
+当前主数据集列出 `agent_loop` 24 项、`plan_execute` 20 项，没有声明 `native_loop` case。因此 Runner 虽支持 `--engine native_loop`，直接对当前文件执行会跳过全部；不得把这解释成 native 已评测或零失败。要评测 native，先显式把经过审查的 case 加入其 `engines` 列表，并单独报告。默认生产可靠性口径固定为 `native_early_tool_dispatch=off`；若显式评测 `experimental_heuristic`，必须在报告中单独标记，不能与 `off` 结果合并。
 
 ## 4. 评分
 
@@ -245,7 +247,7 @@ eval/reports/<run>/
 - `results.jsonl`：逐次评分，可增量恢复；
 - `metrics.json`：按 engine/suite 聚合、硬门、时延、稳定性和 failure labels；
 - `summary.md`：人读报告；
-- `traces/`：best-effort summary 轨迹，不含必须的恢复事实。
+- `traces/`：best-effort summary 轨迹，不含必须的恢复事实；评测不得自动切到或复制 `full` 原文轨迹。
 
 新架构中 admission trace、Worker attempt trace、SSE subscription trace 是独立生命周期。Harness 继续用 `x-trace-id` 做 best-effort 联查，但 durable `run_id/activity_id` 才是跨生命周期主键。未取到轨迹时标记 `no_trace`，不能改变行为评分或 Runtime 恢复。
 
@@ -280,7 +282,7 @@ $PY -m eval.harness.report  --out eval/reports/<run>
 - Prompt、Tool catalog、loop control 改动必须分别跑两个 engine；
 - 不把 `agent_loop` 数字套给 `plan_execute`；
 - 当前无 native 主数据集数字，不宣称其质量优劣；
-- 报告中真实模型版本、release fingerprint、数据集和重复次数应一起记录。
+- 报告中真实模型版本、release fingerprint、数据集、重复次数与 Native early-dispatch mode 应一起记录；mode 是 release 语义的一部分。
 
 ## 12. 有效性威胁
 

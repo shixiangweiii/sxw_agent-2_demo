@@ -232,6 +232,7 @@ async def submit_signal(run_id: str, body: SignalBody, request: Request) -> dict
 
 _SSE_EVENT_NAMES: dict[EventType, str] = {
     EventType.USER_MESSAGE_COMMITTED: "user_message",
+    EventType.OUTPUT_GENERATION_STARTED: "text_start",
     EventType.OUTPUT_DELTA_COMMITTED: "text",
     EventType.TOOL_CALL_COMMITTED: "tool_call",
     EventType.TOOL_RESULT_COMMITTED: "tool_result",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.reliability.support.runtime_releases import activate_test_release
+
 import uuid
 from dataclasses import dataclass
 from importlib.metadata import version
@@ -12,9 +14,8 @@ from pydantic import PrivateAttr
 
 from agent.config import AgentSettings
 from agent.context import AgentContext
-from agent.engine.native_loop.llm_client import TextDelta, TurnEnd
 from agent.runtime.adapters.filesystem_artifact import FilesystemArtifactStore
-from agent.runtime.adapters.legacy_engines import LegacyEngineAdapter
+from agent.runtime.adapters.adk_engines import AdkEngineAdapter
 from agent.runtime.adapters.sqlite import RuntimeDatabase, SqliteRuntimeStore
 from agent.runtime.application.admission import AdmissionService, CreateRunInput
 from agent.runtime.application.coordinator import EngineRegistry, RunCoordinator
@@ -67,19 +68,6 @@ class FakeChat:
         return "直接回答用户问题"
 
 
-class FakeNativeTextClient:
-    model = "fake-native-text"
-
-    def __init__(self, answer: str) -> None:
-        self.answer = answer
-        self.calls = 0
-
-    async def stream(self, **_kwargs: Any):
-        self.calls += 1
-        yield TextDelta(self.answer)
-        yield TurnEnd(finish_reason="stop")
-
-
 def _context(answer: str) -> tuple[AgentContext, FakeAdkTextModel, FakeChat]:
     model = FakeAdkTextModel(model="fake-adk-text")
     model._answer = answer
@@ -126,7 +114,7 @@ async def _admit(store, clock, *, engine: str, key: str):
 
 
 @pytest.mark.asyncio
-async def test_rel_30_three_real_legacy_adapters_share_explicit_outcome_contract(
+async def test_rel_30_two_real_adk_adapters_share_explicit_outcome_contract(
     tmp_path, monkeypatch,
 ):
     """Admission -> Worker -> real build_engine -> terminal, without network/tools."""
@@ -134,28 +122,18 @@ async def test_rel_30_three_real_legacy_adapters_share_explicit_outcome_contract
 
     store = SqliteRuntimeStore(RuntimeDatabase(tmp_path / "runtime.db"))
     await store.initialize()
-    releases = await store.register_releases(
+    releases = await store.activate_current_releases(
         [
             ReleaseManifest(engine=engine, components={"rel-030": "fake-llm-v1"})
             for engine in ("plan_execute", "agent_loop", "native_loop")
         ],
-        activate=True,
     )
     clock = FakeClock()
     artifact_store = FilesystemArtifactStore(tmp_path / "artifacts")
 
-    native_client = FakeNativeTextClient("answer:native_loop")
-    import agent.engine.native_loop.engine as native_engine_module
+    import agent.runtime.adapters.adk_engines as adk_module
 
-    monkeypatch.setattr(
-        native_engine_module,
-        "get_shared_client",
-        lambda _settings: native_client,
-    )
-
-    import agent.runtime.adapters.legacy_engines as legacy_module
-
-    real_build_engine = legacy_module.build_engine
+    real_build_engine = adk_module.build_engine
     built: dict[str, str] = {}
 
     def tracked_build_engine(context, engine):
@@ -163,17 +141,17 @@ async def test_rel_30_three_real_legacy_adapters_share_explicit_outcome_contract
         built[engine] = type(instance).__name__
         return instance
 
-    monkeypatch.setattr(legacy_module, "build_engine", tracked_build_engine)
+    monkeypatch.setattr(adk_module, "build_engine", tracked_build_engine)
 
     adapters = {}
     models: dict[str, FakeAdkTextModel] = {}
     chats: dict[str, FakeChat] = {}
     runs = {}
-    for engine in ("plan_execute", "agent_loop", "native_loop"):
+    for engine in ("plan_execute", "agent_loop"):
         context, model, chat = _context(f"answer:{engine}")
         models[engine] = model
         chats[engine] = chat
-        adapters[engine] = LegacyEngineAdapter(
+        adapters[engine] = AdkEngineAdapter(
             engine=engine,
             context=context,
             release_fingerprint=releases[engine],
@@ -198,21 +176,18 @@ async def test_rel_30_three_real_legacy_adapters_share_explicit_outcome_contract
         concurrency=1,
         clock=clock,
     )
-    for _ in range(3):
+    for _ in range(2):
         assert await worker.run_once() is True
     assert await worker.run_once() is False
 
     assert built == {
         "plan_execute": "PlanExecuteEngine",
         "agent_loop": "AgentLoopEngine",
-        "native_loop": "NativeLoopEngine",
     }
     assert models["plan_execute"]._calls == 1
     assert models["agent_loop"]._calls == 1
-    assert native_client.calls == 1
     assert len(chats["plan_execute"].calls) == 1
     assert not chats["agent_loop"].calls
-    assert not chats["native_loop"].calls
 
     for engine, run in runs.items():
         persisted = await store.get_run(run.envelope.run_id)
@@ -232,7 +207,7 @@ async def test_rel_30_three_real_legacy_adapters_share_explicit_outcome_contract
             and "engine_error" in (e.payload or {})
             for e in events
         )
-        # EventType has no legacy done/error terminal projection; success exists
+        # EventType has no done/error terminal projection; success exists
         # only because the per-attempt engine_outcome reached Coordinator.
         assert all(e.event_type.value not in {"done", "error"} for e in events)
 
@@ -244,9 +219,8 @@ async def test_rel_30_text_then_eof_without_explicit_outcome_fails_closed(
     """A plausible text stream is insufficient to infer SUCCEEDED from EOF."""
     store = SqliteRuntimeStore(RuntimeDatabase(tmp_path / "runtime.db"))
     await store.initialize()
-    release = await store.register_release(
-        ReleaseManifest(engine="native_loop", components={"rel-030": "missing-outcome"}),
-        activate=True,
+    release = await activate_test_release(store,
+        ReleaseManifest(engine="agent_loop", components={"rel-030": "missing-outcome"}),
     )
     clock = FakeClock()
     context, _model, _chat = _context("unused")
@@ -255,32 +229,32 @@ async def test_rel_30_text_then_eof_without_explicit_outcome_fails_closed(
         async def run_stream(self, _rc):
             yield StreamEvent("text", {"delta": "looks complete but is not authoritative"})
 
-    import agent.runtime.adapters.legacy_engines as legacy_module
+    import agent.runtime.adapters.adk_engines as adk_module
 
     monkeypatch.setattr(
-        legacy_module,
+        adk_module,
         "build_engine",
         lambda _context, _engine: EofOnlyReasoningEngine(),
     )
-    adapter = LegacyEngineAdapter(
-        engine="native_loop",
+    adapter = AdkEngineAdapter(
+        engine="agent_loop",
         context=context,
         release_fingerprint=release,
         artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
         artifact_metadata_loader=_unused_artifact_metadata,
         tool_broker=None,
     )
-    run = await _admit(store, clock, engine="native_loop", key="rel-030-eof")
+    run = await _admit(store, clock, engine="agent_loop", key="rel-030-eof")
     worker = RuntimeWorker(
         store=store,
         coordinator=RunCoordinator(
             store,
-            EngineRegistry({"native_loop": adapter}),
+            EngineRegistry({"agent_loop": adapter}),
             clock=clock,
             event_flush_bytes=1,
         ),
         worker_id="rel-030-eof-worker",
-        release_map={"native_loop": release},
+        release_map={"agent_loop": release},
         concurrency=1,
         clock=clock,
     )

@@ -15,10 +15,8 @@ from google.adk.runners import Runner
 from agent.engine.agent_loop.loop_processor import LoopController
 from agent.engine.agent_loop.message_budget import MessageBudget
 from agent.engine.agent_loop.plan_event_detector import is_plan_tool_response, plan_events_from
-from agent.engine.loop_tools import LOOP_INSTRUCTION, resolve_sub_agent_engine
-from agent.engine.loop_tools.sub_agent_tool import build_sub_agent_tool
-from agent.engine.loop_tools.task_plan_tool import update_task_plan
-from agent.engine.loop_tools.tool_search_tool import build_deferred_tools, tool_search
+from agent.engine.loop_tools import LOOP_INSTRUCTION
+from agent.engine.loop_tools.catalog import collect_loop_tools
 from agent.engine.base import APP_NAME, ReasoningEngine, RunContext
 from agent.runtime.domain.models import EngineOutcome, EngineOutcomeKind
 from agent.runtime.adapters.brokered_tools import AdkToolBatch, broker_adk_tools
@@ -51,17 +49,7 @@ def build_loop_agent(
     # 塞进每次模型请求——所以这张表直接决定了模型每一轮的可选动作空间。
     # ctx.tools 是两代引擎共享的部分（内置工具 + knowledge_search + skill-center 技能
     # + Claude SKILL + A2A 子代理）；下面 4 行是 agent_loop 独有的，plan_execute 没有。
-    tools: list[Any] = list(ctx.tools)                # 内置：calculator / get_weather
-    tools.append(update_task_plan)                    # 计划即工具
-    tools.append(tool_search)                         # 动态工具发现
-    tools.extend(build_deferred_tools())              # 延迟工具：translate / text_stats
-    # 子代理委派：按 SUB_AGENT_ENGINE 选内核（两种实现同名 researcher、同描述、同参数）。
-    sub_engine = resolve_sub_agent_engine(ctx.settings.sub_agent_engine, rc.engine)
-    if sub_engine == "adk":
-        tools.append(build_sub_agent_tool(ctx.llm))
-    else:
-        from agent.engine.native_loop.sub_agent import build_researcher_tool
-        tools.append(build_researcher_tool(ctx.chat))   # 普通函数工具，ADK 会自动包成 FunctionTool
+    tools = collect_loop_tools(ctx, run_engine=rc.engine)
     # 注意这里没有配 sub_agents：researcher 和 Claude SKILL 都是被包成 AgentTool 的"普通工具"
     # （Agent-as-Tool），对主循环表现为一次标准 tool_use，不走 ADK 的 agent transfer 机制。
     return LlmAgent(

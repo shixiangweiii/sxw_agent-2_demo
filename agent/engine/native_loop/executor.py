@@ -30,6 +30,7 @@ from agent.engine.native_loop.tools import (
     ToolSpec,
     call_tool,
 )
+from agent.runtime.domain.errors import RuntimeFault
 from common.obs import get_logger, log_kv
 from common.trace import KIND_TOOL, start_span
 
@@ -49,9 +50,21 @@ class ToolOutcome:
     message: Msg                    # role=tool，进入下一轮模型请求
     response: Any                   # 原始对象，供 SSE tool_result 事件与 citation 识别
     ok: bool
+    # 生产 Native Adapter 经 Broker 执行时填充。大结果 checkpoint 只保存这把
+    # durable ledger identity，恢复再从 ToolExecution/Artifact authority 物化。
+    tool_execution_id: str | None = None
+    # Broker 已经在权威结算事务提交 TOOL_RESULT_COMMITTED 时为 False；内核本地
+    # 工具（Claude SKILL 子 Runner）仍由调用方投影事件。
+    project_event: bool = True
 
 
-def _result_message(call: ToolCall, response: Any, *, ok: bool) -> Msg:
+def _result_message(
+    call: ToolCall,
+    response: Any,
+    *,
+    ok: bool,
+    tool_execution_id: str | None = None,
+) -> Msg:
     """把工具返回值序列化进 role=tool 消息。
 
     模型侧只能读字符串，所以统一 JSON 序列化；``response`` 原始对象仍单独保留，
@@ -63,6 +76,7 @@ def _result_message(call: ToolCall, response: Any, *, ok: bool) -> Msg:
         tool_call_id=call.id,
         name=call.name,
         is_error=not ok,
+        tool_execution_id=tool_execution_id,
     )
 
 
@@ -154,6 +168,12 @@ async def execute_one(
             response = await call_tool(spec, args, ctx)
         except asyncio.CancelledError:
             raise
+        except RuntimeFault:
+            # Stable-slot drift, fencing/lease/CAS and strict Tool/Evidence
+            # contract failures are Runtime control decisions. Feeding them to
+            # the model as a normal tool error would allow it to route around a
+            # fail-closed authority boundary and incorrectly finish the Run.
+            raise
         except Exception as exc:  # noqa: BLE001 - 这正是"工具异常喂回、不中断 turn"的落点
             log_kv(logger, logging.WARNING, "ToolErrorFeedback", "tool raised, feeding back",
                    tool=call.name, error=type(exc).__name__)
@@ -172,6 +192,22 @@ def cancelled_outcome(call: ToolCall) -> ToolOutcome:
     response = {"error": _CANCELLED, "cancelled": True}
     return ToolOutcome(call=call, message=_result_message(call, response, ok=False),
                        response=response, ok=False)
+
+
+def rejected_outcome(call: ToolCall, *, code: str, message: str) -> ToolOutcome:
+    """Create a paired, explicitly non-dispatched model-correctable result."""
+    response = {
+        "isError": True,
+        "errorCode": code,
+        "content": message,
+        "notDispatched": True,
+    }
+    return ToolOutcome(
+        call=call,
+        message=_result_message(call, response, ok=False),
+        response=response,
+        ok=False,
+    )
 
 
 # ── 分批调度 ───────────────────────────────────────────────────────────────
@@ -224,12 +260,43 @@ async def run_calls(
         log_kv(logger, logging.INFO, "ToolCall", "concurrent batch",
                count=len(batch.calls), tools=[c.name for c in batch.calls])
         tasks = [asyncio.create_task(guarded(call)) for call in batch.calls]
+        first_failure: asyncio.Future[asyncio.Task[ToolOutcome]] = (
+            asyncio.get_running_loop().create_future()
+        )
+
+        def signal_control_failure(task: asyncio.Task[ToolOutcome]) -> None:
+            if first_failure.done():
+                return
+            if task.cancelled():
+                first_failure.set_result(task)
+                return
+            if task.exception() is not None:
+                # execute_one converts ordinary Tool failures into ToolOutcome.
+                # Anything still escaping is a Runtime control/ownership fault
+                # and must promptly cancel slower siblings, even when its call
+                # ordinal is later than theirs.
+                first_failure.set_result(task)
+
+        for task in tasks:
+            task.add_done_callback(signal_control_failure)
         try:
             # 按调用顺序回收结果：并发只为省时间，产出顺序仍与模型给的顺序一致，
             # 这样前端看到的 tool_result 次序是稳定可预期的。
             for task in tasks:
+                if not task.done():
+                    await asyncio.wait(
+                        (task, first_failure),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                if first_failure.done():
+                    failed = first_failure.result()
+                    await failed
                 yield await task
-        except asyncio.CancelledError:
+        except BaseException:
             for task in tasks:
                 task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             raise
+        finally:
+            if not first_failure.done():
+                first_failure.cancel()

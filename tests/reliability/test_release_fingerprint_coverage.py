@@ -1,17 +1,47 @@
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version as installed_version
 from pathlib import Path, PurePosixPath
 
 import pytest
 
+import agent.runtime.adapters.releases as releases_module
 from agent.config import AgentSettings
 from agent.runtime.adapters.releases import (
     build_release_manifest,
     release_semantic_config,
     release_source_paths,
     release_source_specs,
-    tool_catalog_digest,
 )
+from agent.engine.native_loop.tools import ToolRegistry, ToolSpec
+from agent.runtime.adapters.brokered_tools import build_runtime_tool_catalog
+from agent.runtime.domain.models import sha256_json
+from common.sqlite_schema import schema_digest
+
+
+EMPTY_CATALOG_DIGEST = sha256_json([])
+
+
+def _normalize_distribution_name(value: str) -> str:
+    return value.lower().replace("_", "-").replace(".", "-")
+
+
+def _locked_runtime_requirements() -> dict[str, str]:
+    locked: dict[str, str] = {}
+    requirements_path = Path(__file__).resolve().parents[2] / "requirements.txt"
+    for line in requirements_path.read_text(encoding="utf-8").splitlines():
+        requirement = line.partition("#")[0].strip()
+        if not requirement:
+            continue
+        assert requirement.count("==") == 1, (
+            f"runtime dependency must use one exact == pin: {requirement}"
+        )
+        name_and_extras, locked_version = requirement.split("==", 1)
+        distribution = _normalize_distribution_name(name_and_extras.split("[", 1)[0])
+        assert distribution not in locked, f"duplicate runtime dependency: {distribution}"
+        assert locked_version, f"runtime dependency has an empty pin: {distribution}"
+        locked[distribution] = locked_version
+    return locked
 
 
 @pytest.mark.parametrize(
@@ -66,14 +96,14 @@ def test_release_registry_covers_engine_and_recoverable_shared_semantics(
         "agent/config.py",
     } <= shared
 
-    runtime = set(groups["runtime_contract"])
+    runtime = set(groups["runtime_source"])
     assert {
         "agent/runtime/domain/models.py",
         "agent/runtime/ports/engine.py",
         "agent/runtime/application/coordinator.py",
         "agent/runtime/application/events.py",
         "agent/runtime/application/tool_broker.py",
-        "agent/runtime/adapters/legacy_engines.py",
+        "agent/runtime/adapters/adk_engines.py",
         "agent/runtime/adapters/brokered_tools.py",
         "agent/runtime/adapters/releases.py",
         "agent/runtime/adapters/sqlite/store.py",
@@ -110,15 +140,27 @@ def _make_synthetic_release_tree(root: Path, engine: str) -> None:
     tools = root / "agent/tools"
     (tools / "builtin_tools.py").write_text("BUILTINS = 1\n", encoding="utf-8")
     (tools / "knowledge_search.py").write_text("SEARCH = 1\n", encoding="utf-8")
+    schema = root / "agent/runtime/adapters/sqlite/schema.sql"
+    schema.parent.mkdir(parents=True, exist_ok=True)
+    schema.write_text("CREATE TABLE schema_meta (id INTEGER PRIMARY KEY);\n", encoding="utf-8")
 
 
 def test_source_content_and_directory_membership_change_manifest_digest(tmp_path):
     _make_synthetic_release_tree(tmp_path, "native_loop")
-    baseline = build_release_manifest("native_loop", root=tmp_path)
+    baseline = build_release_manifest(
+        "native_loop", root=tmp_path, semantic_config={},
+        loaded_tool_catalog_sha256=EMPTY_CATALOG_DIGEST,
+    )
+    assert baseline.components["runtime_schema_digest"] == schema_digest(
+        (tmp_path / "agent/runtime/adapters/sqlite/schema.sql").read_bytes()
+    )
 
     builtin = tmp_path / "agent/tools/builtin_tools.py"
     builtin.write_text("BUILTINS = 2\n", encoding="utf-8")
-    content_changed = build_release_manifest("native_loop", root=tmp_path)
+    content_changed = build_release_manifest(
+        "native_loop", root=tmp_path, semantic_config={},
+        loaded_tool_catalog_sha256=EMPTY_CATALOG_DIGEST,
+    )
 
     assert content_changed.fingerprint() != baseline.fingerprint()
     assert (
@@ -127,7 +169,7 @@ def test_source_content_and_directory_membership_change_manifest_digest(tmp_path
     )
     for stable_group in (
         "engine_source_sha256",
-        "runtime_contract_sha256",
+        "runtime_source_sha256",
         "skill_a2a_integrations_sha256",
         "dependency_lock_sha256",
     ):
@@ -136,7 +178,10 @@ def test_source_content_and_directory_membership_change_manifest_digest(tmp_path
     (tmp_path / "agent/tools/new_runtime_tool.py").write_text(
         "NEW_TOOL = True\n", encoding="utf-8"
     )
-    membership_changed = build_release_manifest("native_loop", root=tmp_path)
+    membership_changed = build_release_manifest(
+        "native_loop", root=tmp_path, semantic_config={},
+        loaded_tool_catalog_sha256=EMPTY_CATALOG_DIGEST,
+    )
     assert membership_changed.fingerprint() != content_changed.fingerprint()
     assert (
         membership_changed.components["shared_agent_sha256"]
@@ -162,10 +207,12 @@ def test_worker_semantic_config_changes_release_without_persisting_secret(tmp_pa
     assert "dashscope_api_key" not in first_config
     assert "must-not-enter-release" not in repr(first_config)
     first = build_release_manifest(
-        "agent_loop", root=tmp_path, semantic_config=first_config
+        "agent_loop", root=tmp_path, semantic_config=first_config,
+        loaded_tool_catalog_sha256=EMPTY_CATALOG_DIGEST,
     )
     second = build_release_manifest(
-        "agent_loop", root=tmp_path, semantic_config=second_config
+        "agent_loop", root=tmp_path, semantic_config=second_config,
+        loaded_tool_catalog_sha256=EMPTY_CATALOG_DIGEST,
     )
     assert first.components["engine_source_sha256"] == second.components["engine_source_sha256"]
     assert first.components["semantic_config_sha256"] != second.components["semantic_config_sha256"]
@@ -175,43 +222,41 @@ def test_worker_semantic_config_changes_release_without_persisting_secret(tmp_pa
 def test_loaded_skill_or_a2a_schema_changes_release_component(tmp_path):
     _make_synthetic_release_tree(tmp_path, "agent_loop")
 
-    class DiscoveredTool:
-        def __init__(self, description: str, schema: dict):
-            self.name = "remote_skill"
-            self.description = description
-            self._skill_id = "skill-42"
-            self._raw_schema = schema
+    async def invoke(_args, _context):
+        return None
 
-        def _get_declaration(self):
-            return {
-                "name": self.name,
-                "description": self.description,
-                "parameters_json_schema": self._raw_schema,
-            }
+    def catalog_digest(description: str, parameters: dict) -> str:
+        return build_runtime_tool_catalog(ToolRegistry([ToolSpec(
+            name="remote_skill",
+            description=description,
+            parameters=parameters,
+            run=invoke,
+            implementation="remote.skill-42",
+        )])).digest
 
-    first_catalog = tool_catalog_digest([
-        DiscoveredTool("published v1", {"type": "object", "properties": {}})
-    ])
-    second_catalog = tool_catalog_digest([
-        DiscoveredTool(
-            "published v2",
-            {
+    first_catalog = catalog_digest(
+        "published v1", {"type": "object", "properties": {}},
+    )
+    second_catalog = catalog_digest(
+        "published v2",
+        {
                 "type": "object",
                 "properties": {"query": {"type": "string"}},
                 "required": ["query"],
-            },
-        )
-    ])
+        },
+    )
     assert first_catalog != second_catalog
 
     first = build_release_manifest(
         "agent_loop",
         root=tmp_path,
+        semantic_config={},
         loaded_tool_catalog_sha256=first_catalog,
     )
     second = build_release_manifest(
         "agent_loop",
         root=tmp_path,
+        semantic_config={},
         loaded_tool_catalog_sha256=second_catalog,
     )
     assert (
@@ -220,3 +265,46 @@ def test_loaded_skill_or_a2a_schema_changes_release_component(tmp_path):
     )
     assert first.components["shared_agent_sha256"] == second.components["shared_agent_sha256"]
     assert first.fingerprint() != second.fingerprint()
+
+
+def test_missing_installed_dependency_metadata_fails_release_construction(
+    tmp_path, monkeypatch,
+):
+    _make_synthetic_release_tree(tmp_path, "native_loop")
+
+    def missing(_distribution: str) -> str:
+        raise PackageNotFoundError
+
+    monkeypatch.setattr(releases_module, "version", missing)
+    with pytest.raises(RuntimeError, match="RELEASE_DEPENDENCY_METADATA_MISSING"):
+        build_release_manifest(
+            "native_loop",
+            root=tmp_path,
+            semantic_config={},
+            loaded_tool_catalog_sha256=EMPTY_CATALOG_DIGEST,
+        )
+
+
+def test_runtime_dependency_lock_matches_release_registry_and_installed_metadata(
+    tmp_path,
+):
+    locked = _locked_runtime_requirements()
+    registered = {
+        _normalize_distribution_name(distribution): component
+        for component, distribution in releases_module._RUNTIME_DISTRIBUTIONS
+    }
+    assert set(locked) == set(registered)
+
+    _make_synthetic_release_tree(tmp_path, "native_loop")
+    manifest = build_release_manifest(
+        "native_loop",
+        root=tmp_path,
+        semantic_config={},
+        loaded_tool_catalog_sha256=EMPTY_CATALOG_DIGEST,
+    )
+    for distribution, component in registered.items():
+        assert installed_version(distribution) == locked[distribution]
+        assert (
+            manifest.components[f"installed_dependency_{component}"]
+            == locked[distribution]
+        )

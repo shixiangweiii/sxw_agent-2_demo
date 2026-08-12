@@ -1,66 +1,63 @@
-# ADR-0005：Release 与 Schema Compatibility
+# ADR-0005：Current Schema 与 Exact Release Claim
 
 - 状态：Accepted / Frozen
-- 日期：2026-08-09
+- 日期：2026-08-12
+- 替代：2026-08-09 版的 release 不匹配终态语义
 
 ## Context
 
-项目不迁移旧本地历史数据，但运行中的 durable Run 不能被新进程用不同 Prompt、Tool catalog 或 checkpoint schema 静默解释。
+项目不兼容旧本地数据、旧 checkpoint codec 或滚动发布期间的跨版本恢复；换 schema 时显式删库重建。但是只要一个 durable Run 已经 admission，它就必须由创建时精确的代码、Prompt、Tool catalog、provider policy 和 checkpoint codec 解释，不得被新 Worker 猜测执行。
 
 ## Decision
 
-### 1. 不可变 release manifest
+### 1. 单一 current schema identity
 
-Worker 启动时为三个 engine 分别注册 immutable manifest，并更新各 engine 的 active pointer。manifest 至少包含：
+Runtime 和 ARAG 各只有一份 current `schema.sql`。`schema_meta` 仅包含：
 
 ```text
-runtime_schema_version
-working_state_schema_version
-event_schema_version
-artifact_schema_version
-evidence_schema_version
-agent_release_id
-engine
-prompt_digest
-model_policy_digest
-tool_catalog_digest
-skill_release_digest
-retrieval_policy_digest
-checkpoint_codec_digest
+id = 1
+schema_digest = SHA-256(完整 schema.sql 原始字节)
+created_at
 ```
 
-manifest 按字段排序、UTF-8、无多余空白的规范 JSON 计算 SHA-256 `release_fingerprint`。同一 fingerprint 的内容必须字节语义一致；manifest 不可 update/delete。
+空库在一个 `BEGIN IMMEDIATE` 中创建全部表并写 identity。非空库只接受完全相同的 digest；否则 `SchemaIdentityError(code="CURRENT_SCHEMA_MISMATCH")` 导致 API/Worker/ARAG 启动 fail-fast，并提示使用者显式删除或重建对应本地库。
 
-### 2. Admission freeze
+不存在 migration、`ALTER` 路径、upgrader、双读、shadow schema 或旧 checkpoint codec。程序不得自动删库或改写旧库。
 
-CreateRun 必须找到请求 engine 的 active release，否则返回 `503 NO_ACTIVE_RELEASE`，不创建 Run。Admission 将 release fingerprint 写入 RuntimeEnvelope、Run、首 checkpoint/event。`runs.release_fingerprint` 自 admission 起不可变，与 `engine` 同级冻结：运行中 active pointer 变化不影响该 Run，也没有任何代码路径改写它。
+### 2. 不可变 release manifest
 
-### 3. Resume matrix
+`ReleaseManifest` 只包含 `engine + components`。components 必须覆盖：
 
-| Run/checkpoint 与 Worker | 结论 |
-|---|---|
-| fingerprint/schema 完全一致 | 继续执行 |
-| 任何不一致 | Coordinator 提交 `INCOMPATIBLE_RELEASE` terminal |
-| DB schema identity 不符（version/checksum 不匹配或缺失 `schema_meta`） | API/Worker 启动 fail-fast，不领取 Run |
-| manifest fingerprint 相同但规范内容不同 | 启动 fail-fast，视为 release registry corruption |
+- current Runtime/ARAG schema digest；
+- engine、Runtime 与共享源码 digest；
+- 经过 strict 校验的最终 ToolCatalog digest；
+- 模型、provider 协议与唯一 checkpoint codec；
+- 全部语义配置、工具提前派发 mode 和资源硬上限；
+- 真实已安装依赖版本。
 
-禁止 silently best-effort 解析未知字段、把 active release 覆盖到已有 Run，或用新 Prompt/Tool catalog 重放旧 stable tool slot。
+manifest 按字段排序、UTF-8、无多余空白的规范 JSON 计算 SHA-256 `release_fingerprint`。同 fingerprint 的内容必须规范字节相同；manifest 不可 update/delete。`requirements.txt` 精确锁定并逐项登记项目直接运行依赖，manifest 写入这些 distribution 的真实安装版本；不采集带平台差异和无关工具的全环境 `pip freeze`。任一必需依赖 metadata 缺失时 Worker 启动失败，不填 `unknown` 或 requirements 中的假定版本。
 
-### 4. 不提供 checkpoint 升级路径
+### 3. 三 release 原子激活
 
-数据库跨版本升级和滚动发布期间的 schema 兼容不在本项目范围内，因此**不存在** checkpoint upgrader：没有升级注册表、没有转换端口，也没有切换 Run 有效 release 的事务。release 不一致时 Coordinator 只有一个结论，即 `INCOMPATIBLE_RELEASE`。
+Worker 在一个 `BEGIN IMMEDIATE` 中完成：
 
-这个判定不读 checkpoint，因此发生在加载 checkpoint 之前。它仍受 Activity lease/fencing token 保护：陈旧 Worker 无法把 Run 裁决为终态。
+1. 写入或核对三份 immutable manifest；
+2. 确认不存在与目标 fingerprint 不同的非终态 Run；
+3. 原子切换三个 active pointer。
 
-Admission 时返回的 RuntimeEnvelope 值对象是不可变快照，且没有任何代码路径改写 `runs.release_fingerprint`；旧 checkpoint/event 永远保留其原始 release，完整记录解释边界。
+同 fingerprint 的多 Worker 可并存。新 fingerprint 遇到活跃旧 Run 时整体失败 `ACTIVE_RUNS_BLOCK_RELEASE_ACTIVATION`，不发布半套 pointer。Admission 和 activation 都在写事务中读写 active pointer，因此不存在“用旧 pointer 接收新 Run，同时切到新 release”的空窗。
 
-### 5. 无历史迁移的准确含义
+### 4. Admission freeze 与 exact claim
 
-可以随时停服、删除整个 `local_storage`、用当前 schema 重新初始化 runtime/rag 库，不迁移任何旧数据。这不等于忽略新 Runtime 内已 accepted Run 的兼容性：只要库保留，就必须遵守 schema identity 校验和 Run release freeze。要换 schema，就删库重建，程序不会替你迁移。
+CreateRun 必须找到请求 engine 的 active release，否则返回 `503 NO_ACTIVE_RELEASE` 且不创建 Run。Admission 把 fingerprint 写入 RuntimeEnvelope/Run，之后不可改写；active pointer 变化不影响已创建 Run。
+
+Worker 的普通、恢复和 reconcile claim 全部使用完整 `release_map`，SQL 同时匹配 `(engine, release_fingerprint)`。不匹配的 Worker 根本无法领取 Activity；Run 保持 pending，直到匹配 Worker 恢复或绝对 deadline 把它收口。release 不匹配不是 Run terminal 状态。
+
+Coordinator 仍保留理论上不可达的 `CLAIM_RELEASE_MISMATCH` 防御断言：若 Store/Worker 契约被破坏，只中止当前 attempt 并报警，不产生 Run 终态。
 
 ## Consequences
 
-- 可重复演示和故障恢复拥有明确代码/Prompt/Tool 解释边界。
-- 开发期不背旧格式兼容包袱，但不能静默误解释仍存在的 durable Run。
-- Worker 启动注册 release 成为 API admission 前置条件。
-- 发布新 codec 时，旧 active Run 会明确终止为 `INCOMPATIBLE_RELEASE`，不会被自动迁移或猜测解释。开发期要避免这个终态，就在没有未终态 Run 时再升级代码。
+- fresh-Run 恢复的代码/Prompt/Tool/provider/checkpoint 解释边界可验证；
+- 发布策略是“先让旧 Run 结束，再原子激活新 release”，不是滚动兼容；
+- 开发期换 schema/release 需要停服并显式重建本地数据，这是 current-only 的预期运维动作；
+- 不通过一个“不兼容”终态把发布/调度配置错误伪装成业务运行结果。

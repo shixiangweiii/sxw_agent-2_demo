@@ -11,18 +11,19 @@ from agent.context import (
     attach_skill_tools,
     build_agent_context,
 )
+from agent.engine.loop_tools.catalog import collect_loop_tools
+from agent.engine.native_loop.engine import NativeLoopAdapter
+from agent.engine.native_loop.tools import ToolRegistry, build_registry
 from agent.runtime.adapters.filesystem_artifact import FilesystemArtifactStore
 from agent.runtime.adapters.artifact_tools import build_read_artifact_tool
-from agent.runtime.adapters.legacy_engines import LegacyEngineAdapter
-from agent.runtime.adapters.native_reliability_demo import (
-    DemoEffectsStore,
-    NativeReliabilityDemoAdapter,
-    RoutedNativeAdapter,
+from agent.runtime.adapters.adk_engines import AdkEngineAdapter
+from agent.runtime.adapters.brokered_tools import (
+    build_runtime_tool_catalog,
+    register_tool_catalog,
 )
 from agent.runtime.adapters.releases import (
     build_release_manifest,
     release_semantic_config,
-    tool_catalog_digest,
 )
 from agent.runtime.adapters.sqlite import RuntimeDatabase, SqliteRuntimeStore
 from agent.runtime.application.coordinator import EngineRegistry, RunCoordinator
@@ -53,44 +54,51 @@ async def build_worker() -> RuntimeWorker:
     context.tools.append(build_read_artifact_tool(
         artifact_store, store.get_artifact_metadata,
     ))
+    # Freeze the complete loop surface before release calculation.  The two
+    # loop engines may use different researcher implementations, but their
+    # public declaration and execution policy must be identical.
+    native_tools = collect_loop_tools(context, run_engine="native_loop")
+    agent_loop_tools = collect_loop_tools(context, run_engine="agent_loop")
+    native_registry = build_registry(native_tools)
+    agent_loop_registry = build_registry(agent_loop_tools)
+    _assert_loop_tool_parity(native_registry, agent_loop_registry)
+    catalog = build_runtime_tool_catalog(
+        native_registry,
+        max_bytes=settings.native_max_tool_catalog_bytes,
+    )
+
     broker = ToolBroker(store, artifact_store) # ToolBroker "效应感知的持久化工具调度协议"*（Effect-aware durable tool dispatch protocol）
-    loaded_catalog_sha256 = tool_catalog_digest(context.tools)
+    register_tool_catalog(broker, catalog)
     manifests = {
         engine: build_release_manifest(
             engine,
             semantic_config=release_semantic_config(settings, engine),
-            loaded_tool_catalog_sha256=loaded_catalog_sha256,
+            loaded_tool_catalog_sha256=catalog.digest,
         )
         for engine in ("plan_execute", "agent_loop", "native_loop")
     }
-    adapters = {} # 打表存放3种引擎的
-    for engine, manifest in manifests.items():
-        adapters[engine] = LegacyEngineAdapter(
-            engine=engine,
+    adapters = {
+        engine: AdkEngineAdapter(
+            engine=engine,  # type: ignore[arg-type] - tuple is statically fixed
             context=context,
-            release_fingerprint=manifest.fingerprint(),
+            release_fingerprint=manifests[engine].fingerprint(),
             artifact_store=artifact_store,
             artifact_metadata_loader=store.get_artifact_metadata,
             tool_broker=broker,
         )
-    demo = NativeReliabilityDemoAdapter(
-        release_fingerprint=adapters["native_loop"].release_fingerprint,
-        tool_broker=broker,
-        effects=DemoEffectsStore(settings.demo_effects_db_path),
+        for engine in ("plan_execute", "agent_loop")
+    }
+    adapters["native_loop"] = NativeLoopAdapter(
+        context=context,
+        release_fingerprint=manifests["native_loop"].fingerprint(),
+        artifact_store=artifact_store,
+        artifact_metadata_loader=store.get_artifact_metadata,
+        registry=native_registry,
+        tool_catalog=catalog,
     )
-    adapters["native_loop"] = RoutedNativeAdapter(adapters["native_loop"], demo)
-    # 最终构造出来的结果：
-    '''
-    adapters["plan_execute"]  = LegacyEngineAdapter(engine="plan_execute")
-    adapters["agent_loop"]    = LegacyEngineAdapter(engine="agent_loop")
-    adapters["native_loop"]   = RoutedNativeAdapter(
-                                    normal = LegacyEngineAdapter(engine="native_loop"),
-                                    demo   = NativeReliabilityDemoAdapter(...)
-                                )
-    '''
     # Publish all active pointers only after every adapter/tool has constructed
     # successfully.  API admissions can never observe a half-new release set.
-    await store.register_releases(tuple(manifests.values()), activate=True)
+    await store.activate_current_releases(tuple(manifests.values()))
     registry = EngineRegistry(adapters)
     coordinator = RunCoordinator(
         store,
@@ -98,6 +106,10 @@ async def build_worker() -> RuntimeWorker:
         event_flush_ms=settings.runtime_event_flush_ms,
         event_flush_bytes=settings.runtime_event_flush_bytes,
         tool_reconciler=broker,
+        tool_broker=broker,
+        max_skill_event_bytes=settings.native_max_skill_event_bytes,
+        max_skill_events=settings.native_max_skill_events_per_run,
+        max_skill_event_total_bytes=settings.native_max_skill_event_bytes_per_run,
     )
     return RuntimeWorker(
         store=store,
@@ -117,6 +129,28 @@ async def build_worker() -> RuntimeWorker:
     )
 
 
+def _assert_loop_tool_parity(
+    native: ToolRegistry,
+    agent_loop: ToolRegistry,
+) -> None:
+    """Fail Worker startup when the two public loop catalogs drift."""
+
+    native_specs = native.all()
+    adk_specs = agent_loop.all()
+    if [item.name for item in native_specs] != [item.name for item in adk_specs]:
+        raise ValueError("agent_loop/native_loop ToolCatalog names or order differ")
+    for native_spec, adk_spec in zip(native_specs, adk_specs, strict=True):
+        if (
+            native_spec.description != adk_spec.description
+            or native_spec.parameters != adk_spec.parameters
+            or native_spec.concurrency_safe != adk_spec.concurrency_safe
+            or native_spec.exclusive_resources != adk_spec.exclusive_resources
+            or native_spec.result_protocol != adk_spec.result_protocol
+        ):
+            raise ValueError(
+                "agent_loop/native_loop ToolCatalog declaration differs: "
+                f"{native_spec.name}"
+            )
 async def _run() -> None:
     worker = await build_worker()
     loop = asyncio.get_running_loop()

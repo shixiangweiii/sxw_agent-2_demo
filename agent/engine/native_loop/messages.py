@@ -3,15 +3,13 @@
 对应 CC `query.ts` 里的 `State.messages`——没有 agent 树、没有图、没有状态机，
 续推就是 `state = next; continue`，历史就是数组追加。
 
-这里同时承担三件事：
+这里同时承担两件事：
 1. 内部 Msg ↔ OpenAI 线格式（`to_wire`）的转换；
-2. genai ``types.Content``（接入层给的多模态消息）→ Msg；
-3. **原子单元**划分——OpenAI 协议要求 role=tool 的消息必须紧跟在带 tool_calls 的
+2. **原子单元**划分——OpenAI 协议要求 role=tool 的消息必须紧跟在带 tool_calls 的
    assistant 消息之后，任何裁剪/压缩都不允许从中间切开，否则上游直接 400。
 """
 from __future__ import annotations
 
-import base64
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
@@ -45,6 +43,9 @@ class Msg:
     name: Optional[str] = None                         # role=tool 时记工具名，便于日志与体积治理
     is_error: bool = False                             # 本地标记，不进线格式
     kind: str = KIND_NORMAL                            # 本地标记，不进线格式
+    # Runtime 生产适配器的大结果恢复引用。内核本身不解释该字段；恢复时由
+    # NativeLoopAdapter 通过 Tool Broker/Artifact authority 重新物化 content。
+    tool_execution_id: Optional[str] = None
 
     def to_wire(self) -> dict[str, Any]:
         """转成 OpenAI 兼容线格式。本地标记（is_error / kind / name）按角色裁剪。"""
@@ -81,54 +82,6 @@ def _as_text(content: Any) -> str:
 
 def to_wire(messages: Iterable[Msg]) -> list[dict[str, Any]]:
     return [m.to_wire() for m in messages]
-
-
-# ── genai Content → Msg ────────────────────────────────────────────────────
-# Runtime adapter 构造的是 ADK/GenAI 的 types.Content。原来由 LiteLlm 负责把
-# inline_data 转成 base64 image_url；自研循环必须自己做这一步。
-
-def content_to_msg(content: Any) -> Msg:
-    """把 genai ``types.Content``（文本 +（可选）图片 Part）转成一条 user Msg。"""
-    parts = getattr(content, "parts", None) or []
-    texts: list[str] = []
-    blocks: list[dict[str, Any]] = []
-    for part in parts:
-        text = getattr(part, "text", None)
-        if text:
-            texts.append(text)
-            blocks.append({"type": "text", "text": text})
-            continue
-        image_url = _inline_data_to_image_url(part)
-        if image_url is not None:
-            blocks.append({"type": "image_url", "image_url": {"url": image_url}})
-
-    role = getattr(content, "role", None) or "user"
-    has_image = any(b["type"] == "image_url" for b in blocks)
-    # 纯文本走字符串形态（更省、更兼容）；有图片才升级成 block 数组。
-    return Msg(role=role, content=blocks if has_image else "\n".join(texts))
-
-
-def _inline_data_to_image_url(part: Any) -> Optional[str]:
-    """genai inline_data Part → data URL；非图片 Part 返回 None。"""
-    inline = getattr(part, "inline_data", None)
-    if inline is None:
-        return None
-    data = getattr(inline, "data", None)
-    if not data:
-        return None
-    mime = getattr(inline, "mime_type", None) or "image/jpeg"
-    # genai 在不同路径下可能已是 bytes 或已是 base64 字符串，两种都兜住。
-    if isinstance(data, bytes):
-        encoded = base64.b64encode(data).decode("ascii")
-    else:
-        encoded = str(data)
-    return f"data:{mime};base64,{encoded}"
-
-
-def extract_text(content: Any) -> str:
-    """从 genai Content 取纯文本（供日志 / 摘要 / 子代理 query 使用）。"""
-    parts = getattr(content, "parts", None) or []
-    return " ".join(p.text for p in parts if getattr(p, "text", None)).strip()
 
 
 # ── 原子单元 ───────────────────────────────────────────────────────────────
@@ -206,19 +159,6 @@ def unit_aligned_start(messages: list[Msg], desired_start: int) -> int:
     return units[-1].start
 
 
-# ── compact boundary ──────────────────────────────────────────────────────
-# 等价 CC 的 `getMessagesAfterCompactBoundary`：压缩摘要本身即边界。
-# 注意：`compact.compact()` 返回的是 `[摘要, *保留尾部]` —— 边界之前的原始历史
-# 会被**整体替换掉**（同 CC），不再可回溯。本函数因此在正常链路上总是返回全量；
-# 它的存在是为了让"边界"这个语义显式化，并兜住任何未来引入的追加式压缩实现。
-
-def messages_after_boundary(messages: list[Msg]) -> list[Msg]:
-    for i in range(len(messages) - 1, -1, -1):
-        if messages[i].kind == KIND_COMPACT_SUMMARY:
-            return messages[i:]
-    return list(messages)
-
-
 # ── tool_result 体积治理 ───────────────────────────────────────────────────
 # 对应 CC 的 `applyToolResultBudget`：只替换**超大 tool 消息**的正文，不丢消息。
 # 与"整段丢弃"分工明确——整段丢弃交给 compact 摘要，这里只压单条巨型结果，
@@ -261,6 +201,7 @@ def clone(messages: Iterable[Msg]) -> list[Msg]:
                 name=m.name,
                 is_error=m.is_error,
                 kind=m.kind,
+                tool_execution_id=m.tool_execution_id,
             )
         )
     return out

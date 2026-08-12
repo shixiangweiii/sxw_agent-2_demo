@@ -1,386 +1,315 @@
 # NativeLoop 工具调用分片累积器 `_ToolCallAccumulator` 详解
 
-本文档聚焦 `native_loop` 的流式模型客户端 `llm_client.py` 中，负责把 LLM 返回的 **tool_call 分片（fragment）** 聚合成 **完整可执行工具调用** 的核心组件 `_ToolCallAccumulator`。文档会结合 `llm_client.py` 的上下游完整链路，说明它是如何处理单个、多个、交错、提前就绪等各种形态的。
+> `_ToolCallAccumulator` 位于 `agent/engine/native_loop/llm_client.py`，它的任务是将 OpenAI-compatible provider 的 ToolCall delta 分片，收敛成有界、可校验的 `ToolCall`。它不是工具执行器，也不是 Tool Broker。
 
----
+## 1. 为什么 ToolCall 不能看到一个 chunk 就执行
 
-## 目录
-
-- [1. 为什么需要一个专门的累积器](#1-为什么需要一个专门的累积器)
-- [2. 关键源码位置索引](#2-关键源码位置索引)
-- [3. 核心数据结构](#3-核心数据结构)
-- [4. 分片聚合流程](#4-分片聚合流程)
-- [5. 多个 function call 的处理](#5-多个-function-call-的处理)
-- [6. 提前就绪判定与流式工具执行](#6-提前就绪判定与流式工具执行)
-- [7. 与上下游的交互](#7-与上下游的交互)
-- [8. 边界情况与防御](#8-边界情况与防御)
-- [9. 关键不变量](#9-关键不变量)
-
----
-
-## 1. 为什么需要一个专门的累积器
-
-`native_loop` 直接使用 `openai.AsyncOpenAI.chat.completions.create(stream=True)` 发起 SSE 流式调用。LLM 在流式输出 function call 时，不会像普通 JSON 那样一次性给出完整参数，而是把每个 tool_call 拆成多个 chunk 分片返回：
-
-| chunk | index | id | name | arguments |
-|---|---|---|---|---|
-| 1 | 0 | `call_abc` | `calculator` | `""` |
-| 2 | 0 | `None` | `None` | `{"expr` |
-| 3 | 0 | `None` | `None` | `ession":"1` |
-| 4 | 0 | `None` | `None` | `2*12"}` |
-| 5 | 1 | `call_def` | `get_weather` | `""` |
-| 6 | 1 | `None` | `None` | `{"city` |
-| 7 | 1 | `None` | `None` | `":"杭州"}` |
-
-因此必须有一个中间层：
-1. **按 `index` 分槽**，把属于同一个 tool_call 的分片拼到一起；
-2. **把 `arguments` 字符串片段累加成完整 JSON**；
-3. **`id` / `name` 只取首次非空值**，避免被后续空分片覆盖；
-4. **支持一次 turn 返回多个 tool_call**；
-5. **支持流式工具执行**：在参数完整且安全时提前判定就绪，不等整轮流完。
-
-这个中间层就是 `_ToolCallAccumulator`。
-
----
-
-## 2. 关键源码位置索引
-
-| 模块 | 文件路径 | 关键符号 |
-|---|---|---|
-| 流式客户端 | `agent/engine/native_loop/llm_client.py` | `NativeLlmClient`, `_consume`, `_ToolCallAccumulator`, `_PartialCall`, `TextDelta`, `ToolCallReady`, `TurnEnd` |
-| 主循环 | `agent/engine/native_loop/loop.py` | `NativeLoop.run`, `_execute`, `_call_events`, `_result_events` |
-| 消息模型 | `agent/engine/native_loop/messages.py` | `ToolCall`, `Msg`, `to_wire` |
-| 工具执行 | `agent/engine/native_loop/executor.py` | `run_calls`, `execute_one`, `parse_arguments` |
-| 探针脚本 | `scripts/probe_dashscope_tool_stream.py` | 真实 chunk 形状实测 |
-
----
-
-## 3. 核心数据结构
-
-### 3.1 `_PartialCall`：单个 tool_call 的累积状态
-
-```python
-# agent/engine/native_loop/llm_client.py:88-118
-@dataclass
-class _PartialCall:
-    index: int
-    id: str = ""
-    name: str = ""
-    arguments: str = ""
-    emitted: bool = False
-
-    def merge(self, call_id: Any, name: Any, arguments: Any) -> None:
-        # id/name 取首次非空值：标准分片下它们只在首片出现，
-        # 后续片的空值不能把已拿到的值覆盖掉。
-        if call_id and not self.id:
-            self.id = str(call_id)
-        if name and not self.name:
-            self.name = str(name)
-        if arguments:
-            self.arguments += str(arguments)
-
-    def is_parseable(self) -> bool:
-        """参数能解析成 JSON 对象 —— 提前判定就绪的安全闸。"""
-        text = self.arguments.strip()
-        if not text:
-            return False
-        try:
-            return isinstance(json.loads(text), dict)
-        except (TypeError, ValueError):
-            return False
-
-    def to_call(self) -> ToolCall:
-        return ToolCall(id=self.id, name=self.name, arguments=self.arguments)
-```
-
-每个 `_PartialCall` 维护一个槽位的状态：
-- `index`：在 SSE chunk 中的位置，区分多个 tool_call；
-- `id` / `name`：首次非空写入，后续忽略空值；
-- `arguments`：持续追加字符串片段；
-- `emitted`：是否已经作为 `ToolCallReady` 产出过，防止重复产出；
-- `is_parseable()`：检查当前 `arguments` 是否能解析成 JSON 对象，是提前就绪的安全闸；
-- `to_call()`：把累积状态转换为上层使用的 `ToolCall` 对象。
-
-### 3.2 `_ToolCallAccumulator`：多槽位累积器
-
-```python
-# agent/engine/native_loop/llm_client.py:120-164
-class _ToolCallAccumulator:
-    def __init__(self) -> None:
-        self._calls: dict[int, _PartialCall] = {}
-        self._max_index: int = -1
-```
-
-- `_calls`：`index → _PartialCall` 的映射，一个 turn 内可同时存在多个槽位；
-- `_max_index`：当前见过的最大 `index`，用于判断某个低 index 的 tool_call 是否已收完（出现更高 index 意味着它已经结束）。
-
----
-
-## 4. 分片聚合流程
-
-### 4.1 添加分片：`add(...)`
-
-```python
-# agent/engine/native_loop/llm_client.py:125-136
-    def add(self, index: int, call_id: Any, name: Any, arguments: Any) -> None:
-        partial = self._calls.get(index)
-        if partial is None:
-            partial = _PartialCall(index=index)
-            self._calls[index] = partial
-        if partial.emitted and arguments:
-            # 已判定就绪后又收到该 index 的新分片：说明上游是交错分片，
-            # 提前就绪的判断在这种形态下不成立。响亮记一条，便于排障。
-            log_kv(logger, logging.WARNING, "NativeLlm",
-                   "fragment arrived after tool call was emitted", index=index)
-        partial.merge(call_id, name, arguments)
-        self._max_index = max(self._max_index, index)
-```
-
-流程：
-1. 按 `index` 找到或创建 `_PartialCall`；
-2. 如果该槽位已经 `emitted` 且又来了新的 `arguments`，打 warning（说明提前就绪判断在这种 provider 分片形态下不适用）；
-3. 调用 `partial.merge(...)` 合并 `id/name/arguments`；
-4. 更新 `_max_index`。
-
-### 4.2 合并规则：`merge(...)`
-
-```python
-# agent/engine/native_loop/llm_client.py:96-104
-    def merge(self, call_id: Any, name: Any, arguments: Any) -> None:
-        if call_id and not self.id:
-            self.id = str(call_id)
-        if name and not self.name:
-            self.name = str(name)
-        if arguments:
-            self.arguments += str(arguments)
-```
-
-核心逻辑：
-- `id` 和 `name` 只取**首次非空值**；
-- `arguments` 是**字符串追加**。
-
-这兼容两种 provider 形态：
-- **标准 OpenAI 分片**：首片带 `id + name`，后续片只追加 `arguments`；
-- **一次性完整分片**：单一片段就带完整 `id + name + arguments`，直接合并即可。
-
-### 4.3 最终兜底：`take_remaining()`
-
-```python
-# agent/engine/native_loop/llm_client.py:156-164
-    def take_remaining(self) -> list[ToolCall]:
-        remaining: list[ToolCall] = []
-        for index in sorted(self._calls):
-            partial = self._calls[index]
-            if partial.emitted:
-                continue
-            partial.emitted = True
-            remaining.append(partial.to_call())
-        return remaining
-```
-
-在 SSE 流结束时调用，按 `index` 顺序把所有未 emit 的槽位全部产出。这是保证不丢 tool_call 的最后一道防线。
-
----
-
-## 5. 多个 function call 的处理
-
-`_ToolCallAccumulator` 从设计之初就是面向多个 function call 的：
-
-1. **分槽存储**：`_calls: dict[int, _PartialCall]` 为每个 `index` 维护独立状态；
-2. **同时累积**：同一轮流式输出中，`index=0` 和 `index=1` 的分片会并行进入各自的槽位；
-3. **按 index 顺序产出**：`take_ready()` 和 `take_remaining()` 都按 `sorted(self._calls)` 遍历，保证产出顺序稳定；
-4. **max_index 辅助判断**：`_max_index` 记录当前见过的最大 index，用于判断低 index 的 tool_call 是否已经收完。
-
-示例：如果一轮返回两个 tool_call，累积器内部状态变化如下：
+provider 常见的工具流不是一个完整 JSON 对象，而是：
 
 ```text
-chunk #1  idx=0 id=call_a name=calc args=""
-    _calls = {0: _PartialCall(index=0, id="call_a", name="calc", arguments="")}
-
-chunk #2  idx=0 id=None name=None args="{\"x\":1"
-    _calls = {0: _PartialCall(index=0, id="call_a", name="calc", arguments="{\"x\":1")}
-
-chunk #3  idx=1 id=call_b name=weather args=""
-    _calls = {
-        0: _PartialCall(index=0, id="call_a", name="calc", arguments="{\"x\":1"),
-        1: _PartialCall(index=1, id="call_b", name="weather", arguments=""),
-    }
-    _max_index = 1
-
-chunk #4  idx=0 id=None name=None args=",\"y\":2}"
-    arguments 变为 "{\"x\":1,\"y\":2}"，且 index=0 < _max_index=1
-    如果开启 allow_early，此时 index=0 判定为就绪，产出 ToolCallReady(call_a)
-
-chunk #5  idx=1 id=None name=None args="{\"city\":\"杭州\"}"
-    arguments 完整，流结束时 take_remaining 产出 ToolCallReady(call_b)
+chunk 1: index=0, id="call_a", name="knowledge_search", arguments="{\"query\":\"Na"
+chunk 2: index=0, id=null,     name=null,               arguments="tive Loop\"}"
+chunk 3: index=1, id="call_b", name="calculator",       arguments="{\"expr\":"
+chunk 4: index=1, id=null,     name=null,               arguments="\"1+2\"}"
+finish:  tool_calls
 ```
 
----
+可以直接拼接的只有 `arguments` 字符串。id/name 通常只在首片出现，不同 call 依靠 `index` 区分。因此需要一个按 index 组织的局部状态，并且必须等待 provider 的显式 finish marker，才能证明默认生产模式下的整个 batch 已完整。
 
-## 6. 提前就绪判定与流式工具执行
+## 2. 它在完整链路中的位置
 
-### 6.1 为什么需要提前就绪？
-
-`native_loop` 支持**流式工具执行（streaming tool execution）**：一个 tool_call 的参数一旦完整，不等整轮流完就立刻派发执行，从而降低端到端延迟。但前提必须是**参数真的完整了**，否则拿到半截 JSON 就去执行会失败。
-
-### 6.2 `take_ready(...)` 的判定条件
-
-```python
-# agent/engine/native_loop/llm_client.py:138-154
-    def take_ready(self, *, allow_early: bool) -> list[ToolCall]:
-        if not allow_early:
-            return []
-        ready: list[ToolCall] = []
-        for index in sorted(self._calls):
-            partial = self._calls[index]
-            if partial.emitted:
-                continue
-            # 仅当"已出现更高 index"且"参数已能解析"时才判定就绪。
-            if index < self._max_index and partial.name and partial.is_parseable():
-                partial.emitted = True
-                ready.append(partial.to_call())
-        return ready
+```text
+Provider chunks
+  → NativeLlmClient._consume
+       ├─ 校验 choice / fragment 字段类型
+       ├─ _ToolCallAccumulator.add(...)
+       ├─ take_ready(allow_early=...)
+       └─ 显式 finish + EOF 后 take_remaining()
+            → ToolCallReady
+                 → NativeLoop.run
+                      ├─ 赋稳定 logical_key
+                      ├─ 检查 Run/turn 上限
+                      ├─ 校验工具存在与 JSON Schema
+                      ├─ checkpoint / Broker PREPARE
+                      └─ execute / settle / ToolResult
 ```
 
-判定一个 tool_call 可以提前就绪，必须同时满足：
-1. **`allow_early=True`**：上游调用方决定是否需要提前派发；
-2. **`index < self._max_index`**：已经出现更高 index 的 tool_call，说明当前 tool_call 已经结束（不会再有新的分片）；
-3. **`partial.name` 非空**：已经拿到函数名；
-4. **`partial.is_parseable()`**：`arguments` 能解析成 JSON 对象，确保参数完整。
+累积器的边界很刻意：
 
-其中 `is_parseable()` 是关键安全闸，防止半截参数被误判为完整。
+- 它识别 provider fragment 协议和字节上限。
+- 它不查 ToolCatalog，不做 JSON Schema 校验，不决定 effect class。
+- 它不创建 ToolExecution，不执行工具，不提交事件。
+- `finish_reason` 与最终 batch 是否矛盾，由 `NativeLoop._validate_finish_reason` 在完整 turn 上判定。
 
-### 6.3 提前就绪的收益与风险
+## 3. 数据结构
 
-- **收益**：在多个 tool_call 的场景下，低 index 的工具可以率先开始执行，不必等高 index 全部传完；
-- **风险**：某些 provider 的分片形态可能不是严格的 index 顺序递增，如果低 index 在判定为就绪后还有新分片，代码会打 warning 并继续累积，但最终该 tool_call 已经被 emit 出去，后续分片不会被合并——这是已知限制，靠 warning 暴露问题。
+### 3.1 `_PartialCall`：单个 index 的累积状态
 
----
-
-## 7. 与上下游的交互
-
-### 7.1 上游：`_consume(...)` 调用累积器
-
-```python
-# agent/engine/native_loop/llm_client.py:274-319
-async def _consume(self, payload: dict[str, Any], allow_early: bool) -> AsyncIterator[StreamItem]:
-    accumulator = _ToolCallAccumulator()
-    finish_reason: Optional[str] = None
-    usage: Optional[Usage] = None
-
-    async with await self._client.chat.completions.create(**payload) as stream:
-        async for chunk in stream:
-            # ... 解析 usage / finish_reason / delta ...
-
-            content = getattr(delta, "content", None)
-            if content:
-                yield TextDelta(content)
-
-            for raw in getattr(delta, "tool_calls", None) or []:
-                index = getattr(raw, "index", None)
-                function = getattr(raw, "function", None)
-                accumulator.add(
-                    0 if index is None else int(index),
-                    getattr(raw, "id", None),
-                    getattr(function, "name", None) if function else None,
-                    getattr(function, "arguments", None) if function else None,
-                )
-            for call in accumulator.take_ready(allow_early=allow_early):
-                yield ToolCallReady(call)
-
-    for call in accumulator.take_remaining():
-        yield ToolCallReady(call)
-    yield TurnEnd(finish_reason=finish_reason, usage=usage)
+```text
+index       provider 给出的 call ordinal
+id          首个非空 id
+name        首个非空 function name
+arguments   按到达顺序追加的原始 JSON 字符串
+emitted     是否已产出过 ToolCallReady
 ```
 
-`_consume` 的职责：
-1. 发起 SSE 流；
-2. 对每个 chunk，把文本产出为 `TextDelta`；
-3. 对每个 tool_call 分片，调用 `accumulator.add(...)`；
-4. 每次 add 之后，调用 `accumulator.take_ready(...)`，把已就绪的 tool_call 产出为 `ToolCallReady`；
-5. 流结束后，调用 `accumulator.take_remaining()` 兜底产出所有剩余 tool_call；
-6. 最后产出 `TurnEnd` 表示本轮结束。
+`arguments` 故意保留为原始字符串，不在累积阶段转 dict。原因是：
 
-### 7.2 更上游：`NativeLlmClient.stream(...)` 封装
+- JSON 可能尚未收完。
+- 最终 JSON 不合法是“模型可修正”错误，需要保留原文用于配对的 synthetic ToolResult。
+- Runtime stable slot 会对 normalized arguments 计算 digest，这属于完整 batch/Broker 边界，不应在半截 fragment 上做。
 
-```python
-# agent/engine/native_loop/llm_client.py:191-272
-async def stream(
-    self,
-    *,
-    messages: list[Msg],
-    tools: Optional[list[dict[str, Any]]] = None,
-    allow_early_tool_dispatch: bool = True,
-    temperature: float = 0.2,
-) -> AsyncIterator[StreamItem]:
-    # 1. 组装 payload
-    # 2. 打开 llm span
-    # 3. 调用 _consume 迭代
-    # 4. 异常分类 + stream_options 降级重试
+### 3.2 `_ToolCallAccumulator`：整个 provider turn 的多槽位状态
+
+```text
+_calls                         dict[index, _PartialCall]
+_max_index                     截止当前见过的最大 index
+_max_calls                     每轮 call 数上限
+_max_argument_bytes            单 call arguments 字节上限
+_max_batch_argument_bytes      全 batch arguments 字节上限
+_batch_argument_bytes          截止当前收到的分片字节总和
 ```
 
-`stream(...)` 是比 `_consume` 更外层的包装：
-- 构造 OpenAI 请求体；
-- 打开 trace span；
-- 调用 `_consume` 并产出 `StreamItem`；
-- 处理 `stream_options` 不被支持的降级重试；
-- 对异常进行分类（如上下文超长）。
+这个对象是每次 `_consume` 新建，不跨 provider request 共享，也不是 checkpoint 状态。只有完整接受的 `ToolCall` 才会进入 `LoopState.messages` 和 checkpoint。
 
-### 7.3 下游：`NativeLoop.run(...)` 消费 `StreamItem`
+## 4. `_consume` 先做线协议类型校验
 
-```python
-# agent/engine/native_loop/loop.py
-async for item in self._client.stream(...):
-    if isinstance(item, TextDelta):
-        # 累积文本增量，准备输出给用户
-    elif isinstance(item, ToolCallReady):
-        # 收集 tool_call，同一轮多个 tool_call 会批量并发执行
-    elif isinstance(item, TurnEnd):
-        # 本轮结束；NativeLoop 实际根据是否存在 tool call 决定继续还是完成，
-        # finish_reason 只作为诊断/观测信息保存
+调用 `add` 之前，`NativeLlmClient._consume` 已经检查：
+
+- 一个 chunk 最多只能有一个 choice。
+- choice index 只能是 0。
+- finish marker 之后不能再有 choice data。
+- ToolCall `index` 必须是非 bool 的整数。
+- id/name/arguments 如果非 `None`，必须是字符串。
+
+`add` 内仍检查 `index >= 0`。这种分工使累积器不需要猜 provider SDK 对象的类型，只处理已解包的基本字段。
+
+## 5. `add(...)`：分片如何合并
+
+每个 fragment 的处理顺序是：
+
+```text
+检查 index 非负
+  → 如是新 index，检查每轮 call 数上限并创建 PartialCall
+  → 计算本 arguments fragment 的 UTF-8 bytes
+  → 检查该 call 累计 arguments 上限
+  → 检查整批 arguments 上限
+  → 如该 slot 已 emitted 且又有新内容，fail closed
+  → merge id/name/arguments
+  → 更新 batch bytes 和 max_index
 ```
 
-下游主循环：
-- 把连续的 `TextDelta` 聚合成 assistant message；
-- 把同一轮内连续出现的多个 `ToolCallReady` 收集成一个批次，调用 `executor.run_calls(...)` 并发执行；
-- `TurnEnd.finish_reason` 会被记录用于观测，但当前 `NativeLoop` 不以它裁决完成；循环根据本轮是否有 `ToolCallReady` 决定继续执行工具/下一轮，还是完成。
+### 5.1 id/name 是“首次非空后冻结”
 
----
+`_PartialCall.merge` 不会让后续空值覆盖首片信息。如后续再出现非空 id/name：
 
-## 8. 边界情况与防御
+- 值与原值相同，可接受。
+- 值改变，立即 `MODEL_PROTOCOL_INVALID`。
 
-| 场景 | 处理逻辑 | 位置 |
+这防止 provider 把同一 index 在中途重解释为另一个工具调用。
+
+### 5.2 arguments 只能按顺序追加
+
+```text
+partial.arguments += fragment
+```
+
+不会对 fragment 做 JSON merge，也不会自动补大括号。provider 给出的字节序列是唯一事实；任何“智能修复”都可能把一个请求改成另一个请求。
+
+### 5.3 大小按 UTF-8 bytes，不按 Python 字符数
+
+默认限制：
+
+| 资源 | 默认 | 错误码 |
+|---|---:|---|
+| 每轮 ToolCall 数 | 64 | `TOOL_CALL_LIMIT_EXCEEDED` |
+| 单 call arguments | 64 KiB | `TOOL_ARGUMENTS_TOO_LARGE` |
+| 全 batch arguments | 256 KiB | `TOOL_BATCH_TOO_LARGE` |
+
+中文、emoji 等字符的 UTF-8 长度可大于 1，所以用 `len(text.encode("utf-8"))`。限制在收流过程中就执行，防止先无界累积再事后拒绝。
+
+## 6. `take_remaining()`：默认生产路径的完整性边界
+
+`_consume` 在 provider HTTP stream 结束后先确认：
+
+```text
+saw_choice == true
+finish_seen == true
+finish_reason != null
+```
+
+否则报 `MODEL_STREAM_INCOMPLETE`，绝不把自然 EOF 合成 `TurnEnd`。通过这一检查后，`take_remaining()` 再做最终形状校验：
+
+1. 已出现的 indexes 必须精确等于 `[0, 1, ..., n-1]`。
+2. 每个 slot 必须有非空 id 和 name。
+3. 已在实验模式 emitted 的 slot 不重复产出。
+4. 其余 slot 按 index 排序转成 `ToolCallReady`。
+5. 全部 ToolCallReady 之后才产出唯一 `TurnEnd`。
+
+在默认 `native_early_tool_dispatch=off` 下，`take_ready` 永返回空列表，因此所有 call 都只能在显式 finish 后由 `take_remaining` 产出。这是“模型 finish 前零工具执行”的第一层保证。
+
+## 7. `take_ready()`：仅实验模式启用的启发式信号
+
+### 7.1 判定条件
+
+只有 `allow_early=true` 时，一个 slot 才可能提前产出。它必须同时满足：
+
+```text
+partial.emitted == false
+partial.index < max_index            # 已经看到更高 index
+partial.id 非空
+partial.name 非空
+json.loads(arguments) 是 dict
+```
+
+“看到更高 index”只是 provider 可能已离开前一 block 的启发式旁证；“JSON 已可解析”也不能证明 provider 不会再追加空格、额外字段或其他合法字符。所以这是实验机制，不是线协议事实。
+
+最后一个 index 不会被该启发式提前产出，因为没有更高 index 作为旁证；它始终等到 `take_remaining()`。
+
+### 7.2 `emitted` 不只是去重标记
+
+提前产出时，累积器立即将 `partial.emitted = true`。之后如 provider 对该 index 又发出任何非空 id/name/arguments fragment，`add` 不会继续 merge，而是报：
+
+```text
+TOOL_REPLAY_MISMATCH
+```
+
+原因是该 ToolCall 可能已建立了稳定 Runtime slot，甚至已完成外部只读执行。继续修改参数就等于把一个已授权调用重解释为另一个调用，必须 fail closed。
+
+## 8. 三种 early-dispatch 模式如何影响累积器
+
+| 模式 | `take_ready` | 工具何时可执行 | 可靠性定位 |
+|---|---|---|---|
+| `off` | 永返回空 | 显式 finish、完整 batch 校验和 checkpoint/PREPARE 之后 | 生产默认 |
+| `experimental_heuristic` | 使用更高 index + JSON object 启发式 | 安全只读前缀可提前 | 非生产保证 |
+| `provider_block_complete` | 目标是使用 provider 明确 block 信号 | 当前 provider 不支持 | 选择后启动失败 |
+
+当前 OpenAI-compatible client 的 `tool_call_block_complete` 为 `False`，Worker 会在 release 激活前以 `EARLY_DISPATCH_CAPABILITY_UNAVAILABLE` 失败，不会静默退化成启发式。
+
+## 9. 实验提前产出后，kernel 和 Broker 还要做什么
+
+`ToolCallReady` 不等于“可无条件执行”。`NativeLoop.run` 还会：
+
+1. 根据 turn/call ordinal 赋稳定 `logical_key`。
+2. 再检查每 turn、每 Run 数量和参数字节上限。
+3. 查询冻结 ToolRegistry，只让 `concurrency_safe` 且无独占资源的工具继续。
+4. 确认工具是已评审 READ_ONLY；UNKNOWN/副作用工具等完整 batch。
+5. 解析 arguments 为 object 并通过 Draft 2020-12 schema。
+6. 通过 Broker 为该 stable slot 先 PREPARE ToolCall 事实，再 `execute_prepared`。
+
+实验调度器使用：
+
+- 固定数量 worker task；
+- 有界 `asyncio.Queue`；
+- `submit()` await 入队，队列满时把反压传回 provider 消费；
+- seal/join/cancel 明确生命周期；
+- cancel、EOF、GeneratorExit、Runtime 故障时取消并 await 所有 worker/future。
+
+流结束后，完整 batch 仍要经过 finish 语义校验和整批校验。后续 full-batch PREPARE 对 stable slot 做幂等核对；任何 name/request digest 漂移都以 `TOOL_REPLAY_MISMATCH` 终止，不允许用 provider call id 或 args hash 猜测另一个 identity。
+
+## 10. 默认 `off` 模式的完整示例
+
+假设 provider 先给 call 0，再给 call 1：
+
+```text
+add(0, call_a, search, '{"query":"Na')
+  calls[0].arguments = '{"query":"Na'
+  take_ready(false) = []
+
+add(0, null, null, 'tive"}')
+  calls[0].arguments = '{"query":"Native"}'
+  take_ready(false) = []
+
+add(1, call_b, calculator, '{"expr":"1+2"}')
+  take_ready(false) = []
+
+provider finish_reason = tool_calls
+HTTP stream closes normally
+  → verify explicit finish
+  → take_remaining()
+       indexes == [0, 1]
+       both have id/name
+       returns [call_a, call_b]
+  → yield ToolCallReady(call_a)
+  → yield ToolCallReady(call_b)
+  → yield TurnEnd(tool_calls)
+```
+
+kernel 得到完整 batch 后才会：
+
+```text
+校验 finish/batch
+  → MODEL_RESPONSE_COMMITTED
+  → Broker atomic PREPARE
+  → TOOL_BATCH_COMMITTED
+  → dispatch
+```
+
+所以即使 call 0 的 JSON 很早就可解析，默认生产路径也不会提前执行。
+
+## 11. 边界情况与错误归属
+
+| 情况 | 发现者 | 结果 |
 |---|---|---|
-| `index` 为 `None` | 回退到 `0` | `_consume(...)` |
-| `id/name` 后续片为空 | 只取首次非空，不覆盖 | `_PartialCall.merge(...)` |
-| `arguments` 为空字符串 | 跳过追加 | `_PartialCall.merge(...)` |
-| 单分片完整 tool_call | 直接合并，流结束时 `take_remaining` 产出 | `_ToolCallAccumulator.add(...)` / `take_remaining(...)` |
-| 多个 tool_call | 按 `index` 分槽，分别累积 | `_calls: dict[int, _PartialCall]` |
-| 提前就绪后又来同 index 分片 | 打 warning，提示提前就绪判断不适用该 provider 分片形态 | `_ToolCallAccumulator.add(...)` |
-| 参数不是合法 JSON | `is_parseable()` 返回 False，不允许提前就绪 | `_PartialCall.is_parseable(...)` |
-| 整流结束仍有未 emit 的槽位 | `take_remaining()` 兜底全部产出 | `_ToolCallAccumulator.take_remaining(...)` |
-| `allow_early=False` | `take_ready()` 直接返回空列表，所有 tool_call 等流结束才产出 | `_ToolCallAccumulator.take_ready(...)` |
+| index 是 bool/字符串 | `_consume` | `MODEL_PROTOCOL_INVALID` |
+| index < 0 | accumulator | `MODEL_PROTOCOL_INVALID` |
+| indexes 是 `[0, 2]` | `take_remaining` | `MODEL_PROTOCOL_INVALID` |
+| 缺 id 或 name | `take_remaining` | `MODEL_PROTOCOL_INVALID` |
+| 同 index 的 id/name 改变 | `_PartialCall.merge` | `MODEL_PROTOCOL_INVALID` |
+| 超过每轮 call 数 | `add` / kernel | `TOOL_CALL_LIMIT_EXCEEDED` |
+| 单 call arguments 超限 | `add` / kernel | `TOOL_ARGUMENTS_TOO_LARGE` |
+| batch arguments 超限 | `add` / kernel | `TOOL_BATCH_TOO_LARGE` |
+| 只有 usage chunk / 自然 EOF | `_consume` | `MODEL_STREAM_INCOMPLETE` |
+| 实验 emitted 后追加 fragment | `add` | `TOOL_REPLAY_MISMATCH` |
+| JSON 不合法/非 object | kernel batch validator | 默认 `off`：整批零 dispatch，配对错误结果 |
+| 工具不在冻结目录 | kernel batch validator | 默认 `off`：整批零 dispatch，`TOOL_NOT_FOUND` |
+| JSON 不符合工具 schema | kernel batch validator | 默认 `off`：整批零 dispatch，`TOOL_ARGUMENTS_INVALID` |
+| stable slot 重放时 name/digest 变化 | Broker boundary | `TOOL_REPLAY_MISMATCH` |
 
----
+在 `experimental_heuristic` 下，完整 batch 校验失败前可能已有安全 READ_ONLY 前缀逐 slot PREPARE 并执行。此时系统会停止后续派发并 fail-closed；已完成的只读工作允许被浪费，但不能改绑或重解释。
 
-## 9. 关键不变量
+最后三类错误不属于累积器，这是理解代码时最常见的边界混淆。
 
-1. **一个 `index` 只对应一个 `_PartialCall`**。同一轮内相同 `index` 的分片必须属于同一个 tool_call。
-2. **`id` / `name` 一旦写入不会被后续空值覆盖**。这依赖于 OpenAI 兼容协议“首片带 id/name”的约定。
-3. **已 `emitted` 的槽位不会再被 `take_ready` / `take_remaining` 产出**。防止同一个 tool_call 被重复派发。
-4. **提前就绪必须同时满足：出现更高 index、有 name、参数可解析为 JSON 对象**。三者缺一不可。
-5. **`take_remaining()` 保证所有累积的 tool_call 最终都会被产出**。即使提前就绪逻辑有遗漏，流结束时也会兜底。
-6. **产出顺序按 `index` 升序**。保证上层按 LLM 原本意图处理多个 tool_call。
+## 12. 累积器与 checkpoint 的关系
 
----
+累积器本身不进 checkpoint。它只存活于一次 provider stream 的进程内存中。
 
-## 总结
+正确的崩溃语义是：
 
-`_ToolCallAccumulator` 是 `native_loop` 与 OpenAI 兼容流式协议之间的关键适配层：
+- 拉流前已持久 `MODEL_REQUEST`。
+- 累积到一半时崩溃，半截 `_PartialCall` 不是权威事实，不恢复它。
+- 新 attempt 在同一稳定 message slot 上创建新 generation，重新请求 provider。
+- 只有显式 finish 后接受的完整 assistant ToolCall batch，才进入 `MODEL_RESPONSE_COMMITTED`。
+- 完整 stable slots PREPARE 后进入 `TOOL_BATCH_COMMITTED`。
 
-- 它以 **`index` 分槽**的方式天然支持一次 turn 返回多个 function call；
-- 通过 **`merge` 的“首非空 + 字符串追加”规则**兼容标准分片和一次性完整分片两种 provider 形态；
-- 通过 **`is_parseable()` 安全闸 + `_max_index` 结束判断**支持流式工具执行的提前派发；
-- 通过 **`take_remaining()` 兜底**保证任何情况下不丢 tool_call。
+这一设计避免了为 provider 临时 fragment 格式发明 checkpoint 兼容层，也避免恢复时猜测半截 JSON 的意图。
 
-理解了它，就能明白 `native_loop` 是如何把原始 SSE chunk 一步步转换成上层可消费的 `TextDelta` / `ToolCallReady` / `TurnEnd` 的。
+## 13. 关键不变量
+
+1. 分片必须按 index 归槽，arguments 只按到达顺序追加。
+2. id/name 一旦获得就不得改变。
+3. 数量和参数体积在收流时就有界，大小按 UTF-8 bytes 计算。
+4. 没有显式 finish，就不得产生完整 `TurnEnd`。
+5. 默认 `off` 时，任何 call 都不在 finish 前产出。
+6. JSON 可解析只是实验启发式，不是 provider block-complete 证明。
+7. 实验 call emitted 后的任何追加都必须 `TOOL_REPLAY_MISMATCH`，不能重解释。
+8. accumulator 只处理 fragment 形状；ToolCatalog/schema/effect/Broker 属于下游严格边界。
+9. 默认路径的工具顺序是：完整 batch → checkpoint → Broker PREPARE → checkpoint → dispatch。
+10. 累积器是 attempt-local 临时状态，不是 Runtime authority。
+
+## 14. 建议的阅读顺序
+
+```text
+agent/engine/native_loop/llm_client.py
+  → StreamItem / _PartialCall / _ToolCallAccumulator
+  → NativeLlmClient._consume
+agent/engine/native_loop/loop.py
+  → ToolCallReady 分支
+  → _validate_finish_reason / _validate_tool_batch
+agent/engine/native_loop/engine.py
+  → prepare_batch / execute_one / run_calls
+agent/runtime/adapters/brokered_tools.py
+  → prepare_native_batch / build_brokered_native_registry
+```
+
+按这个顺序能清楚看到：“一个 JSON 看起来完整”到“一个工具被生产系统允许执行”之间，还有 finish、batch、catalog、schema、effect、stable slot、checkpoint 和 fencing 多道边界。

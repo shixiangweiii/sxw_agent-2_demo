@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
 
 import pytest
+
+from tests.reliability.support.runtime_releases import activate_test_releases
 
 from agent.runtime.adapters.filesystem_artifact import FilesystemArtifactStore
 from agent.runtime.adapters.scripted_engine import ScriptedEngineAdapter
@@ -13,7 +16,7 @@ from agent.runtime.adapters.sqlite import RuntimeDatabase, SqliteRuntimeStore
 from agent.runtime.application.admission import AdmissionService, CreateRunInput
 from agent.runtime.application.coordinator import EngineRegistry, RunCoordinator
 from agent.runtime.application.tool_broker import ToolBroker
-from agent.runtime.domain.errors import RuntimeFault
+from agent.runtime.domain.errors import AttemptOwnershipLost, RuntimeFault
 from agent.runtime.domain.models import (
     EngineOutcome,
     EngineOutcomeKind,
@@ -56,11 +59,7 @@ async def runtime(tmp_path):
     store = SqliteRuntimeStore(db)
     await store.initialize()
     clock = FakeClock()
-    releases: dict[str, str] = {}
-    for engine in ("plan_execute", "agent_loop", "native_loop"):
-        releases[engine] = await store.register_release(
-            ReleaseManifest(engine=engine, components={"test": "v1"}), activate=True,
-        )
+    releases = await activate_test_releases(store, marker="v1")
     return store, clock, releases, tmp_path
 
 
@@ -92,6 +91,7 @@ async def admit(
 
 async def claim_and_start(store, clock):
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="worker-a", lease_ms=1000, now_ms=clock.now_ms(),
     )
     assert claim is not None
@@ -196,7 +196,6 @@ async def test_rel_03_concurrent_new_runs_share_one_conversation_winner(runtime)
     assert [row["turn_seq"] for row in rows] == [1, 2]
     assert sum(row["state"] not in {
         "SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT", "REJECTED",
-        "INCOMPATIBLE_RELEASE",
     } for row in rows) == 1
     # The losing admission rolled back its conversation revision/turn allocation.
     assert conversation["next_turn_seq"] == 3
@@ -212,7 +211,10 @@ async def test_rel_04_05_terminal_is_unique_and_cancel_cannot_override(runtime):
         store, EngineRegistry({"native_loop": adapter}),
         clock=clock, random_source=FakeRandom(), event_flush_bytes=1,
     )
-    claim = await store.claim_next(worker_id="worker-a", lease_ms=1000, now_ms=clock.now_ms())
+    claim = await store.claim_next(
+        worker_id="worker-a", lease_ms=1000, now_ms=clock.now_ms(),
+        release_map=await store.active_releases(),
+    )
     assert claim is not None
     assert await coordinator.execute_claim(claim, worker_id="worker-a") is RunStatus.SUCCEEDED
     with pytest.raises(RuntimeFault) as raised:
@@ -335,7 +337,7 @@ async def test_rel_11_checkpoint_cas_does_not_overwrite(runtime):
     store, clock, _, _ = runtime
     run = (await admit(store, clock)).run
     _, activity = await claim_and_start(store, clock)
-    state = WorkingState(release_fingerprint=run.envelope.release_fingerprint, goal="test")
+    state = WorkingState(goal="test")
     checkpoint = await store.save_checkpoint(
         run_id=run.envelope.run_id, activity_id=activity.activity_id,
         fencing_token=activity.fencing_token, expected_revision=0,
@@ -349,6 +351,42 @@ async def test_rel_11_checkpoint_cas_does_not_overwrite(runtime):
             working_state=state, now_ms=clock.now_ms(),
         )
     assert raised.value.code == "CHECKPOINT_REVISION_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_commits_engine_events_in_the_same_order(runtime):
+    store, clock, _, _ = runtime
+    run = (await admit(store, clock)).run
+    _, activity = await claim_and_start(store, clock)
+
+    await store.save_checkpoint(
+        run_id=run.envelope.run_id,
+        activity_id=activity.activity_id,
+        fencing_token=activity.fencing_token,
+        expected_revision=0,
+        working_state=WorkingState(goal="start one model generation"),
+        engine_state={"phase": "MODEL_REQUEST"},
+        now_ms=clock.now_ms(),
+        events=(EventDraft(
+            EventType.OUTPUT_GENERATION_STARTED,
+            {
+                "message_id": "model-slot-0",
+                "generation_id": "generation-1",
+                "supersedes_generation_id": None,
+                "reason": "initial",
+            },
+            activity_id=activity.activity_id,
+            producer="engine:native_loop",
+            occurred_at=clock.now_ms(),
+        ),),
+    )
+
+    events = await store.list_events(run.envelope.run_id, visibility=None)
+    tail = [event.event_type for event in events[-2:]]
+    assert tail == [
+        EventType.OUTPUT_GENERATION_STARTED,
+        EventType.CHECKPOINT_COMMITTED,
+    ]
 
 
 @pytest.mark.asyncio
@@ -376,7 +414,10 @@ async def test_rel_12_old_fencing_token_cannot_commit_after_reclaim(runtime):
     )
     clock.advance(1001)
     assert await store.recover_expired(now_ms=clock.now_ms()) == 1
-    new_claim = await store.claim_next(worker_id="worker-b", lease_ms=1000, now_ms=clock.now_ms())
+    new_claim = await store.claim_next(
+        worker_id="worker-b", lease_ms=1000, now_ms=clock.now_ms(),
+        release_map=await store.active_releases(),
+    )
     assert new_claim is not None
     assert new_claim.activity.fencing_token > old_claim.activity.fencing_token
     with pytest.raises(RuntimeFault) as raised:
@@ -389,7 +430,6 @@ async def test_rel_12_old_fencing_token_cannot_commit_after_reclaim(runtime):
     assert raised.value.code == "STALE_FENCING_TOKEN"
 
     stale_state = WorkingState(
-        release_fingerprint=run.envelope.release_fingerprint,
         goal="must not be committed by the expired worker",
     )
     with pytest.raises(RuntimeFault) as stale_checkpoint:
@@ -556,16 +596,26 @@ async def test_rel_20_cancel_and_complete_have_commit_order_semantics(runtime):
 
 
 @pytest.mark.asyncio
-async def test_rel_28_release_mismatch_is_explicit_terminal(runtime):
-    store, clock, _, _ = runtime
+async def test_rel_28_wrong_release_cannot_claim_or_terminalize_run(runtime):
+    store, clock, releases, _ = runtime
     run = (await admit(store, clock)).run
     adapter = ScriptedEngineAdapter([], release_fingerprint="different-release")
     coordinator = RunCoordinator(store, EngineRegistry({"native_loop": adapter}), clock=clock)
-    claim = await store.claim_next(worker_id="worker-a", lease_ms=1000, now_ms=clock.now_ms())
+    assert await store.claim_next(
+        worker_id="wrong-worker", lease_ms=1000, now_ms=clock.now_ms(),
+        release_map={"native_loop": "different-release"},
+    ) is None
+    assert (await store.get_run(run.envelope.run_id)).status is RunStatus.DISPATCH_PENDING
+
+    claim = await store.claim_next(
+        worker_id="worker-a", lease_ms=1000, now_ms=clock.now_ms(),
+        release_map={"native_loop": releases["native_loop"]},
+    )
     assert claim is not None
-    result = await coordinator.execute_claim(claim, worker_id="worker-a")
-    assert result is RunStatus.INCOMPATIBLE_RELEASE
-    assert (await store.get_run(run.envelope.run_id)).terminal_status is RunStatus.INCOMPATIBLE_RELEASE
+    with pytest.raises(AttemptOwnershipLost) as raised:
+        await coordinator.execute_claim(claim, worker_id="worker-a")
+    assert raised.value.code == "CLAIM_RELEASE_MISMATCH"
+    assert (await store.get_run(run.envelope.run_id)).terminal_status is None
 
 
 @pytest.mark.asyncio
@@ -579,7 +629,8 @@ async def test_rel_30_all_engine_names_share_coordinator_contract(runtime):
         coordinator = RunCoordinator(store, EngineRegistry({engine: adapter}), clock=clock,
                                      event_flush_bytes=1)
         claim = await store.claim_next(
-            worker_id=f"worker-{index}", lease_ms=1000, now_ms=clock.now_ms(), engines=(engine,),
+            worker_id=f"worker-{index}", lease_ms=1000, now_ms=clock.now_ms(),
+            release_map={engine: releases[engine]},
         )
         assert claim is not None
         assert await coordinator.execute_claim(claim, worker_id=f"worker-{index}") is RunStatus.SUCCEEDED
@@ -861,6 +912,7 @@ async def test_unresolved_effect_blocks_success_and_deadline_closes_timed_out(ru
         clock=clock,
     )
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="unknown-worker", lease_ms=1_000, now_ms=clock.now_ms(),
     )
     assert claim is not None
@@ -959,3 +1011,75 @@ async def test_rel_23_large_tool_result_is_artifact_backed_preview(runtime):
     events = await store.list_events(run.envelope.run_id, visibility=None)
     tool_result = next(item for item in events if item.event_type is EventType.TOOL_RESULT_COMMITTED)
     assert "x" * 1000 not in str(tool_result.payload)
+
+
+@pytest.mark.asyncio
+async def test_large_tool_result_is_fully_rematerialized_from_artifact_after_restart(runtime):
+    store, clock, _, tmp_path = runtime
+    run = (await admit(store, clock, key="large-result-materialization")).run
+    _, activity = await claim_and_start(store, clock)
+    artifacts = FilesystemArtifactStore(tmp_path / "artifacts")
+    calls = 0
+    complete_preview = {
+        "records": [
+            {"ordinal": index, "content": "完整结果-" + "值" * 100}
+            for index in range(50)
+        ]
+    }
+
+    async def large_result(_arguments, _context):
+        nonlocal calls
+        calls += 1
+        return complete_preview
+
+    broker = ToolBroker(
+        store,
+        artifacts,
+        clock=clock,
+        inline_result_max_bytes=128,
+    )
+    broker.register(ToolManifest(
+        name="large",
+        release_digest="large-result-v1",
+        effect_class=ToolEffectClass.READ_ONLY,
+        timeout_seconds=1,
+    ), large_result)
+    first = await broker.execute(
+        run_id=run.envelope.run_id,
+        parent_activity_id=activity.activity_id,
+        fencing_token=activity.fencing_token,
+        logical_key="large:materialize:0",
+        tool_name="large",
+        arguments={},
+        deadline_at_ms=run.envelope.deadline_at,
+    )
+    event = next(
+        item
+        for item in await store.list_events(run.envelope.run_id, visibility=None)
+        if item.event_type is EventType.TOOL_RESULT_COMMITTED
+    )
+    assert first.result_ref is not None
+    assert first.preview != complete_preview
+
+    # A fresh Broker models Worker restart.  Ordinary committed results never
+    # re-run their executor; the complete current envelope comes from CAS.
+    restarted = ToolBroker(
+        store,
+        FilesystemArtifactStore(tmp_path / "artifacts"),
+        clock=clock,
+        inline_result_max_bytes=128,
+    )
+    materialized = await restarted.materialize_committed_result(
+        tool_execution_id=event.tool_execution_id,
+        parent_activity_id=activity.activity_id,
+        deadline_at_ms=run.envelope.deadline_at,
+    )
+
+    assert calls == 1
+    assert materialized.status is ToolResultStatus.SUCCESS
+    assert materialized.preview == complete_preview
+    assert materialized.result_ref == first.result_ref
+    execution = await store.get_tool_execution(event.tool_execution_id)
+    persisted = json.loads(execution["result_json"])
+    assert persisted["full_result_ref"] == first.result_ref
+    assert "完整结果" not in str(persisted["preview"])

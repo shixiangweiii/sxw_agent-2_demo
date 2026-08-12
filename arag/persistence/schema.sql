@@ -2,8 +2,7 @@
 -- a mismatching local database must be deleted and recreated by the operator.
 CREATE TABLE schema_meta (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    schema_version TEXT NOT NULL,
-    schema_checksum TEXT NOT NULL,
+    schema_digest TEXT NOT NULL CHECK (length(schema_digest) = 64),
     created_at INTEGER NOT NULL
 );
 

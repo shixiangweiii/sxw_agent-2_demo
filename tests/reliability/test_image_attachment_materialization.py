@@ -5,7 +5,7 @@ import hashlib
 import pytest
 
 from agent.runtime.adapters.filesystem_artifact import FilesystemArtifactStore
-from agent.runtime.adapters.legacy_engines import LegacyEngineAdapter
+from agent.runtime.adapters.adk_engines import AdkEngineAdapter
 from agent.runtime.domain.artifact import ArtifactPurpose
 
 
@@ -22,7 +22,7 @@ async def test_large_image_is_reassembled_from_verified_bounded_ranges(tmp_path)
 
     # _read_all is intentionally a small adapter boundary; constructing the
     # actual LLM/ADK context is unrelated to the CAS materialization contract.
-    adapter = object.__new__(LegacyEngineAdapter)
+    adapter = object.__new__(AdkEngineAdapter)
     adapter.artifact_store = store
     materialized = await adapter._read_all(  # noqa: SLF001 - contract regression
         ref.artifact_id,

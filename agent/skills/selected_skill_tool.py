@@ -36,8 +36,10 @@ logger = get_logger("agent.skill")
 class SelectedSkillTool(BaseTool):
     def __init__(
         self, *, skill_id: str, tool_name: str, description: str,
-        input_schema: Optional[dict[str, Any]], client: SkillCenterClient,
+        input_schema: dict[str, Any], client: SkillCenterClient,
     ) -> None:
+        if not isinstance(input_schema, dict):
+            raise TypeError(f"{tool_name}: input_schema must be an object")
         super().__init__(name=tool_name, description=description)
         self._skill_id = skill_id
         self._tool_name = tool_name

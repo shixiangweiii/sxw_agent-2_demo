@@ -1,4 +1,4 @@
-"""Adapters from the three existing reasoning engines to EngineAdapter v1.
+"""Adapter for the two ADK-backed reasoning engines.
 
 ADK Session and InMemoryArtifactService are created per attempt and discarded.
 Canonical Runtime events are the only cross-attempt history source.
@@ -29,7 +29,7 @@ APP_NAME = "sxw-agent"
 
 
 def _broker_owns_tool_projection(event: Any, tool_broker: Any) -> bool:
-    """Return whether a legacy Tool event is already a Broker-owned fact.
+    """Return whether an ADK Tool event is already a Broker-owned fact.
 
     ADK always prepares its aggregate ToolCall batch before callbacks run, so
     its unannotated projections belong to the Broker.  Native explicitly marks
@@ -43,7 +43,7 @@ def _broker_owns_tool_projection(event: Any, tool_broker: Any) -> bool:
     )
 
 
-class LegacyEngineAdapter:
+class AdkEngineAdapter:
     def __init__(
         self,
         *,
@@ -54,6 +54,8 @@ class LegacyEngineAdapter:
         artifact_metadata_loader: Any,
         tool_broker: Any,
     ) -> None:
+        if engine not in {"plan_execute", "agent_loop"}:
+            raise ValueError("AdkEngineAdapter only accepts plan_execute or agent_loop")
         self.name = engine
         self.engine = engine
         self.context = context
@@ -132,7 +134,6 @@ class LegacyEngineAdapter:
                 if request.checkpoint
                 else WorkingState(
                     goal=request.input_text,
-                    release_fingerprint=request.envelope.release_fingerprint,
                 )
             ),
         )

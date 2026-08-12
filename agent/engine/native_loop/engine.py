@@ -1,267 +1,578 @@
-"""NativeLoopEngine：把自研循环接到统一的 ReasoningEngine 端口上。
+"""Production Native EngineAdapter, directly bound to durable RuntimeIO.
 
-职责收得很窄——组装工具面、取/存会话历史、把 genai Content 转成内部消息、
-把循环产出的 StreamEvent 透出去。真正的"循环"在 loop.py。
-
-会话历史由 Canonical Runtime 编译后通过 ``RunContext`` 传入。
-Native Runtime 不持有进程级语义历史。
+The reusable ``NativeLoop`` kernel remains Runtime-independent for Claude Skill
+sub-runners.  This adapter alone owns canonical history/attachments, the strict
+checkpoint codec, commit-before-pull model streaming and mandatory Tool Broker
+coordination.  It deliberately does not implement ``ReasoningEngine`` and does
+not use the ADK queue/merge transport.
 """
 from __future__ import annotations
 
-import logging
-from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any, AsyncIterator
+import asyncio
+import base64
+from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING, Any
 
-from agent.engine.base import ReasoningEngine, RunContext
-from agent.engine.loop_tools import LOOP_INSTRUCTION, TASK_PLAN_KEY, resolve_sub_agent_engine
-from agent.engine.loop_tools.task_plan_tool import update_task_plan
-from agent.engine.loop_tools.tool_search_tool import build_deferred_tools, tool_search
+from agent.engine.loop_tools import LOOP_INSTRUCTION, TASK_PLAN_KEY
+from agent.engine.loop_tools.catalog import collect_loop_tools
+from agent.engine.native_loop import executor
+from agent.engine.native_loop.checkpoint import (
+    NativeCheckpointPhase,
+    decode_native_checkpoint,
+    encode_native_checkpoint,
+)
 from agent.engine.native_loop.llm_client import NativeLlmClient, get_shared_client
-from agent.engine.native_loop.loop import T_COMPLETED, LoopConfig, LoopState, NativeLoop
-from agent.engine.native_loop.messages import Msg, ToolCall, Usage, content_to_msg
-from agent.engine.native_loop.sub_agent import build_researcher_tool
+from agent.engine.native_loop.loop import (
+    T_COMPLETED,
+    LoopConfig,
+    LoopState,
+    NativeLoop,
+    NativeRunCancelled,
+)
+from agent.engine.native_loop.messages import Msg, ToolCall
 from agent.engine.native_loop.tools import ToolRegistry, build_registry
-from agent.runtime.adapters.brokered_tools import broker_native_registry
-from agent.runtime.domain.models import EngineOutcome, EngineOutcomeKind, WorkingState
-from agent.skills.stream_merge import merge_runner_events
+from agent.runtime.adapters.brokered_tools import (
+    NativeBrokerSession,
+    begin_native_settlement_batch,
+    build_brokered_native_registry,
+    prepare_native_batch,
+)
+from agent.runtime.application.tool_broker import ToolBatchCall
+from agent.runtime.domain.artifact import MAX_HTTP_RANGE_BYTES
+from agent.runtime.domain.errors import RuntimeFault, raise_if_ownership_lost
+from agent.runtime.domain.models import (
+    EngineOutcome,
+    EngineOutcomeKind,
+    EventType,
+    ToolResultEnvelope,
+    ToolResultStatus,
+    WorkingState,
+    canonical_json,
+    stable_id,
+)
+from agent.runtime.ports.artifact import ArtifactStore
+from agent.runtime.ports.engine import EngineRunRequest, RuntimeIO
+from agent.runtime.ports.store import EventDraft
+from agent.skills.request_context import (
+    SkillRequestContext,
+    reset_request_context,
+    set_request_context,
+)
+from agent.skills.ui_event_queue import reset_ui_sink, set_ui_sink
 from agent.stream.event_converters import StreamEvent
-from common.obs import get_logger, log_kv
 
 if TYPE_CHECKING:
     from agent.context import AgentContext
+    from agent.runtime.application.tool_catalog import ToolCatalog
 
-logger = get_logger("agent.native")
-
-# 与 agent_loop 对齐：硬熔断 = 业务软收尾轮次 + 该余量，给 force-summary 留生效窗口。
 _HARD_CAP_MARGIN = 2
+_LARGE_CHECKPOINT_RESULT_BYTES = 8 * 1024
+_CONTROL_POLL_SECONDS = 0.1
 
 
-@dataclass
-class NativeRuntime:
-    client: NativeLlmClient
-    registry: ToolRegistry
+def collect_native_tools(ctx: "AgentContext", *, run_engine: str = "native_loop") -> list[Any]:
+    """Build the final loop tool surface; Worker validates it before release."""
+    return collect_loop_tools(ctx, run_engine=run_engine)
 
 
-def _collect_tools(ctx: "AgentContext", *, run_engine: str) -> list[Any]:
-    """组装本引擎的工具面。
+class NativeLoopAdapter:
+    """Direct ``EngineAdapter.execute(request, RuntimeIO)`` implementation."""
 
-    必须与 `agent_loop`（见 agent/engine/agent_loop/agent_loop_engine.py 的
-    build_loop_agent）**逐个一致**，否则两代引擎的对比就变成了工具面之争。
-    ctx.tools 是两代共享的部分；下面 4 行是 loop 引擎专属的。
-    """
-    tools: list[Any] = list(ctx.tools)                     # 内置 + 检索 + 技能 + Claude SKILL + A2A
-    tools.append(update_task_plan)                         # 计划即工具
-    tools.append(tool_search)                              # 动态工具发现
-    tools.extend(build_deferred_tools())                   # 延迟工具：translate / text_stats
+    name = "native_loop"
 
-    # 子代理委派：两种实现同名（researcher）、同描述、同参数（request），
-    # 只是内核不同——ADK 版经 adk_bridge 自建子 Runner 执行。
-    sub_engine = resolve_sub_agent_engine(ctx.settings.sub_agent_engine, run_engine)
-    if sub_engine == "adk":
-        from agent.engine.loop_tools.sub_agent_tool import build_sub_agent_tool  # noqa: PLC0415
-        tools.append(build_sub_agent_tool(ctx.llm))
-    else:
-        tools.append(build_researcher_tool(ctx.chat))
-    log_kv(logger, logging.INFO, "NativeLoop", "sub agent engine resolved",
-           configured=ctx.settings.sub_agent_engine, resolved=sub_engine)
-    return tools
+    def __init__(
+        self,
+        *,
+        context: "AgentContext",
+        release_fingerprint: str,
+        artifact_store: ArtifactStore,
+        artifact_metadata_loader: Any,
+        registry: ToolRegistry,
+        tool_catalog: "ToolCatalog",
+        client: NativeLlmClient | None = None,
+    ) -> None:
+        self.context = context
+        self.release_fingerprint = release_fingerprint
+        self.artifact_store = artifact_store
+        self.artifact_metadata_loader = artifact_metadata_loader
+        self.registry = registry
+        self.tool_catalog = tool_catalog
+        self.client = client or get_shared_client(context.settings)
+        settings = context.settings
+        if (
+            settings.native_early_tool_dispatch == "provider_block_complete"
+            and not getattr(self.client, "tool_call_block_complete", False)
+        ):
+            raise RuntimeFault(
+                "EARLY_DISPATCH_CAPABILITY_UNAVAILABLE",
+                "the configured provider has no ToolCall block-complete signal",
+                500,
+            )
 
+    async def execute(self, request: EngineRunRequest, io: RuntimeIO) -> EngineOutcome:
+        settings = self.context.settings
+        try:
+            broker = io.tool_broker
+        except Exception as exc:
+            raise RuntimeError("Native Runtime requires RuntimeIO.ToolBroker") from exc
 
-class NativeLoopEngine(ReasoningEngine):
-    def __init__(self, ctx: "AgentContext", *, engine: str) -> None:
-        self._ctx = ctx
-        self._runtime = NativeRuntime(
-            client=get_shared_client(ctx.settings),
-            registry=build_registry(_collect_tools(ctx, run_engine=engine)),
+        initial_messages = await self._compile_input(request)
+        if request.checkpoint is None:
+            state = LoopState(messages=initial_messages)
+            restored_phase: NativeCheckpointPhase | None = None
+        else:
+            if request.checkpoint.engine_state is None:
+                raise RuntimeFault(
+                    "NATIVE_CHECKPOINT_INVALID",
+                    "native checkpoint is missing engine_state",
+                    409,
+                )
+            current_input = initial_messages[-1].content
+            state, restored_phase = decode_native_checkpoint(
+                request.checkpoint.engine_state,
+                current_input=current_input,
+            )
+            await self._materialize_ledger_results(state, request, broker)
+
+        checkpoint_revision = request.checkpoint.revision if request.checkpoint else 0
+        session = NativeBrokerSession(
+            run_id=request.envelope.run_id,
+            activity_id=request.activity_id,
+            fencing_token=request.fencing_token,
+            deadline_at_ms=request.envelope.deadline_at,
+            tool_broker=broker,
+            catalog=self.tool_catalog,
+            early_settlement_capacity=(
+                settings.native_max_tool_calls_per_turn
+                if settings.native_early_tool_dispatch == "experimental_heuristic"
+                else None
+            ),
         )
+        brokered_registry = build_brokered_native_registry(self.registry, session)
 
-    async def run_stream(self, rc: RunContext) -> AsyncIterator[StreamEvent]:
-        runtime = self._runtime
-        settings = rc.settings
-        hard_cap = settings.max_loop_iters + _HARD_CAP_MARGIN
-
-        # 历史是 Runtime 已提交 USER/ASSISTANT message 的临时投影。
-        # 失败 partial delta 不在投影中，进程重启后仍可完整编译。
-        messages = [content_to_msg(item) for item in rc.canonical_history]
-        messages.append(content_to_msg(rc.user_message))
-        initial_state, restored_phase = _restore_state(rc, messages)
-
-        # Terminal commit may have lost the race with a process kill after the
-        # COMPLETED checkpoint.  Seed the final semantic message without emitting
-        # duplicate deltas, then let the adapter return its explicit outcome.
-        if restored_phase == "COMPLETED" and initial_state.messages:
-            final = initial_state.messages[-1]
-            if final.role == "assistant" and not final.tool_calls:
-                seed = getattr(rc.runtime_io, "seed_assistant_text", None)
-                if seed is not None:
-                    seed(str(final.content or ""))
-                rc.engine_outcome = EngineOutcome(kind=EngineOutcomeKind.COMPLETED)
-                return
-
-        checkpoint_revision = rc.engine_checkpoint.revision if rc.engine_checkpoint else 0
-
-        async def persist(state: LoopState, phase: str) -> None:
+        async def persist(
+            current: LoopState,
+            phase: str,
+            stream_events: tuple[StreamEvent, ...],
+        ) -> None:
             nonlocal checkpoint_revision
-            if rc.runtime_io is None:
-                return
-            plan = state.tool_state.get(TASK_PLAN_KEY)
+            raw = encode_native_checkpoint(
+                current,
+                phase,  # type: ignore[arg-type] - encoder rejects unknown values
+                large_result_bytes=_LARGE_CHECKPOINT_RESULT_BYTES,
+            )
+            size = len(canonical_json(raw).encode("utf-8"))
+            if size > settings.native_max_checkpoint_bytes:
+                raise RuntimeFault(
+                    "CHECKPOINT_TOO_LARGE",
+                    "native checkpoint exceeds the configured UTF-8 byte limit",
+                    409,
+                    {"limit": settings.native_max_checkpoint_bytes, "actual": size},
+                )
+            plan = current.tool_state.get(TASK_PLAN_KEY)
             steps = plan.get("steps", []) if isinstance(plan, dict) else []
-            current = plan.get("current", 1) if isinstance(plan, dict) else 1
+            cursor = plan.get("current", 1) if isinstance(plan, dict) else 1
             model_plan = [
                 {
                     "step": index + 1,
                     "title": str(title),
-                    "status": "done" if index + 1 < current else (
-                        "running" if index + 1 == current else "planned"
+                    "status": (
+                        "done"
+                        if index + 1 < cursor
+                        else "running"
+                        if index + 1 == cursor
+                        else "planned"
                     ),
                 }
                 for index, title in enumerate(steps)
             ]
-            saved = await rc.runtime_io.checkpoint(
-                WorkingState(
-                    goal=_user_text(rc),
-                    model_plan=model_plan,
-                    release_fingerprint=rc.release_fingerprint,
-                ),
-                expected_revision=checkpoint_revision,
-                engine_state=_serialize_state(state, phase),
-            )
+            drafts = tuple(self._checkpoint_event(event, request) for event in stream_events)
+            try:
+                saved = await io.checkpoint(
+                    WorkingState(
+                        goal=request.input_text,
+                        model_plan=model_plan,
+                        budget={
+                            "model_call_count": current.model_call_count,
+                            "tool_call_count": current.tool_call_count,
+                        },
+                    ),
+                    expected_revision=checkpoint_revision,
+                    engine_state=raw,
+                    events=drafts,
+                )
+            except RuntimeFault as exc:
+                raise_if_ownership_lost(exc)
+                raise
             checkpoint_revision = saved.revision
 
+        async def prepare_batch(calls: list[ToolCall], _state: LoopState) -> None:
+            batch: list[ToolBatchCall] = []
+            for call in calls:
+                arguments, error = executor.parse_arguments(call)
+                if error is not None or arguments is None:
+                    raise RuntimeError("validated Native ToolCall unexpectedly became invalid")
+                batch.append(ToolBatchCall(
+                    logical_key=call.logical_key,
+                    tool_name=call.name,
+                    arguments=arguments,
+                    framework_call_id=call.id,
+                ))
+            try:
+                await prepare_native_batch(session, self.registry, batch)
+            except RuntimeFault as exc:
+                raise_if_ownership_lost(exc)
+                raise
+
+        async def execute_one(call: ToolCall, current: LoopState) -> executor.ToolOutcome:
+            try:
+                outcome = await executor.execute_one(
+                    call,
+                    brokered_registry,
+                    invocation_id=request.envelope.run_id,
+                    state=current.tool_state,
+                )
+            except RuntimeFault as exc:
+                raise_if_ownership_lost(exc)
+                raise
+            prepared = session.prepared_by_logical_key.get(call.logical_key)
+            execution_id = (
+                prepared.tool_execution_id
+                if prepared is not None
+                else stable_id("tool", request.envelope.run_id, call.logical_key)
+            )
+            outcome.tool_execution_id = execution_id
+            outcome.message.tool_execution_id = execution_id
+            outcome.project_event = False
+            return outcome
+
+        async def run_calls(
+            calls: list[ToolCall], current: LoopState, max_concurrency: int,
+        ) -> AsyncIterator[executor.ToolOutcome]:
+            begin_native_settlement_batch(session, calls)
+            async for outcome in executor.run_calls(
+                calls,
+                brokered_registry,
+                invocation_id=request.envelope.run_id,
+                state=current.tool_state,
+                max_concurrency=max_concurrency,
+            ):
+                prepared = session.prepared_by_logical_key.get(outcome.call.logical_key)
+                execution_id = (
+                    prepared.tool_execution_id
+                    if prepared is not None
+                    else stable_id(
+                        "tool", request.envelope.run_id, outcome.call.logical_key,
+                    )
+                )
+                outcome.tool_execution_id = execution_id
+                outcome.message.tool_execution_id = execution_id
+                outcome.project_event = False
+                yield outcome
+
+        async def probe_control() -> None:
+            if io.remaining_ms() <= 0:
+                raise TimeoutError
+            if await io.is_cancelled():
+                raise NativeRunCancelled
+
+        # A kill after MODEL_RESPONSE_COMMITTED but before COMPLETED must not
+        # issue another model request. Finish the exact persisted final response.
+        if restored_phase == "MODEL_RESPONSE_COMMITTED":
+            final = state.messages[-1] if state.messages else None
+            if final is not None and final.role == "assistant" and not final.tool_calls:
+                text = final.content if isinstance(final.content, str) else ""
+                if not text.strip():
+                    raise RuntimeFault(
+                        "NATIVE_CHECKPOINT_INVALID",
+                        "MODEL_RESPONSE_COMMITTED contains an empty final response",
+                        409,
+                    )
+                state.final_text = text
+                state.final_message_id = state.current_message_id
+                state.final_generation_id = state.current_generation_id
+                state.transition = T_COMPLETED
+                await persist(state, "COMPLETED", ())
+                io.set_final_assistant(
+                    text, state.current_message_id, state.current_generation_id,
+                )
+                return EngineOutcome(kind=EngineOutcomeKind.COMPLETED)
+
+        if restored_phase == "COMPLETED":
+            assert state.final_text and state.final_message_id and state.final_generation_id
+            io.set_final_assistant(
+                state.final_text, state.final_message_id, state.final_generation_id,
+            )
+            return EngineOutcome(kind=EngineOutcomeKind.COMPLETED)
+
         loop = NativeLoop(
-            client=runtime.client,
-            registry=broker_native_registry(runtime.registry, rc),
+            client=self.client,
+            registry=brokered_registry,
             system_instruction=LOOP_INSTRUCTION,
-            # 摘要压缩复用已有的轻量单轮补全客户端（无需流式、无需工具）。
-            chat=self._ctx.chat,
+            chat=self.context.chat,
             checkpoint=persist,
+            prepare_tool_batch=prepare_batch,
+            run_tool_calls=run_calls,
+            execute_tool=execute_one,
+            control_probe=probe_control,
+            message_id_factory=lambda ordinal: stable_id(
+                "msg", request.envelope.run_id, f"native:model:{ordinal}",
+            ),
             config=LoopConfig(
                 max_iters=settings.max_loop_iters,
-                hard_cap=hard_cap,
+                hard_cap=settings.max_loop_iters + _HARD_CAP_MARGIN,
                 max_tool_concurrency=settings.native_max_tool_concurrency,
-                streaming_tool_exec=settings.native_streaming_tool_exec,
+                early_tool_dispatch=settings.native_early_tool_dispatch,
                 tool_result_max_chars=settings.native_tool_result_max_chars,
                 context_window_tokens=settings.context_window_tokens,
                 compact_buffer_tokens=settings.compact_buffer_tokens,
                 compact_preserve_units=settings.compact_preserve_units,
+                max_tool_calls_per_turn=settings.native_max_tool_calls_per_turn,
+                max_tool_calls_per_run=settings.native_max_tool_calls_per_run,
+                max_tool_argument_bytes=settings.native_max_tool_argument_bytes,
+                max_tool_batch_argument_bytes=settings.native_max_tool_batch_argument_bytes,
+                max_model_output_bytes=settings.native_max_model_output_bytes,
             ),
         )
-        log_kv(logger, logging.INFO, "NativeLoop", "request",
-               user=rc.user_id, session=rc.session_id,
-               history=len(messages), max_iters=settings.max_loop_iters, hard_cap=hard_cap)
 
-        # merge_runner_events 与 ADK 无关（签名是 AsyncIterator + 转换器），
-        # 这里复用它来并发 drain 技能 UI 队列：技能/沙箱在一次工具调用内部推进来的
-        # 展示帧因此能实时穿插在 text / tool_call 之间，而不是等工具整体返回才一次性出现。
-        async for event in merge_runner_events(
-            loop.run(messages, initial_state=initial_state), lambda e: [e], # 真正干活的 while 循环本体的入口
-        ):
-            yield event
+        request_token = set_request_context(SkillRequestContext(
+            agent_uuid=request.envelope.agent_id,
+            user_id=request.envelope.principal_id,
+            session_id=request.envelope.run_id,
+            text=request.input_text,
+            user={"userId": request.envelope.principal_id},
+            run_id=request.envelope.run_id,
+            activity_id=request.activity_id,
+            deadline_at_ms=request.envelope.deadline_at,
+            idempotency_key=request.envelope.idempotency_key,
+        ))
 
-        if loop.stop_reason == T_COMPLETED:
-            rc.engine_outcome = EngineOutcome(kind=EngineOutcomeKind.COMPLETED)
-        else:
-            # NativeLoop records a deterministic stop reason before emitting
-            # its diagnostic error draft.  Keep that diagnostic non-authoritative
-            # while returning an explicit terminal outcome to the Coordinator.
-            rc.engine_outcome = EngineOutcome(
+        async def direct_skill_sink(event: StreamEvent) -> None:
+            await io.emit(event.event, event.data)
+
+        ui_token = set_ui_sink(direct_skill_sink)
+        stream = loop.run(state.messages, initial_state=state)
+        cancelled = False
+
+        async def next_event() -> StreamEvent:
+            pull = asyncio.create_task(anext(stream), name="native-provider-pull")
+            try:
+                while True:
+                    remaining = io.remaining_ms()
+                    if remaining <= 0:
+                        raise TimeoutError
+                    done, _ = await asyncio.wait(
+                        {pull},
+                        timeout=min(_CONTROL_POLL_SECONDS, remaining / 1000),
+                    )
+                    if done:
+                        return pull.result()
+                    if await io.is_cancelled():
+                        raise NativeRunCancelled
+            finally:
+                if not pull.done():
+                    pull.cancel()
+                await asyncio.gather(pull, return_exceptions=True)
+
+        try:
+            async with asyncio.timeout(max(0.001, io.remaining_ms() / 1000)):
+                while True:
+                    try:
+                        event = await next_event()
+                    except StopAsyncIteration:
+                        break
+                    # Direct awaited commit: the kernel cannot pull another
+                    # provider chunk, checkpoint or dispatch a Tool while the
+                    # preceding event is blocked in Runtime authority.
+                    await io.emit(event.event, event.data)
+                    if event.event == "text":
+                        await io.force_flush()
+                    if await io.is_cancelled():
+                        cancelled = True
+                        break
+        except NativeRunCancelled:
+            cancelled = True
+        except TimeoutError:
+            return EngineOutcome(
                 kind=EngineOutcomeKind.TERMINAL_FAILURE,
-                error_code=loop.stop_reason.upper() or "NATIVE_LOOP_ABORTED",
+                error_code="DEADLINE_EXCEEDED",
+                message="native attempt exceeded the absolute Run deadline",
+            )
+        except RuntimeFault as exc:
+            raise_if_ownership_lost(exc)
+            raise
+        finally:
+            try:
+                await stream.aclose()
+            finally:
+                reset_ui_sink(ui_token)
+                reset_request_context(request_token)
+
+        if cancelled:
+            return EngineOutcome(kind=EngineOutcomeKind.CANCELLED)
+        if loop.stop_reason != T_COMPLETED:
+            if loop.error_code == "MODEL_STREAM_INCOMPLETE":
+                return EngineOutcome(
+                    kind=EngineOutcomeKind.RETRYABLE_FAILURE,
+                    error_code=loop.error_code,
+                    message="provider stream ended before its explicit finish marker",
+                )
+            return EngineOutcome(
+                kind=EngineOutcomeKind.TERMINAL_FAILURE,
+                error_code=loop.error_code or "NATIVE_LOOP_ABORTED",
                 message=f"native loop stopped: {loop.stop_reason or 'unknown'}",
             )
-
-        # 不在本地写回历史；Coordinator 只会在成功 terminal 事务中提交
-        # ASSISTANT_MESSAGE_COMMITTED，它才是下一轮的语义历史。
-
-
-def _user_text(rc: RunContext) -> str:
-    return " ".join(
-        part.text for part in (rc.user_message.parts or []) if getattr(part, "text", None)
-    ).strip()
-
-
-def _serialize_state(state: LoopState, phase: str) -> dict[str, Any]:
-    def message_payload(message: Msg) -> dict[str, Any]:
-        content: Any = message.content
-        if isinstance(content, list) and any(
-            isinstance(item, dict) and item.get("type") == "image_url" for item in content
-        ):
-            # Binary input remains authoritative in Artifact CAS; never copy a
-            # base64 image into runtime.db checkpoints.
-            content = {"$runtime_current_input": True}
-        rematerialize = (
-            message.role == "tool"
-            and message.name == "read_artifact"
-            and len(str(content)) > 8 * 1024
+        if not state.final_text or not state.final_message_id or not state.final_generation_id:
+            return EngineOutcome(
+                kind=EngineOutcomeKind.TERMINAL_FAILURE,
+                error_code="MODEL_EMPTY_FINAL_RESPONSE",
+                message="native loop completed without a semantic final assistant",
+            )
+        io.set_final_assistant(
+            state.final_text, state.final_message_id, state.final_generation_id,
         )
-        if rematerialize:
-            content = {"$runtime_artifact_result": True}
-        return {
-            "role": message.role,
-            "content": content,
-            "tool_calls": [asdict(call) for call in message.tool_calls or []],
-            "tool_call_id": message.tool_call_id,
-            "name": message.name,
-            "is_error": message.is_error,
-            "kind": message.kind,
-            # The source Artifact + ToolExecution are already durable.  Omitting
-            # a large materialized slice makes recovery replay that committed
-            # read instead of copying the bytes into checkpoint JSON.
-            "$rematerialize_tool_result": rematerialize,
-        }
+        return EngineOutcome(kind=EngineOutcomeKind.COMPLETED)
 
+    async def _compile_input(self, request: EngineRunRequest) -> list[Msg]:
+        messages = [
+            Msg(role=str(item["role"]), content=str(item.get("text", "")))
+            for item in request.history
+        ]
+        blocks: list[dict[str, Any]] = []
+        if request.input_text:
+            blocks.append({"type": "text", "text": request.input_text})
+        for artifact_id in request.envelope.attachment_refs:
+            metadata = await self.artifact_metadata_loader(artifact_id)
+            media_type = metadata.get("media_type") or "application/octet-stream"
+            if media_type.startswith("image/"):
+                raw = await self._read_all(
+                    artifact_id, total_size=int(metadata["size_bytes"]),
+                )
+                encoded = base64.b64encode(raw).decode("ascii")
+                blocks.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{media_type};base64,{encoded}"},
+                })
+            else:
+                preview = await self.artifact_store.read_preview(artifact_id)
+                suffix = (
+                    ""
+                    if preview.end_exclusive >= preview.total_size
+                    else "\n[preview truncated; call read_artifact with an offset for more]"
+                )
+                blocks.append({
+                    "type": "text",
+                    "text": (
+                        f"[Attachment {artifact_id} media_type={media_type} "
+                        f"bytes=0-{preview.end_exclusive}/{preview.total_size}]\n"
+                        + preview.data.decode("utf-8", errors="replace")
+                        + suffix
+                    ),
+                })
+        has_image = any(block.get("type") == "image_url" for block in blocks)
+        content: Any = (
+            blocks
+            if has_image
+            else "\n".join(
+                str(block.get("text", ""))
+                for block in blocks
+                if block.get("type") == "text"
+            )
+        )
+        messages.append(Msg(role="user", content=content))
+        return messages
+
+    async def _materialize_ledger_results(
+        self,
+        state: LoopState,
+        request: EngineRunRequest,
+        broker: Any,
+    ) -> None:
+        """Rematerialize every referenced result in-place, not just the tail."""
+        for message in state.messages:
+            if (
+                message.role != "tool"
+                or message.content is not None
+                or not message.tool_execution_id
+            ):
+                continue
+            try:
+                result = await broker.materialize_committed_result(
+                    tool_execution_id=message.tool_execution_id,
+                    parent_activity_id=request.activity_id,
+                    deadline_at_ms=request.envelope.deadline_at,
+                )
+            except RuntimeFault as exc:
+                raise_if_ownership_lost(exc)
+                raise
+            projected = _model_result(result)
+            message.content = executor._to_text(projected)  # noqa: SLF001
+            message.is_error = result.status not in {
+                ToolResultStatus.SUCCESS,
+                ToolResultStatus.NO_OUTPUT,
+            }
+
+    @staticmethod
+    def _checkpoint_event(event: StreamEvent, request: EngineRunRequest) -> EventDraft:
+        event_map = {
+            "output_generation_started": EventType.OUTPUT_GENERATION_STARTED,
+            "tool_call": EventType.TOOL_CALL_COMMITTED,
+            "tool_result": EventType.TOOL_RESULT_COMMITTED,
+            "plan_step": EventType.MODEL_PLAN_UPDATED,
+            "skill_event": EventType.SKILL_UI_FRAME_COMMITTED,
+        }
+        try:
+            event_type = event_map[event.event]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"event {event.event!r} is not allowed in a checkpoint transaction"
+            ) from exc
+        return EventDraft(
+            event_type,
+            dict(event.data),
+            activity_id=request.activity_id,
+            producer="native-engine",
+        )
+
+    async def _read_all(self, artifact_id: str, *, total_size: int) -> bytes:
+        if total_size < 0:
+            raise ValueError("artifact metadata size cannot be negative")
+        chunks: list[bytes] = []
+        offset = 0
+        while offset < total_size:
+            part = await self.artifact_store.read_range(
+                artifact_id,
+                start=offset,
+                end_exclusive=min(total_size, offset + MAX_HTTP_RANGE_BYTES),
+            )
+            chunks.append(part.data)
+            offset = part.end_exclusive
+        if offset != total_size:
+            raise RuntimeError("artifact metadata size changed during materialization")
+        return b"".join(chunks)
+
+
+def _model_result(result: ToolResultEnvelope) -> Any:
+    if result.status in {ToolResultStatus.SUCCESS, ToolResultStatus.NO_OUTPUT}:
+        if result.result_ref or result.external_object_id:
+            payload: dict[str, Any] = {"content": result.preview}
+            if result.result_ref:
+                payload["artifact_ref"] = result.result_ref
+            if result.external_object_id:
+                payload["external_object_id"] = result.external_object_id
+            return payload
+        return result.preview if result.preview is not None else {"status": "NO_OUTPUT"}
+    if result.status is ToolResultStatus.INTERRUPT:
+        return {"interrupt": True, "pending_input": result.pending_input}
     return {
-        "contract": "native-kernel-v1",
-        "phase": phase,
-        "iters": state.iters,
-        "transition": state.transition,
-        "attempted_reactive_compact": state.attempted_reactive_compact,
-        "compact_failures": state.compact_failures,
-        "compact_cooldown": state.compact_cooldown,
-        "last_usage": asdict(state.last_usage) if state.last_usage else None,
-        "tool_state": state.tool_state,
-        "messages": [message_payload(message) for message in state.messages],
+        "isError": True,
+        "errorCode": result.error_code or result.status.value,
+        "content": result.error_message or "tool execution failed",
+        "unknownEffect": result.status is ToolResultStatus.UNKNOWN,
     }
 
 
-def _restore_state(
-    rc: RunContext, fallback_messages: list[Msg],
-) -> tuple[LoopState, str | None]:
-    checkpoint = rc.engine_checkpoint
-    raw = checkpoint.engine_state if checkpoint is not None else None
-    if not isinstance(raw, dict) or raw.get("contract") != "native-kernel-v1":
-        return LoopState(messages=fallback_messages), None
-
-    current_input = content_to_msg(rc.user_message).content
-    restored: list[Msg] = []
-    for item in raw.get("messages") or []:
-        if item.get("$rematerialize_tool_result"):
-            continue
-        content = item.get("content")
-        if isinstance(content, dict) and content.get("$runtime_current_input"):
-            content = current_input
-        restored.append(Msg(
-            role=str(item.get("role", "user")),
-            content=content,
-            tool_calls=[ToolCall(**call) for call in item.get("tool_calls") or []] or None,
-            tool_call_id=item.get("tool_call_id"),
-            name=item.get("name"),
-            is_error=bool(item.get("is_error", False)),
-            kind=str(item.get("kind", "normal")),
-        ))
-    usage = Usage(**raw["last_usage"]) if isinstance(raw.get("last_usage"), dict) else None
-    state = LoopState(
-        messages=restored or fallback_messages,
-        iters=int(raw.get("iters", 0)),
-        transition=raw.get("transition"),
-        attempted_reactive_compact=int(raw.get("attempted_reactive_compact", 0)),
-        compact_failures=int(raw.get("compact_failures", 0)),
-        compact_cooldown=int(raw.get("compact_cooldown", 0)),
-        last_usage=usage,
-        tool_state=dict(raw.get("tool_state") or {}),
-    )
-    phase = str(raw.get("phase") or "")
-    if phase == "MODEL_REQUEST":
-        # Re-run the interrupted model slot with identical turn/call ordinals.
-        state.iters = max(0, state.iters - 1)
-    return state, phase or None
+__all__ = [
+    "NativeLoopAdapter",
+    "collect_native_tools",
+]

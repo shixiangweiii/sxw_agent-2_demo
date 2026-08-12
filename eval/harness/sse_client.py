@@ -43,10 +43,20 @@ def _dispatch(
     seq = int(envelope.get("seq") or 0)
     run.last_seq = max(run.last_seq, seq)
     run.raw_events.append({"event": ev_type, "seq": seq, "data": data})
-    if ev_type == "text":
+    if ev_type == "text_start":
+        # A retry/recovery/reactive compact starts a new generation for the
+        # same semantic message.  Discard only the superseded answer body;
+        # Tool/Skill/plan projections remain valid process history.
+        run.text = ""
+    elif ev_type == "text":
         if run.ttft_ms == 0.0:
             run.ttft_ms = (time.monotonic() - t0) * 1000.0
         run.text += str(data.get("delta", ""))
+    elif ev_type == "assistant_message":
+        # The final committed assistant event is authoritative for both fresh
+        # replay and reconnect.  It replaces any partial generation assembled
+        # from deltas instead of being appended to it.
+        run.text = str(data.get("text", ""))
     elif ev_type == "tool_call":
         run.tool_calls.append((str(data.get("name", "")), dict(data.get("args") or {})))
     elif ev_type == "tool_result":

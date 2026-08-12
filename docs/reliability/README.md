@@ -16,6 +16,9 @@
 - 附件先进入内容寻址 Artifact Store，再通过 `attachment_refs` 创建 Run。
 - Runtime、Document、Artifact、Trace 各自有明确且不重叠的事实所有权。
 - 旧接口、旧 Session、旧 native History 和旧 embedding 数据不迁移；R4 直接切换所有权。
+- Runtime/ARAG 各只接受一份 current `schema.sql` 的完整 SHA-256 digest；无 migration、upgrader 或旧 checkpoint codec。
+- 三份 immutable release 原子激活，Worker 只能精确 claim `(engine, release_fingerprint)`；活跃旧 Run 会阻止新 fingerprint 激活。
+- `NativeLoopAdapter` 直接 `RuntimeIO` 和强制 Tool Broker；工具提前派发默认关闭，但模型正文与工具/Skill 进度仍流式提交。
 
 ## Delivery v1 的准确承诺
 
@@ -35,8 +38,8 @@
 | [ADR-0001：事务边界](adr/0001-transaction-boundaries.md) | admission、seq、checkpoint、tool、artifact、finalize 的提交边界 |
 | [ADR-0002：流式提交](adr/0002-streaming-commit.md) | committed delta、聚合、flush 和 SSE 发布顺序 |
 | [ADR-0003：SQLite 权威](adr/0003-sqlite-authority.md) | SQLite 事实范围、PRAGMA、并发和 fail-fast 原则 |
-| [ADR-0004：引擎恢复等级](adr/0004-engine-recovery.md) | Engine Adapter 契约和三代引擎的恢复粒度 |
-| [ADR-0005：Release/Schema 兼容](adr/0005-release-compatibility.md) | 不可变 release、schema identity 校验和恢复兼容裁决 |
+| [ADR-0004：Native direct 恢复](adr/0004-engine-recovery.md) | Engine Adapter 契约、strict checkpoint、generation 和三引擎恢复粒度 |
+| [ADR-0005：Current Schema / Exact Release](adr/0005-release-compatibility.md) | schema digest、不可变 release、原子激活与 exact claim |
 | [ADR-0006：权威序列化边界](adr/0006-authority-serialization-contracts.md) | 真实 model/Broker 形状、compact UUID 与 epoch/RFC3339 边界 |
 | [ADR-0007：跨进程 trace 关联](adr/0007-cross-process-trace-correlation.md) | `runs.trace_id` 承载入口轨迹键，Worker 侧恢复绑定，冻结 envelope 不变 |
 | [`schemas/`](schemas/) | RuntimeEnvelope、Canonical Event、WorkingState、ToolResult、Artifact、Evidence JSON Schema v1 |

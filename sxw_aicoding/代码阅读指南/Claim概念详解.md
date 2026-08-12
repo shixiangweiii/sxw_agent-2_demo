@@ -1,301 +1,214 @@
 # Claim 概念详解
 
-本文档解释 Runtime 中 Claim 的含义、数据结构、领取机制和设计意图。
+## 1. 一句话定义
 
----
+**Claim 是 Worker 从 SQLite 原子领取 Activity 后获得的、带 exact release、lease 和 fencing 约束的当前 attempt 执行凭证。**
 
-## 目录
-
-- [1. 核心定义](#1-核心定义)
-- [2. 数据结构](#2-数据结构)
-- [3. Claim 与 Activity 的关系](#3-claim-与-activity-的关系)
-- [4. 领取机制](#4-领取机制)
-- [5. 设计意图](#5-设计意图)
-- [6. 状态迁移](#6-状态迁移)
-- [7. 源码位置索引](#7-源码位置索引)
-
----
-
-## 1. 核心定义
-
-**Claim = Worker 对一条 Activity 的排他性执行权**
-
-Claim 是 Worker 通过 `claim_next()` 从 SQLite 领取的一条待执行 Activity，代表"这条工作单元已经被我认领了，别人别碰"的凭证。
-
----
+它不是长期所有权，也不是一个独立数据库实体。Worker 只在 lease 未过期、fencing token 仍是当前值、Run release 与 Worker 完全匹配时有权执行和提交。
 
 ## 2. 数据结构
 
-**文件**: `agent/runtime/ports/store.py:66`
+`Claim` 定义在 `agent/runtime/ports/store.py`：
 
 ```python
 @dataclass(frozen=True)
 class Claim:
-    run: RunRecord           # 要执行的 Run（包含 input_text、engine、deadline 等）
-    activity: ActivityRecord # 被领取的 Activity（包含 attempt、fencing_token、lease 等）
+    run: RunRecord
+    activity: ActivityRecord
 ```
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `run` | `RunRecord` | Run 的快照，包含执行所需的上下文：input_text、engine、deadline_at、release_fingerprint 等 |
-| `activity` | `ActivityRecord` | Activity 的快照，包含执行权信息：attempt、fencing_token、lease_expires_at 等 |
+| 部分 | 作用 |
+|---|---|
+| `run` | 执行语义快照：engine、release fingerprint、deadline、input、conversation 等 |
+| `activity` | attempt 执行权快照：activity id、attempt、lease owner/expiry、fencing token、resume payload 等 |
 
----
+Activity 是 `activities` 表中可多次领取的持久工作单元；Claim 只是领取成功时返回给 Worker 的不可变快照。同一 Activity 恢复后再次被 claim 时，`activity_id` 不变，但 `attempt` 和 `fencing_token` 会增加。
 
-## 3. Claim 与 Activity 的关系
+## 3. Worker 为什么携带 release_map
 
-### 3.1 区别
-
-| 概念 | 是什么 | 生命周期 | 存储位置 |
-|---|---|---|---|
-| **Activity** | 数据库中的一行记录，代表"要执行的工作单元" | 持久化，可被多次领取（重试） | `activities` 表 |
-| **Claim** | Worker 领取 Activity 后获得的"执行权凭证" | 内存中，Worker 崩溃就丢失 | Worker 进程内存 |
-
-### 3.2 类比
+Worker 启动完成后持有：
 
 ```text
-Activity = 餐厅里的一份订单（持久存在，可被多次查看）
-Claim    = 厨师从订单架取走订单后，获得"这道菜由我做"的凭证（临时持有）
-
-厨师崩溃了？凭证丢失，订单回到架上，其他厨师可以重新领取。
+release_map = {
+  "plan_execute": <fingerprint>,
+  "agent_loop":   <fingerprint>,
+  "native_loop":  <fingerprint>
+}
 ```
 
-### 3.3 关系图
-
-```text
-┌─────────────────────────────────────────────────────────────┐
-│                         Claim                                │
-│  ┌─────────────────┐      ┌─────────────────────────────┐  │
-│  │   run: RunRecord │      │  activity: ActivityRecord   │  │
-│  │   (执行上下文)   │      │  (执行权 + 租约 + fencing)  │  │
-│  └─────────────────┘      └─────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-         │                          │
-         │                          │
-         ▼                          ▼
-   ┌───────────┐             ┌───────────────┐
-   │  runs 表  │             │ activities 表 │
-   │ (持久化)  │             │   (持久化)    │
-   └───────────┘             └───────────────┘
-```
-
-### 3.4 关键点
-
-1. **Activity 可以多次被 Claim** — 同一逻辑 Activity 的身份和数据库行保留，重试时 `attempt/state/revision/fencing_token` 等可变字段会更新
-2. **Claim 包含 Run 快照** — Worker 执行时需要 Run 的 input_text、engine、deadline 等
-3. **Claim 附带 fencing token** — 证明"我是当前合法的执行者"
-4. **Claim 有租约** — `lease_expires_at` 过期后，其他 Worker 可重新领取
-
----
-
-## 4. 领取机制
-
-### 4.1 claim_next 调用栈
-
-**文件**: `agent/runtime/adapters/sqlite/store.py:721`
-
-```text
-claim_next() store.py:721
-├─ 开启事务 (BEGIN IMMEDIATE)
-│
-├─ SELECT 符合条件的 Activity
-│   WHERE a.type='ENGINE_RUN'
-│     AND a.state='PENDING'           -- 待领取
-│     AND a.available_at <= now       -- 到期可领取
-│     AND (
-│       r.state='DISPATCH_PENDING'    -- 普通待执行
-│       OR (r.state='CANCEL_REQUESTED' AND ...)  -- 取消后的 reconcile
-│     )
-│     AND r.deadline_at > now         -- 未过期
-│     AND r.engine IN (...)           -- Worker 支持的引擎
-│   ORDER BY a.available_at, a.created_at, a.activity_id  -- 稳定 FIFO
-│   LIMIT 1
-│
-├─ UPDATE activities SET
-│   state='CLAIMED',
-│   attempt=attempt+1,
-│   lease_owner=worker_id,
-│   lease_expires_at=now+lease_ms,
-│   fencing_token=fencing_token+1,
-│   revision=revision+1
-│
-├─ UPDATE runs SET state='RUNNING' (或保持 CANCEL_REQUESTED)
-│
-├─ APPEND events
-│   ├─ ACTIVITY_STATUS_CHANGED: PENDING → CLAIMED
-│   └─ RUN_STATUS_CHANGED: DISPATCH_PENDING → RUNNING (仅普通 claim)
-│
-└─ RETURN Claim(run, activity)
-```
-
-### 4.2 Worker 领取循环
-
-**文件**: `agent/runtime/worker/dispatcher.py:57`
+它来自当前 Worker 已经成功构造的三个 Adapter，不是临时从 active pointer 猜测的值。`claim_next()` 签名直接接收完整 mapping：
 
 ```python
-async def run(self) -> None:
-    while not self._stop.is_set():
-        await self._maintenance(now)  # heartbeat + recover_expired
-        
-        while len(self._tasks) < self.concurrency:
-            claim = await self.store.claim_next(
-                worker_id=self.worker_id,
-                lease_ms=self.lease_ms,
-                now_ms=self.clock.now_ms(),
-                engines=tuple(self.release_map),
-            )
-            if claim is None:
-                break  # 没有待领取的
-            
-            task = asyncio.create_task(self._execute(claim))
-            self._tasks.add(task)
-        
-        await asyncio.wait_for(self._stop.wait(), timeout=self.poll_ms / 1000)
+claim_next(
+    *,
+    worker_id: str,
+    lease_ms: int,
+    now_ms: int,
+    release_map: Mapping[str, str],
+) -> Claim | None
 ```
 
-### 4.3 原子性保证
+这个设计把“Worker 能不能解释 Run”前置到领取 SQL，而不是领到以后再判失败。
 
-```sql
--- 单事务内完成，多 Worker 竞争时只有一个成功
-BEGIN IMMEDIATE;
+## 4. claim_next 的原子过程
 
--- Worker A 和 Worker B 同时执行到这一步
--- 但 UPDATE 的 WHERE state='PENDING' 保证只有一个能成功
-UPDATE activities SET state='CLAIMED', lease_owner='worker-A'
-WHERE activity_id='act_xxx' AND state='PENDING';
+实现在 `agent/runtime/adapters/sqlite/store.py`。整个领取是一个短 `BEGIN IMMEDIATE`，核心是单条 `UPDATE ... WHERE activity_id=(SELECT ...) RETURNING *`。
 
--- Worker B 的 UPDATE 影响 0 行，claim_next 返回 None
-COMMIT;
-```
+### 4.1 候选 Activity 条件
 
----
-
-## 5. 设计意图
-
-### 5.1 解决的核心问题
-
-| 问题 | Claim 的解决方式 |
-|---|---|
-| **多 Worker 竞争** | CAS + `fencing_token` 保证只有一个 Worker 胜出 |
-| **Worker 崩溃** | lease 过期后，其他 Worker 可重新领取 |
-| **过期执行者迟到提交** | `fencing_token` 校验，过期 token 被拒绝 |
-| **取消与执行的竞态** | claim 时检查 Run 状态，cancel 后只走 reconcile 路径 |
-
-### 5.2 为什么需要 fencing_token？
+普通 Engine Activity 必须同时满足：
 
 ```text
-时间线：
-  t0: Worker-A claim Activity, fencing_token=1
-  t1: Worker-A 崩溃，但 lease 还没过期
-  t2: lease 过期，Worker-B claim 同一个 Activity, fencing_token=2
-  t3: Worker-A 重启，带着旧的 fencing_token=1 尝试提交
-  
-结果：Store 校验 fencing_token，拒绝 Worker-A 的提交
-      └─ "STALE_FENCING_TOKEN" 错误
+activity.type = ENGINE_RUN
+activity.state = PENDING
+activity.available_at <= now
+run.state = DISPATCH_PENDING
+run.deadline_at > now
+(run.engine, run.release_fingerprint) 精确命中 release_map
 ```
 
-### 5.3 为什么需要 lease？
+cancel-owned reconcile 路径还要求 `resume_payload` 是字段数量和类型都完全正确的 reconcile-only marker。普通、恢复和 reconcile claim 都必须通过同一 exact release predicate。
+
+### 4.2 领取时原子更新 Activity
 
 ```text
-时间线：
-  t0: Worker-A claim Activity, lease_expires_at=t0+30s
-  t1: Worker-A 执行中，每 10s 续租
-  t2: Worker-A 崩溃，无法续租
-  t3: t0+30s 后，lease 过期
-  t4: Worker-B claim 同一个 Activity，成功
-  
-结果：Activity 不会永远被"锁死"在崩溃的 Worker 手里
+state: PENDING -> CLAIMED
+attempt: attempt + 1
+fencing_token: fencing_token + 1
+lease_owner: worker_id
+lease_expires_at: now + lease_ms
+revision: revision + 1
 ```
 
-### 5.4 为什么 Claim 不持久化？
+候选选择和更新在同一 SQL/事务边界中完成。SQLite 写事务串行化竞争 Worker：第二个 Worker 获得写锁后重新基于已提交状态选择，不会再领到同一条 `PENDING` Activity。
 
-| 设计选择 | 原因 |
-|---|---|
-| **Claim 是内存中的** | 它只是"当前执行权"的快照，不需要持久化 |
-| **Activity 是持久化的** | 它是工作单元的权威记录，需要跨 Worker 生命周期存在 |
-| **崩溃恢复** | Worker 崩溃后，Claim 丢失，但 Activity 还在，其他 Worker 可重新领取 |
+### 4.3 同事务推进 Run 和 Event
 
----
-
-## 6. 状态迁移
-
-### 6.1 Activity 状态
+普通路径还会：
 
 ```text
-PENDING ──claim_next──► CLAIMED ──mark_running──► RUNNING
-   ▲                         │                     ├──► SUCCEEDED/FAILED/CANCELLED
-   │                         │                     ├──► WAITING_RETRY ──timer──► PENDING
-   │                         │                     ├──► WAITING_INPUT ──signal──► PENDING
-   │                         │                     ├──► RECONCILE ──query/人工──► PENDING/终态
-   │                         │                     └──► MANUAL ──受审计处置──► PENDING/终态
-   └── lease 过期 + recover_expired(classifier=REQUEUE) ──┘
-
-lease 恢复若发现不可安全普通重放的 unresolved ToolEffect，会进入 RECONCILE/MANUAL，不会直接回到 PENDING。
+Run: DISPATCH_PENDING -> RUNNING
+Run.current_activity_id = activity_id
+append ACTIVITY_STATUS_CHANGED
+append RUN_STATUS_CHANGED
 ```
 
-### 6.2 Run 状态
+如果 Run 状态 CAS 没有命中，整个 claim 回滚，不会留下一条孤立的 `CLAIMED` Activity。
+
+## 5. Exact release 语义
+
+Run 在 admission 写事务中从 `active_releases` 冻结 `release_fingerprint`。Worker 必须精确匹配 engine 和 fingerprint 才能 claim。
 
 ```text
-ACCEPTED ──admission──► DISPATCH_PENDING ──claim_next──► RUNNING
-   ├──► REJECTED/CANCELLED/TIMED_OUT                         │
-   │                                                         ├──► WAITING_RETRY ──timer──► DISPATCH_PENDING
-   │                                                         ├──► WAITING_INPUT ──signal──► DISPATCH_PENDING
-   │                                                         ├──► CANCEL_REQUESTED ──安全边界/reconcile──► CANCELLED/TIMED_OUT
-   │                                                         └──► SUCCEEDED/FAILED/CANCELLED/TIMED_OUT/INCOMPATIBLE_RELEASE
+Run(engine=native_loop, release=A)
 
-完整邻接表以 `docs/reliability/state-machines.md` 为准；以上只保留 Claim 阅读所需的主路径。
+Worker 1 release_map[native_loop] = A  -> 可 claim
+Worker 2 release_map[native_loop] = B  -> 候选 SQL 根本不命中
 ```
 
-### 6.3 关键事件
+后者不会把 Run 标记成某种“不兼容终态”。Run 保持待正确 Worker 领取，最终还有绝对 deadline 收口。
 
-| 事件 | 触发时机 |
-|---|---|
-| `ACTIVITY_STATUS_CHANGED: PENDING → CLAIMED` | Worker 领取成功 |
-| `ACTIVITY_STATUS_CHANGED: CLAIMED → RUNNING` | Coordinator 开始执行 |
-| `RUN_STATUS_CHANGED: DISPATCH_PENDING → RUNNING` | 普通 claim（非 reconcile） |
+Coordinator 仍有一道防御断言：
 
----
+```text
+adapter.release_fingerprint == run.envelope.release_fingerprint
+```
 
-## 7. 源码位置索引
+若这道本应不可达的检查失败，产生 `CLAIM_RELEASE_MISMATCH`，并按所有权异常处理：中止 attempt 并报警，不产生 Run 终态。
 
-| 功能 | 文件 | 行号 |
-|---|---|---|
-| Claim 定义 | `agent/runtime/ports/store.py` | 66 |
-| claim_next 方法 | `agent/runtime/adapters/sqlite/store.py` | 721 |
-| Worker 领取循环 | `agent/runtime/worker/dispatcher.py` | 57 |
-| Coordinator 执行（`_execute_claim`，`execute_claim` 在 65 行只做 trace_id 恢复后转发） | `agent/runtime/application/coordinator.py` | 76 |
-| mark_activity_running | `agent/runtime/adapters/sqlite/store.py` | 807 |
-| renew_lease | `agent/runtime/adapters/sqlite/store.py` | 829 |
-| recover_expired | `agent/runtime/adapters/sqlite/store.py` | 3139 |
+## 6. Lease 与 fencing 各自解决什么
 
----
+### 6.1 Lease：执行权有有效期
 
-## 附录：常见疑问
+`lease_expires_at` 让其他 Worker 能在原 Worker 崩溃后恢复 Activity。`RuntimeWorker` 为每个 attempt 启动续租 task，周期性调用 `renew_lease()`。
 
-### Q1: Claim 和 Activity 是一对一吗？
+续租失败时，Worker 立即 cancel 当地 attempt。这是“不再做事”的快速路径。
 
-**A**: 是的，一个 Claim 对应一条 Activity。但一条 Activity 可能被多次 Claim（重试时）。
+### 6.2 Fencing：防止旧执行者晚到提交
 
-### Q2: Worker 崩溃后，Claim 怎么办？
+仅依靠 lease 不够：旧 Worker 可能暂停后恢复，还以为自己有权写入。每次 claim 增加的 `fencing_token` 会被带到：
 
-**A**: Claim 是内存中的，崩溃就丢失。Activity 的 lease 过期后，其他 Worker 可以重新 claim。
+- `mark_activity_running`
+- Event append/flush
+- Checkpoint CAS
+- ToolExecution prepare/settle
+- Run finalization
 
-### Q3: 多 Worker 同时 claim 同一条 Activity 会怎样？
+Store 对比当前 token、owner、lease 与 Activity state。旧 token 即使“晚到”，写入也会被拒绝。
 
-**A**: SQLite 的短 `BEGIN IMMEDIATE` 写事务会串行化 claim。前一个事务提交后，后一个 Worker 会基于最新状态重新选择，不会再领到同一条 Activity；它可能领取其他可用 Activity，若没有则 `claim_next` 返回 `None`。
+## 7. AttemptOwnershipLost
 
-### Q4: Claim 后 Worker 执行失败，Activity 会怎样？
+`agent/runtime/domain/errors.py` 将下列 Store fault 识别为 attempt 所有权丢失：
 
-**A**: 根据 `outcome.kind` 决定：
-- `RETRYABLE_FAILURE` → `schedule_retry`，同一 Activity 与 Run 先进入 `WAITING_RETRY`；唯一 retry timer 首次触发后，Activity 回到 `PENDING`，Run 回到 `DISPATCH_PENDING`
-- `TERMINAL_FAILURE` → Run 终结，Activity 终结
-- `COMPLETED` → Run 成功，Activity 成功
+- `ACTIVITY_FENCING_STALE`
+- `STALE_FENCING_TOKEN`
+- `ACTIVITY_LEASE_EXPIRED`
+- `ACTIVITY_LEASE_REQUIRED`
+- `CHECKPOINT_REVISION_CONFLICT`
+- `CLAIM_RELEASE_MISMATCH`
 
-### Q5: Claim 的 fencing_token 和 Activity 的 fencing_token 是同一个吗？
+它们被转成 `AttemptOwnershipLost`，必须穿过 Engine/Coordinator 边界到 Worker：
 
-**A**: 是的。Claim 时 `fencing_token+1`，Claim 对象里保存的是递增后的值。后续所有操作（mark_running、save_checkpoint、finalize）都要带上这个 fencing_token 校验。
+```text
+Store ownership fault
+-> raise_if_ownership_lost()
+-> AttemptOwnershipLost
+-> RuntimeIO.abort() / cancel local attempt
+-> Worker 记录所有权丢失
+-> durable lease recovery 决定后续所有者
+```
 
----
+不可以将它包装成模型可见 ToolResult，不可以记为普通 Engine failure，也不可以 terminalize Run。这不是“用户任务失败”，而是“当前 Worker 已无权裁决”。
 
-*文档生成时间: 2026-08-12*
-*基于项目版本: sxw_agent-2_demo R0 冻结规格*
+## 8. 租约过期恢复不等于无条件重放
+
+`recover_expired()` 会扫描租约过期的 `CLAIMED/RUNNING` Activity，但恢复结果取决于持久化事实：
+
+1. deadline 已到：按 `TIMED_OUT` 收口，同时保留未决 effect 信息。
+2. cancel 已经获得裁决权且无未决 effect：可确定性收口 `CANCELLED`。
+3. 只有 READ_ONLY 或具有稳定幂等键的 IDEMPOTENT effect：可回到 `PENDING` 并复用稳定 slot。
+4. 存在不确定或不可透明重放的 ToolEffect：进入 `RECONCILE/MANUAL`，不再派原工具。
+
+所以 Claim 不仅是“抢任务”，还是 ToolEffect 恢复安全的第一道所有权边界。
+
+## 9. 状态流程
+
+```text
+首次执行：
+Run      DISPATCH_PENDING -> RUNNING
+Activity PENDING -> CLAIMED -> RUNNING -> SUCCEEDED/FAILED/...
+
+可重试失败：
+Run      RUNNING -> WAITING_RETRY -> DISPATCH_PENDING
+Activity RUNNING -> WAITING_RETRY -> PENDING -> CLAIMED
+
+lease 丢失且可安全恢复：
+Activity CLAIMED/RUNNING -> PENDING -> CLAIMED
+         fencing_token 在新 claim 时再增 1
+
+effect 不确定：
+Activity RUNNING -> RECONCILE/MANUAL
+```
+
+## 10. 常见误解
+
+### Claim 成功是否等于 Run 成功？
+
+不等于。Claim 只表示 Worker 当前有权执行某 Activity。正常 Engine 执行结束时，Coordinator 会结合 `EngineOutcome`、cancel、deadline 和 ToolEffect 做终态裁决；cancel API、deadline maintenance、lease recovery/reconciliation 等命令路径也可以由 Store 在权威写事务中直接提交终态。无论入口是谁，都必须经过 Run 状态 CAS 和唯一 terminal event 约束。
+
+### 可否只按 engine 过滤 claim？
+
+不可以。同一 engine 的源码、工具目录、provider 或语义配置不同时，release 已经不同。必须同时匹配 `(engine, fingerprint)`。
+
+### 为什么还需要 Activity revision？
+
+fencing 解决 attempt 所有者，revision 则用于对 Activity 内部状态变化做 CAS。Checkpoint 另有自己的 revision CAS。不同 revision 服务于不同聚合根，不能相互代替。
+
+## 11. 源码阅读索引
+
+- `agent/runtime/ports/store.py`：`Claim`、`RuntimeStore.claim_next()` 端口。
+- `agent/runtime/adapters/sqlite/store.py`：`claim_next()`、`renew_lease()`、`recover_expired()`。
+- `agent/runtime/worker/dispatcher.py`：调度循环、attempt task 与 lease renewal task。
+- `agent/runtime/application/coordinator.py`：`mark_activity_running()`、release 防御断言、Engine 执行。
+- `agent/runtime/domain/errors.py`：`AttemptOwnershipLost`。
+- `agent/runtime/adapters/sqlite/schema.sql`：Activity/Run 状态、claim 索引和 release 外键。

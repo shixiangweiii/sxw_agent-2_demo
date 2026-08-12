@@ -1,461 +1,237 @@
 # FastAPI app.state 依赖注入机制详解
 
-## 一、概述
+## 1. 当前结论
 
-本项目使用 FastAPI 的 `app.state` 实现依赖注入，而非常见的 `Depends()` 机制。本文档详细解释这一设计决策的实现原理、调用链路和最佳实践。
+Runtime API 使用 FastAPI/Starlette 的 `app.state` 保存**本 API 进程内的组装完成对象**：
 
-### 1.1 核心概念
+```text
+app.state.settings
+app.state.runtime_store
+app.state.artifact_store
+```
 
-**`app.state`** 是 FastAPI/Starlette 提供的应用级状态容器：
-- 生命周期与应用绑定，应用启动时创建，应用实例结束后不再使用
-- 可在 lifespan 中初始化单例资源（数据库连接、配置等）
-- 通过 `request.app.state` 在请求处理中访问
-- 本质是一个命名空间对象，可动态添加属性
+请求 handler 通过 `request.app.state` 取得它们，并将 Store/ArtifactStore 注入当次应用服务。
 
-**依赖注入模式**：
-- 控制反转（IoC）：对象的创建和管理权交给容器
-- 依赖抽象而非具体实现：使用 Protocol 定义接口
-- 单例模式：应用级资源共享
+`app.state` 只是进程内对象容器，不是跨进程事实源。Run、release、Event、Checkpoint、Worker heartbeat 等权威仍在 `runtime.db`，Artifact bytes 在 SHA-256 CAS。
 
----
+## 2. FastAPI lifespan 与 app.state
 
-## 二、项目实现详解
-
-### 2.1 启动阶段：资源初始化与注入
-
-**文件**：`agent/main.py:43-59`
+`agent/main.py` 通过 `@asynccontextmanager` 定义 lifespan：
 
 ```python
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    # ① 创建数据库连接管理器
     database = RuntimeDatabase(
         settings.runtime_db_path,
         busy_timeout_ms=settings.runtime_busy_timeout_ms,
     )
-    
-    # ② 创建 Store 实例（依赖注入的核心对象）
     store = SqliteRuntimeStore(database)
-    await store.initialize()  # 校验/建库当前 schema（无 migration，内部调用 database.ensure_schema()）
-    
-    # ③ 注入到 app.state（IoC 容器）
+    await store.initialize()
+
     app.state.settings = settings
     app.state.runtime_store = store
     app.state.artifact_store = FilesystemArtifactStore(settings.artifact_root)
-    
-    log_kv(logger, logging.INFO, "Boot", "runtime API starting", ...)
-    yield  # 应用运行期间
-    
-    # ④ 当前 agent/main.py 在 yield 之后只记录停止日志；若资源拥有显式 close()
-    #    能力，应在这里补充释放。RuntimeDatabase 当前按操作打开/关闭连接。
-    log_kv(logger, logging.INFO, "Boot", "runtime API stopped")
-```
 
-**关键点**：
-- `lifespan` 是 FastAPI 的异步上下文管理器，应用启动时执行 `yield` 之前，停止时执行之后
-- 当前 FastAPI 应用实例的进程内资源在此初始化并复用；不提供跨服务/跨节点唯一性
-- `app.state` 作为 IoC 容器，存储所有共享资源
-
----
-
-### 2.2 请求阶段：获取依赖
-
-**文件**：`agent/runtime/api/runs.py:80-81`
-
-```python
-def _store(request: Request) -> RuntimeStore:
-    """从 app.state 获取 Store 实例"""
-    return request.app.state.runtime_store
-```
-
-**使用场景**：`agent/runtime/api/runs.py:131-176`
-
-```python
-@router.post("", status_code=status.HTTP_202_ACCEPTED)
-async def create_run(
-    body: CreateRunBody,
-    request: Request,
-    response: Response,
-    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
-) -> dict[str, Any]:
-    # ① 从 app.state 获取 store
-    store = _store(request)
-    
-    # ② 从 app.state 获取 settings
-    settings: AgentSettings = request.app.state.settings
-    
-    # ③ 创建业务服务，注入依赖
-    service = AdmissionService(
-        store,  # 注入 Store
-        default_deadline_ms=settings.runtime_default_deadline_seconds * 1000,
-    )
-    
-    # ④ 调用业务逻辑
-    result = await service.create(
-        CreateRunInput(...),
-        idempotency_key=idempotency_key or "",
-    )
-```
-
----
-
-### 2.3 业务逻辑层：依赖传递
-
-**文件**：`agent/runtime/application/admission.py:38-83`
-
-```python
-class AdmissionService:
-    def __init__(
-        self,
-        store: RuntimeStore,  # 依赖抽象接口（Protocol）
-        *,
-        clock: Clock | None = None,
-        default_deadline_ms: int = 600_000,
-    ) -> None:
-        self.store = store
-        self.clock = clock or SystemClock()
-        self.default_deadline_ms = default_deadline_ms
-    
-    async def create(self, request: CreateRunInput, *, idempotency_key: str) -> AdmissionResult:
-        # 业务逻辑...
-        return await self.store.admit(command)  # 调用依赖的方法
-```
-
-**设计原则**：
-- **依赖倒置**：`AdmissionService` 依赖 `RuntimeStore` 协议，而非 `SqliteRuntimeStore` 具体实现
-- **构造器注入**：通过 `__init__` 参数注入依赖
-- **可测试性**：测试时可注入 Mock 实现
-
----
-
-### 2.4 数据访问层：具体实现
-
-**文件**：`agent/runtime/adapters/sqlite/store.py:324+`
-
-```python
-class SqliteRuntimeStore:
-    """RuntimeStore 协议的 SQLite 实现"""
-    
-    def __init__(self, database: RuntimeDatabase) -> None:
-        self.db = database
-    
-    async def admit(self, command: AdmissionCommand) -> AdmissionResult:
-        # 具体的 SQLite 操作
-        async with self.db.transaction() as conn:
-            # INSERT/UPDATE/SELECT ...
-            pass
-```
-
----
-
-## 三、完整调用链路图
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ 应用启动阶段 (lifespan)                                         │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ① RuntimeDatabase(path)                                        │
-│      ↓                                                          │
-│  ② SqliteRuntimeStore(database)                                 │
-│      ↓                                                          │
-│  ③ app.state.runtime_store = store  ─────────────┐             │
-│      ↓                                           │             │
-│  ④ app.state.settings = settings                 │             │
-│      ↓                                           │             │
-│  ⑤ app.state.artifact_store = artifact_store     │             │
-│                                                  │             │
-└─────────────────────────────────────────────────────────────────┘
-                                                  │
-┌─────────────────────────────────────────────────────────────────┐
-│ HTTP 请求处理阶段                                               │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  POST /api/v1/runs                                              │
-│      ↓                                                          │
-│  create_run(body, request, ...)                                 │
-│      ↓                                                          │
-│  store = _store(request)  ←─────────────────────────┘          │
-│           │                                                     │
-│           ↓                                                     │
-│  request.app.state.runtime_store                                │
-│      ↓                                                          │
-│  service = AdmissionService(store, ...)                         │
-│      ↓                                                          │
-│  result = service.create(request)                               │
-│      ↓                                                          │
-│  self.store.admit(command)                                      │
-│      ↓                                                          │
-│  SqliteRuntimeStore.admit()                                     │
-│      ↓                                                          │
-│  database.transaction()                                         │
-│      ↓                                                          │
-│  SQLite 执行 SQL                                                │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 四、app.state 中注入的资源清单
-
-| 资源名称 | 类型 | 注入位置 | 用途 |
-|---|---|---|---|
-| `settings` | `AgentSettings` | `agent/main.py:51` | 全局配置（LLM、超时、日志等） |
-| `runtime_store` | `SqliteRuntimeStore` | `agent/main.py:52` | Runtime 状态存储（Run/Event/Activity） |
-| `artifact_store` | `FilesystemArtifactStore` | `agent/main.py:53` | Artifact 文件存储 |
-| `ctx` | `AragContext` | `arag/main.py:27` | ARAG 检索上下文（仅 ARAG 服务） |
-
----
-
-## 五、为什么选择 app.state 而非 Depends
-
-### 5.1 FastAPI Depends 机制简介
-
-FastAPI 官方推荐的依赖注入方式是 `Depends()`：
-
-```python
-from fastapi import Depends
-
-async def get_store(request: Request) -> SqliteRuntimeStore:
-    return request.app.state.runtime_store
-
-@router.post("")
-async def create_run(
-    body: CreateRunBody,
-    store: SqliteRuntimeStore = Depends(get_store),
-):
-    # 使用 store
-```
-
-### 5.2 本项目的选择理由
-
-| 维度 | app.state | Depends | 本项目选择 |
-|---|---|---|---|
-| **显式性** | 需手动从 `request.app.state` 取 | 函数签名声明，IDE 友好 | app.state |
-| **灵活性** | 可在任意位置访问 | 仅限路由函数参数 | app.state |
-| **测试** | 需 Mock `app.state` | 可直接传参 | Depends 略优 |
-| **性能** | 无额外开销 | 每次请求调用依赖函数 | app.state 略优 |
-| **学习成本** | 简单直接 | 需理解依赖解析 | app.state |
-| **代码风格** | 命令式，显式调用 | 声明式，隐式注入 | app.state 更统一 |
-
-**核心决策因素**：
-1. **局部统一性**：Agent API 和 ARAG 将进程级资源放在 `app.state`；Worker、SkillCenter、A2A 的装配方式不同，不能概括为所有服务统一使用该模式
-2. **显式控制**：依赖获取位置明确，便于调试和追踪
-3. **无类型约束**：部分依赖是动态类型（如 `SimpleNamespace` 配置的测试），`Depends` 的类型推断反而成为限制
-4. **历史原因**：项目早期采用此模式，已形成惯例
-
-### 5.3 两种模式对比示例
-
-**app.state 模式（本项目）**：
-```python
-@router.post("")
-async def create_run(request: Request, body: CreateRunBody):
-    store = request.app.state.runtime_store      # 显式获取
-    settings = request.app.state.settings         # 显式获取
-    service = AdmissionService(store, ...)
-    return await service.create(...)
-```
-
-**Depends 模式（假设）**：
-```python
-def get_store(request: Request) -> SqliteRuntimeStore:
-    return request.app.state.runtime_store
-
-def get_settings(request: Request) -> AgentSettings:
-    return request.app.state.settings
-
-@router.post("")
-async def create_run(
-    body: CreateRunBody,
-    store: SqliteRuntimeStore = Depends(get_store),      # 声明式注入
-    settings: AgentSettings = Depends(get_settings),     # 声明式注入
-):
-    service = AdmissionService(store, ...)
-    return await service.create(...)
-```
-
-**结论**：本项目依赖较少（3-5 个核心资源），`app.state` 模式足够清晰，无需引入 `Depends` 的复杂性。
-
----
-
-## 六、最佳实践
-
-### 6.1 资源初始化原则
-
-1. **应用实例内单例**：`app.state` 资源在当前 `lifespan` 中初始化，只保证当前 FastAPI 应用实例/进程内复用同一对象；不是跨服务或跨节点的全局单例
-2. **异步初始化**：使用 `await store.initialize()` 执行耗时操作（如 schema 建库/身份校验，见 `common/sqlite_schema.py` 的 `ensure_current_schema`）
-3. **资源清理**：若资源有显式生命周期，`yield` 之后执行清理逻辑（如关闭连接、刷新缓存）；不要把“离开 lifespan”误写成当前 API 已自动关闭所有资源。
-
-```python
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # 初始化
-    resource = await create_resource()
-    app.state.resource = resource
     yield
-    # 清理
-    await resource.close()
 ```
 
----
+`yield` 之前是启动阶段，只有它成功完成后 FastAPI 才开始接收请求。`yield` 之后是停机阶段；当前 RuntimeDatabase 的每次 read/transaction 都自行打开并关闭 SQLite connection，因此 lifespan 没有一条长连接需要 close。
 
-### 6.2 依赖获取封装
+### 2.1 为什么要在启动时 initialize
 
-将 `app.state` 访问封装为辅助函数，避免重复代码：
+`store.initialize()` 进入 `RuntimeDatabase.ensure_schema()`，再调用 `common/sqlite_schema.py::ensure_current_schema()`。其语义只有两种成功结果：
+
+1. DB 空：在单个 `BEGIN IMMEDIATE` 中建立完整 current schema，写 `schema_meta(id, schema_digest, created_at)`。
+2. DB 非空：记录的 digest 与完整 `schema.sql` 原始字节 SHA-256 完全相等。
+
+缺少 `schema_meta`、digest 不等或陌生 DB 都会以 `CURRENT_SCHEMA_MISMATCH` 启动失败，并要求操作者显式删除/重建本地 DB。API 不会在请求中悄悄修改库结构。
+
+## 3. 三个注入对象的职责
+
+### 3.1 settings
+
+`AgentSettings` 是当前 API 进程的配置快照。HTTP 层当前使用的典型字段包括：
+
+- Runtime DB path/busy timeout。
+- Artifact root。
+- Runtime 默认 deadline。
+- ARAG 服务地址。
+- API/trace 等配置。
+
+虽然同一 `AgentSettings` 类型还定义模型和 Native 资源上限，API 进程不会因此加载 LLM；那些字段由独立 Worker 进程读取并纳入 release fingerprint。
+
+### 3.2 runtime_store
+
+`SqliteRuntimeStore` 实现 `RuntimeStore` port，为 API handler 提供：
+
+- CreateRun admission/idempotency。
+- Run/Activity 状态查询。
+- committed Event replay/tail。
+- cancel/signal。
+- Artifact metadata 注册与查询。
+- healthz 的 active release pointer 读取。
+
+Store 对象本身可在同一 API 进程的并发请求间复用，但它不持有一个被全部请求共享的 transaction/connection。每个 Store 操作使用 RuntimeDatabase 上下文创建短连接，并在退出时关闭。
+
+### 3.3 artifact_store
+
+`FilesystemArtifactStore` 管理本机 SHA-256 CAS bytes。API 上传路径先完成 CAS 落盘，再通过 `runtime_store.register_artifact_metadata()` 写入持久化 metadata。
+
+因此 Artifact 路径同时使用两个注入对象：
+
+```text
+request.app.state.artifact_store  -> 写/读 CAS bytes
+request.app.state.runtime_store   -> metadata 和引用权威
+```
+
+## 4. 请求阶段怎么取依赖
+
+### 4.1 Run API
+
+`agent/runtime/api/runs.py` 用一个窄 helper 隔离 Store 获取：
 
 ```python
 def _store(request: Request) -> RuntimeStore:
     return request.app.state.runtime_store
-
-def _settings(request: Request) -> AgentSettings:
-    return request.app.state.settings
-
-def _artifact_store(request: Request) -> ArtifactStore:
-    return request.app.state.artifact_store
 ```
 
-**优点**：
-- 减少拼写错误
-- 便于统一修改
-- 类型提示友好
-
----
-
-### 6.3 测试中的依赖注入
-
-测试时手工构造 `app.state`（不需要 Mock Store，可靠性测试直接用 `tmp_path` 起一个真实 SQLite 库）：
+CreateRun 每次请求构造轻量的 `AdmissionService`：
 
 ```python
-# tests/reliability/test_runtime_api.py:36-62（_build_api）+ 65-79（api_env fixture）
-def _build_api(store: SqliteRuntimeStore, artifacts: FilesystemArtifactStore, *, ...) -> FastAPI:
-    app = FastAPI()
-    app.state.runtime_store = store
-    app.state.artifact_store = artifacts
-    app.state.settings = SimpleNamespace(...)  # 模拟配置对象
-    app.include_router(run_router)
-    return app
-
-@pytest.fixture
-async def api_env(tmp_path):
-    store = SqliteRuntimeStore(RuntimeDatabase(tmp_path / "runtime.db"))
-    await store.initialize()
-    ...
-    app = _build_api(store, artifacts)
-    ...
+settings: AgentSettings = request.app.state.settings
+service = AdmissionService(
+    _store(request),
+    default_deadline_ms=(
+        settings.runtime_default_deadline_seconds * 1000
+    ),
+)
 ```
 
-**关键点**：
-- 用真实 `SqliteRuntimeStore` + `tmp_path` 临时库，而非 Mock/Fake：可靠性测试要验证真实 SQLite 事务/约束行为，Mock 会掩盖这一层
-- `SimpleNamespace` 只模拟配置对象（`settings`），不模拟 Store
-- `tmp_path` 保证测试隔离，不污染 `local_storage/`
+`AdmissionService` 依赖 `RuntimeStore` protocol，而不是在应用层新建 SQLite connection。这使应用规则与持久化细节分离，测试也可注入 fake store/clock。
 
----
+### 4.2 Artifact API
 
-### 6.4 类型安全
+`agent/runtime/api/artifacts.py` 直接取 ArtifactStore 和 RuntimeStore。读 Artifact 前先查权威 metadata，再按 digest id 读 CAS，并校验单 Range 最大读取边界。
 
-使用 Protocol 定义接口，保证类型安全：
+### 4.3 Documents API
+
+`agent/api/documents.py` 从 `request.app.state.settings` 获取 ARAG 连接配置。Runtime API 在这里是对 ARAG HTTP 端点的轻量接入，不会把 ARAG 索引对象注入本进程。
+
+### 4.4 healthz
+
+`GET /healthz` 通过 `runtime_store.active_releases()` 返回库中的三个 active pointer。这只能证明 API 可读 DB，不能单独证明当前 Worker ready。
+
+完整 Worker readiness 还必须检查本次启动后的新鲜 `ACTIVE` heartbeat，并且 heartbeat 中的三引擎 `release_map` 与 active pointers 完全一致。
+
+## 5. app.state 与 Worker 装配是两条独立路径
+
+这是阅读代码时最容易混淆的点。
+
+```text
+FastAPI API process
+  lifespan
+  -> settings + runtime_store + artifact_store
+  -> app.state
+  -> HTTP handlers
+
+Runtime Worker process
+  build_worker()
+  -> settings + runtime_store + artifact_store
+  -> LLM + Skill/A2A/Claude Skill 目录
+  -> strict ToolCatalog + mandatory Tool Broker
+  -> 3 ReleaseManifest
+  -> 2 AdkEngineAdapter + 1 NativeLoopAdapter
+  -> activate_current_releases(三指针原子切换)
+  -> RuntimeWorker
+```
+
+Worker 不是 FastAPI app 的后台 task，也不读 `app.state`。两个进程通过共享 `runtime.db` 和 Artifact CAS 交接，进程内对象不跨边界。
+
+### 5.1 Release 为什么不放进 API app.state
+
+release 依赖 Worker 实际加载的 ToolCatalog、Engine/runtime/shared source、provider/model、checkpoint codec、语义配置、资源上限和安装依赖版本。API 进程不加载这些能力，所以它不能自己计算/激活 release。
+
+Worker 只在三个 Adapter 都构造成功后，调用 `activate_current_releases()` 一次性写入/核对 immutable manifests，检查旧 fingerprint 非终态 Run，原子切换三个 pointer。
+
+## 6. 三引擎也不在 app.state 中
+
+RunCoordinator 统一调用：
+
+```text
+EngineAdapter.execute(EngineRunRequest, RuntimeIO) -> EngineOutcome
+```
+
+Worker 中的 EngineRegistry 存放：
+
+```text
+plan_execute -> AdkEngineAdapter
+agent_loop   -> AdkEngineAdapter
+native_loop  -> NativeLoopAdapter
+```
+
+Native Adapter 直接负责 strict checkpoint、RuntimeIO event/checkpoint、mandatory Broker 和 final assistant，不经过 ADK merge queue。两个 ADK Adapter 每 attempt 创建临时 session/artifact service。
+
+这些都是 Worker 内对象，与 HTTP request 的 `request.app.state` 没有引用关系。
+
+## 7. 依赖注入与事实权威要分开
+
+| 概念 | 是什么 | 不是什么 |
+|---|---|---|
+| `app.state.runtime_store` | Store adapter 对象引用 | Run 状态的内存副本 |
+| `app.state.artifact_store` | CAS 文件 adapter | Artifact metadata authority |
+| `app.state.settings` | API 进程配置快照 | 已激活 release |
+| `runtime.db` | admission/run/event/checkpoint/release authority | 只服务于某一 HTTP worker 的 session |
+| `runtime_workers.release_map_json` | Worker 能力/心跳事实 | API app.state 里的 EngineRegistry |
+
+例如，同一 API 进程重建一个 `SqliteRuntimeStore` 对象不会丢 Run；删掉/替换 `runtime.db` 才会改变权威数据。反过来，即使 `app.state` 中还有 Store 对象，schema digest 不匹配时也不能继续使用该 DB。
+
+## 8. 测试方式
+
+### 8.1 走完整 FastAPI lifespan
+
+集成测试应使用会触发 lifespan 的 ASGI/TestClient 方式，这样能验证：
+
+- current schema bootstrap/identity 检查。
+- `app.state` 三个对象已在请求前注入。
+- handler 走真实 Store/ArtifactStore 路径。
+
+### 8.2 直接注入测试替身
+
+单元测试可创建 FastAPI app/request 并显式设置：
 
 ```python
-# agent/runtime/ports/store.py
-class RuntimeStore(Protocol):
-    async def admit(self, command: AdmissionCommand) -> AdmissionResult: ...
-    async def get_run(self, run_id: str) -> RunRecord | None: ...
-    # ...
-
-# agent/runtime/adapters/sqlite/store.py
-class SqliteRuntimeStore:
-    async def admit(self, command: AdmissionCommand) -> AdmissionResult:
-        # 实现 Protocol 定义的方法
-        pass
+app.state.settings = test_settings
+app.state.runtime_store = fake_store
+app.state.artifact_store = fake_artifact_store
 ```
 
-**优点**：
-- 编译时类型检查
-- IDE 自动补全
-- 替换实现时保证接口一致
+但 fake 不能改变业务契约。例如 claim 仍应接收完整 `release_map`，checkpoint 仍应使用 revision CAS，所有权丢失仍应以 `AttemptOwnershipLost` 冒泡而不是 terminalize Run。
 
----
+## 9. 常见问题
 
-## 七、常见问题与陷阱
+### 为什么不把 AdmissionService 也做成 app.state 单例？
 
-### 7.1 AttributeError: 'State' object has no attribute
+它当前只持有 Store、Clock 和默认 deadline，每请求构造成本很低，而且让 handler 明确地把当前 settings 中的 deadline 注入进去。没有必要为了形式一致增加一个应用级对象。
 
-**原因**：访问未初始化的 `app.state` 属性
+### app.state 是否线程/协程安全？
 
-**解决**：
-- 检查资源是否在 `lifespan` 中初始化
-- 确保路由挂载在 `lifespan` 之后
-- 测试时手动设置 `app.state`
+`app.state` 只提供对象引用，安全性由对象本身决定。当前 Store 不共享可变 transaction connection，SQLite 写通过短 `BEGIN IMMEDIATE` 串行化；Artifact CAS 使用 digest 和原子 rename。不能因为对象被放在 `app.state` 就推导出内部实现自动并发安全。
 
----
+### 多 API 进程的 app.state 是同一个吗？
 
-### 7.2 循环依赖
+不是。每个进程有各自的 app/state/Store adapter 对象，它们通过共享的 SQLite 文件交流。当前这一设计边界是本机多进程，不是跨主机 HA。
 
-**问题**：
-```python
-class ServiceA:
-    def __init__(self, b: ServiceB): ...
+### 可以在 API lifespan 里创建 Worker task 吗？
 
-class ServiceB:
-    def __init__(self, a: ServiceA): ...
-```
+不应该。这会让 API 进程加载 LLM/工具目录，破坏独立部署、故障隔离、新鲜 heartbeat 和 release activation 语义。执行层必须保持为 `python -m agent.runtime.worker.main` 独立进程。
 
-**解决**：
-- 重构为单向依赖
-- 使用延迟初始化（lazy initialization）
-- 引入中间层解耦
+## 10. 源码阅读索引
 
----
-
-### 7.3 资源泄漏
-
-**问题**：`yield` 之后未清理资源
-
-**解决**：
-```python
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    resource = await create_resource()
-    app.state.resource = resource
-    try:
-        yield
-    finally:
-        await resource.close()  # 确保清理
-```
-
----
-
-### 7.4 并发访问
-
-**问题**：`app.state` 在并发请求下是否安全？
-
-**答案**：安全。`app.state` 是只读访问（启动时写入，运行时只读），无需加锁。但注意：
-- 资源本身需要线程安全（如数据库连接池）
-- 不要在请求处理中修改 `app.state`
-
----
-
-## 八、总结
-
-本项目基于 FastAPI `app.state` 实现了简洁有效的依赖注入：
-
-**核心优势**：
-1. **简单直接**：无需学习复杂的依赖解析机制
-2. **显式控制**：依赖获取位置明确，便于调试
-3. **边界清晰**：在使用它的 HTTP 服务中，资源获取位置明确
-4. **性能优越**：无额外函数调用开销
-
-**适用场景**：
-- 依赖数量较少（<10 个核心资源）
-- 团队偏好显式代码
-- 项目规模中等，无需复杂的依赖图管理
-
-**不适用场景**：
-- 依赖关系复杂，需要自动解析
-- 需要细粒度的作用域控制（per-request、per-session）
-- 团队熟悉并偏好声明式风格
-
-**替代方案**：
-- FastAPI `Depends`：适合依赖复杂、需要类型推断的场景
-- 第三方 IoC 容器（如 `dependency-injector`）：适合大型项目、复杂依赖图
+- `agent/main.py`：FastAPI lifespan、app.state、healthz。
+- `agent/runtime/api/runs.py`：Store/settings 获取、CreateRun、status/cancel/signal/SSE。
+- `agent/runtime/api/artifacts.py`：ArtifactStore + RuntimeStore 组合使用。
+- `agent/api/documents.py`：settings 驱动的 ARAG HTTP 接入。
+- `agent/runtime/application/admission.py`：依赖 `RuntimeStore` 的应用服务。
+- `agent/runtime/adapters/sqlite/database.py`：每操作 connection 策略与 current schema 入口。
+- `common/sqlite_schema.py`：schema byte digest 和原子 bootstrap。
+- `agent/runtime/worker/main.py`：与 app.state 独立的 Worker/ToolCatalog/release/Adapter 装配。

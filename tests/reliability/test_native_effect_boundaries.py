@@ -5,7 +5,11 @@ from google.genai import types
 from agent.config import AgentSettings
 from agent.engine.base import RunContext
 from agent.engine.native_loop.tools import ToolRegistry, ToolSpec
-from agent.runtime.adapters.brokered_tools import broker_native_registry
+from agent.runtime.adapters.brokered_tools import (
+    NativeBrokerSession,
+    build_brokered_native_registry,
+    build_runtime_tool_catalog,
+)
 
 
 async def _unused(_args, _context):  # pragma: no cover - classification only
@@ -39,12 +43,20 @@ def test_native_early_concurrency_requires_reviewed_read_only_effect() -> None:
         fencing_token=1,
         release_fingerprint="release-v1",
     )
-    registry = broker_native_registry(
-        ToolRegistry([
+    source = ToolRegistry([
             _spec("deep_translate"),       # explicitly reviewed READ_ONLY Skill
             _spec("new_unreviewed_skill"), # defaults to UNKNOWN_EFFECT
-        ]),
-        rc,
+        ])
+    registry = build_brokered_native_registry(
+        source,
+        NativeBrokerSession(
+            run_id=rc.run_id,
+            activity_id=rc.activity_id,
+            fencing_token=rc.fencing_token,
+            deadline_at_ms=rc.deadline_at_ms,
+            tool_broker=rc.tool_broker,
+            catalog=build_runtime_tool_catalog(source),
+        ),
     )
 
     assert registry.get("deep_translate").concurrency_safe is True

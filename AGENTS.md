@@ -78,11 +78,12 @@ API 和 Worker 当前共享本机 `runtime.db` 与 Artifact CAS。可选下游�
 - cancel/complete 由提交顺序决定；cancel-first 的 late success 不能覆盖。dispatched/unknown effect 存在时进入 `CANCEL_REQUESTED`。
 - deadline 是绝对 UTC，向下只传剩余预算，不在每层重新开始 timeout。
 - Worker 领取使用 lease/revision/fencing；旧 fencing 结果拒绝，Worker 丢失不直接失败 Run。
+- Worker 领取必须同时精确匹配 `(engine, release_fingerprint)`；错误 release 的 Worker 不得领取或终态化 Run。三份 active release 在一个写事务中切换，存在不同 fingerprint 的非终态 Run 时拒绝激活。
 - 所有 SQLite 写使用短 `BEGIN IMMEDIATE`；事务内禁止 LLM、Tool、RAG、Skill、文件系统或等待人工。
 
-Runtime 和 RAG 各有一份当前 schema 文件（`agent/runtime/adapters/sqlite/schema.sql`、`arag/persistence/schema.sql`），没有 migration 机制，也没有 `ALTER` 路径；不得重新引入增量迁移。启动时由 `common/sqlite_schema.py` 的 `ensure_current_schema` 在单个 `BEGIN IMMEDIATE` 内完成：空库建全表并写 `schema_meta`，已有库校验 version + checksum。数据库仅支持当前 schema：不匹配时必须 fail-fast，并提示用户显式删除或重建对应本地数据库；程序不得静默删除、覆盖或自动迁移旧数据库。连接必须启用 WAL、`synchronous=FULL`、foreign keys、busy timeout。不要引入 ORM/Alembic 或预留 PostgreSQL backend。
+Runtime 和 RAG 各有一份 current schema 文件（`agent/runtime/adapters/sqlite/schema.sql`、`arag/persistence/schema.sql`），没有 migration 机制，也没有 `ALTER` 路径；不得重新引入增量迁移。启动时由 `common/sqlite_schema.py` 的 `ensure_current_schema` 在单个 `BEGIN IMMEDIATE` 内完成：空库建全表并写 `schema_meta(id, schema_digest, created_at)`，已有库校验完整 `schema.sql` 字节的 SHA-256 digest。数据库仅支持 current schema：不匹配时必须以 `CURRENT_SCHEMA_MISMATCH` fail-fast，并提示用户显式删除或重建对应本地数据库；程序不得静默删除、覆盖或自动迁移旧数据库。连接必须启用 WAL、`synchronous=FULL`、foreign keys、busy timeout。不要引入 ORM/Alembic 或预留 PostgreSQL backend。
 
-数据库跨版本升级、滚动发布期间的 schema 兼容和旧数据保留不在本项目范围内。要换 schema 就删库重建，没有 checkpoint 升级路径。若新需求改变存储或协调架构，先明确分布式需求与中间件依赖，再按 ADR、current schema、版本/checksum 与 reliability test 完整替换；不能在现有 SQLite 旁边临时增加第二事实源，也不能退化为进程内状态。
+数据库跨版本升级、滚动发布期间的 schema 兼容和旧数据保留不在本项目范围内。要换 schema 就删库重建，没有 checkpoint 升级路径。若新需求改变存储或协调架构，先明确分布式需求与中间件依赖，再按 ADR、current schema digest 与 reliability test 完整替换；不能在现有 SQLite 旁边临时增加第二事实源，也不能退化为进程内状态。
 
 ## Engine Adapter 与三代引擎
 
@@ -92,21 +93,27 @@ Runtime 和 RAG 各有一份当前 schema 文件（`agent/runtime/adapters/sqlit
 EngineAdapter.execute(EngineRunRequest, RuntimeIO) -> EngineOutcome
 ```
 
-`RuntimeIO` 提供 committed EventSink、checkpoint CAS、Tool Broker、Clock、deadline/cancel probe。当前三代引擎内部的窄 `ReasoningEngine`/event draft 只存在于 adapter 后，不得泄漏为公开传输或终态协议。
+`RuntimeIO` 提供 committed EventSink、checkpoint CAS/事件原子提交、Tool Broker、显式 final assistant、Clock、deadline/cancel probe。窄 `ReasoningEngine`/event draft 只属于两个 ADK adapter 后的内部兼容面，不得泄漏为公开传输或终态协议。
 
 - `plan_execute`：decision planner → execution planner；plan checkpoint 后恢复不得重新规划。
 - `agent_loop`：循环位于 ADK `BaseLlmFlow`；Plugin/LiteLlm 承担参数 guard、异常反馈、预算/收口。
-- `native_loop`：自研 loop，支持只读工具分批并发、流式工具执行和 context compact；`native-kernel-v1` 在 model request、完整 ToolCall batch、每个 ToolResult、next-turn/completed 提交 checkpoint。
+- `native_loop`：`NativeLoopAdapter` 直接实现公开端口，负责 canonical history/附件、strict checkpoint、RuntimeIO 提交、Broker 调度和 final assistant；Runtime-independent kernel 仍可供 Claude Skill 子 Runner 使用。工具提前派发默认 `off`，仍保留模型正文流式、Skill 进度流式以及完整 batch 后的受控 READ_ONLY 并发。
+
+Native 默认硬限：工具并发 10，ToolCall 每轮 64/每 Run 256，单调用/单 batch 参数 64/256KiB，每 generation 模型输出 1MiB，checkpoint 2MiB，ToolCatalog 1MiB，Skill event 单条 64KiB/每 Run 2000 条且总计 8MiB。尺寸一律按 UTF-8 bytes 计算；模型调用硬上限为 `max_loop_iters + 2`（默认 10）。修改任一语义开关或限制都必须改变 release fingerprint。
 
 三引擎共享系统指令和 loop 工具面，修改 `agent/engine/loop_tools/` 必须同时验证 `agent_loop` 与 `native_loop`。`SUB_AGENT_ENGINE` 取 `auto` 时跟随当前 Run；`plan_execute` 的子 Runner 映射为 ADK。A2A 是远端自身 ADK，不受此配置影响。
 
-恢复边界必须诚实：两个 ADK 引擎是粗粒度 invocation/step 恢复，不宣称 mid-turn deterministic replay。`native_loop` 从最后 committed kernel checkpoint 恢复；半个 model stream 会重放 model slot，已提交 ToolExecution 靠稳定 slot/Broker 复用，但不承诺 provider token 级重放。`/reliability-demo` 是在通用 checkpoint 之上的 WAITING_INPUT → signal → 幂等副作用 → Artifact 确定性纵切；不要把 Runtime 通用 signal 能力描述成所有子 Runner 都已支持 HITL。
+恢复边界必须诚实：两个 ADK 引擎是粗粒度 invocation/step 恢复，不宣称 mid-turn deterministic replay。`native_loop` 从最后 committed current checkpoint 恢复；半个 model stream 用新 generation 重做 model slot，已提交 ToolExecution 靠稳定 slot/Broker 复用，但不承诺 provider token 级重放。checkpoint 存在但无法按唯一 current codec 严格解析时必须 `NATIVE_CHECKPOINT_INVALID`，不允许 fallback。WAITING_INPUT/外部副作用确定性纵切只存在于 reliability test support，生产 Worker 没有魔法 prompt 路由；不要把 Runtime 通用 signal 能力描述成所有子 Runner 都已支持 HITL。
 
 ADK attempt 的 session/artifact 适配器必须每 attempt 创建并销毁；跨 attempt history 只能从 Canonical Events + Checkpoint 编译。native 不得重新引入进程级历史 store。
 
 ## Tool Broker 与 Artifact
 
 ToolManifest 至少包含 release digest、effect class、timeout/attempt、idempotency/reconcile/cancel 支持、结果策略、并发与独占资源。
+
+Worker 必须按“加载工具源 → 构造最终 ToolCatalog → strict 校验 → 计算 release → 创建 Adapter → 原子激活”启动。重名、空 schema fallback、声明/适配异常、缺 manifest、非法 Draft 2020-12 object schema 或目录部分跳过一律 fail-fast。可选远程下游连不上可返回空目录；一旦成功返回目录，任何畸形条目都必须阻止启动。`agent_loop`/`native_loop` 的公开工具面必须逐项同名、同描述、同 normalized schema 和 effect policy。
+
+Broker 内部只接受 `ToolExecutionOutput(result: ToolResultEnvelope, evidence: EvidenceSet | None)`。builtin、Skill、Claude Skill、A2A 在各自协议边界把普通 JSON/`None`/协议错误适配成该类型；Broker 不识别别名或任意 dict。Evidence DTO 使用 strict + extra=forbid；producer 必须给出完整 query/hash/document/index version/scope，Broker 只校验 run/activity/tool_execution 身份，不从 legacy hits/隐藏字段补造，也不填 `unknown/default/unversioned`。违反时 `EVIDENCE_CONTRACT_INVALID`。
 
 - `READ_ONLY` 可安全受控重试；
 - `IDEMPOTENT_EFFECT` 必须向下游透传稳定 Runtime idempotency key；
@@ -151,7 +158,7 @@ numpy vector/BM25 是进程内不可变、可重建投影。投影缺失/损坏�
 
 主要投影：`text/tool_call/tool_result/plan_step/skill_event/citation/run_status/activity_status/terminal`。终态只看 `RUN_TERMINATED` 和 GET Run status。
 
-Trace 分为 admission、Worker attempt、SSE subscription 等独立请求/执行轨迹，只用于诊断。`TRACE_PAYLOAD_LEVEL=full` 会落用户原文和模型输入，文件不得随报告分发；二进制必须被摘要占位。关闭 Trace 后全部恢复测试仍应通过。
+Trace 分为 admission、Worker attempt、SSE subscription 等独立请求/执行轨迹，只用于诊断。生产默认 `TRACE_PAYLOAD_LEVEL=summary`；`full` 会落非敏感用户原文和模型输入，只能在受控本机诊断窗口临时开启，文件不得随报告分发。结构化字段及嵌套 JSON 字符串中的敏感键必须脱敏，二进制必须被摘要占位。关闭 Trace 后全部恢复测试仍应通过。
 
 ## 常用命令
 
@@ -177,7 +184,7 @@ bash eval/run_eval.sh
 
 `run_all.sh` 的 Worker readiness 必须同时验证本次启动后的新鲜 `ACTIVE` heartbeat 与三种 active release pointer 完全一致；只看持久库里已有的三行 active release 会把旧指针误判为当前 Worker ready。脚本须保持 Bash 3.2 兼容，并持续监督五个子进程。
 
-`scripts/check.sh` 应执行 py_compile、`pytest tests/reliability`、SQLite schema identity 验证和旧协议字符串扫描。真实 LLM 行为分数不属于可靠性 PASS。
+`scripts/check.sh` 应执行 py_compile、`pytest tests/reliability`、SQLite schema identity 验证和旧协议字符串扫描。扫描至少阻止 migration/增量改表 DDL/checkpoint-upgrader 符号、无用 engine-state ref、已删除的 release 终态、旧 Evidence 补造载体、生产 reliability-demo 路由、旧 Native early-dispatch 布尔配置和 schema 错误包装类重新进入。真实 LLM 行为分数不属于可靠性 PASS。
 
 ## 修改规则
 

@@ -1,914 +1,573 @@
 # Query 到 Answer 全链路代码阅读指南
 
-本文档整合 CreateRun、Worker 执行、SSE 推送、前端渲染的完整链路，包含端到端时序图、调用栈（含源码位置）、关键逻辑摘要，用于精读整体链路源码。
+本文按当前代码梳理一次 Query 从浏览器进入 Runtime、被 Worker 执行、调用模型/工具、通过 SSE 展示并最终写入 Conversation history 的完整路径。
 
----
+当前公开 Engine 端口只有：
 
-## 目录
-
-- [1. 全链路概览](#1-全链路概览)
-- [2. 端到端时序图](#2-端到端时序图)
-- [3. 阶段一：HTTP 入口 → CreateRun](#3-阶段一http-入口--createrun)
-- [4. 阶段二：Admission → SQLite 事务](#4-阶段二admission--sqlite-事务)
-- [5. 阶段三：Worker 领取 Claim](#5-阶段三worker-领取-claim)
-- [6. 阶段四：RunCoordinator 执行](#6-阶段四runcoordinator-执行)
-- [7. 阶段五：Engine 执行 → Event 产出](#7-阶段五engine-执行--event-产出)
-- [8. 阶段六：SSE 推送 → 前端消费](#8-阶段六sse-推送--前端消费)
-- [9. 阶段七：前端渲染 → 终态](#9-阶段七前端渲染--终态)
-- [10. 完整调用栈总览](#10-完整调用栈总览)
-- [11. 源码位置索引](#11-源码位置索引)
-
----
-
-## 1. 全链路概览
-
-### 1.1 整体流程
-
-```text
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              用户 (浏览器)                                  │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  1. 输入 query + 附件                                                │   │
-│  │  2. POST /runs → 获得 run_id                                         │   │
-│  │  3. GET /runs/{id}/events → SSE 订阅                                 │   │
-│  │  4. 消费 SSE 事件，渲染回答                                          │   │
-│  │  5. 收到 terminal 事件，结束                                         │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────┬───────────────────────────────────────────┘
-                                  │
-                                  │ HTTP
-                                  ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         Runtime API 进程 (:8000)                            │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  1. create_run() → AdmissionService.create()                         │   │
-│  │  2. store.admit() → SQLite 事务                                      │   │
-│  │  3. stream_events() → SSE 推送                                       │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────┬───────────────────────────────────────────┘
-                                  │
-                                  │ SQLite (runtime.db)
-                                  ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         Runtime Worker 进程                                 │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  1. claim_next() → 领取 Activity                                     │   │
-│  │  2. RunCoordinator.execute_claim() → 执行引擎                        │   │
-│  │  3. EngineAdapter.execute() → 路由引擎事件                           │   │
-│  │  4. engine-owned → CommittedEventSink；Broker-owned tool → Store      │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────┘
+```python
+EngineAdapter.execute(EngineRunRequest, RuntimeIO) -> EngineOutcome
 ```
 
-### 1.2 关键里程碑
+三个引擎分为两条实现路径：
 
-| 阶段 | 里程碑 | 关键产物 |
+```text
+plan_execute ─┐
+              ├─ AdkEngineAdapter → ADK ReasoningEngine
+agent_loop ───┘
+
+native_loop ─── NativeLoopAdapter → Native Runtime-independent kernel
+```
+
+Native 不再经过旧的通用 Adapter、`RunContext.engine_outcome` 或后台 runner merge queue。文中按符号名定位代码，不依赖易漂移的行号。
+
+## 1. 整体架构与事实源
+
+```text
+Browser / API client
+  │
+  ├─ POST /api/v1/artifacts
+  ├─ POST /api/v1/runs
+  └─ GET  /api/v1/runs/{run_id}/events
+          │
+          ▼
+Runtime API (:8000)
+  ├─ admission/status/cancel/signal/SSE
+  └─ 不加载 LLM 和远程工具目录
+          │
+          ▼
+runtime.db + Artifact CAS
+          ▲
+          │
+Runtime Worker
+  ├─ exact-release claim + lease/fencing
+  ├─ RunCoordinator
+  ├─ EngineAdapter
+  ├─ Tool Broker / Artifact
+  └─ ARAG / Skill Center / A2A
+```
+
+辅助服务：
+
+- ARAG：`:8100`
+- Skill Center：`:8200`
+- A2A：`:8300`
+
+当前 API 与 Worker 共享本机 SQLite/Artifact，因此实现的是本机多进程恢复，不是跨主机 HA。
+
+### 1.1 权威状态
+
+| 问题 | Authority | 不能作为 Authority 的东西 |
 |---|---|---|
-| HTTP 入口 | CreateRun 请求 | Pydantic 校验通过 |
-| Admission | Run 创建成功 | run_id, conversation_id |
-| Worker 领取 | Claim 获得执行权 | fencing_token, lease |
-| 引擎执行 | 产出/提交 Events | text/tool_call/tool_result（工具公开投影由 Broker 或 engine-owned 路由提交） |
-| SSE 推送 | 前端收到事件 | 增量渲染 |
-| 终态 | Run 完成 | terminal 事件 |
+| CreateRun 幂等 | `run_requests` | HTTP 是否断开 |
+| Run 状态/终态 | `runs` + `RUN_TERMINATED` | Engine 内部 event、SSE EOF |
+| Activity 执行权 | lease/revision/fencing | 某个 Python task 仍在运行 |
+| Conversation history | committed USER + 成功 ASSISTANT event | partial delta、attempt session |
+| checkpoint | append-only checkpoints + revision CAS | Trace |
+| Tool effect | `tool_executions` | timeout 推测、args hash |
+| Artifact 字节 | SHA-256 CAS | preview、路径名 |
+| Evidence | committed strict EvidenceSet | UI citation 序号 |
+| release | immutable manifest + active pointer | 当前进程临时配置 |
 
----
+## 2. Worker 启动：先冻结 current 世界
 
-## 2. 端到端时序图
+理解 Query 前，先看 `agent/runtime/worker/main.py::build_worker`。只有 Worker 会计算并原子切换 current release 的 active pointer；Admission 只是读取持久化 pointer，并不会校验是否存在新鲜 Worker heartbeat。因此重启间隙可能冻结到库中保留的 pointer，Run 会等待 exact-release Worker，最迟由绝对 deadline 收口。
 
-### 2.1 完整时序
+### 2.1 current schema
+
+Runtime 和 ARAG 各有一份唯一 current `schema.sql`。`common/sqlite_schema.py::ensure_current_schema` 执行：
 
 ```text
-    浏览器                  API进程(:8000)           SQLite(runtime.db)         Worker进程
-      │                         │                        │                        │
-      │──POST /runs────────────>│                        │                        │
-      │  {engine, input, ...}   │                        │                        │
-      │  Idempotency-Key: xxx   │                        │                        │
-      │                         │                        │                        │
-      │                         │──[Admission 事务]──────>│                        │
-      │                         │  1. 查 run_requests (幂等)                      │
-      │                         │  2. 查 active_releases (release)                │
-      │                         │  3. 查 artifact_metadata (附件)                 │
-      │                         │  4. INSERT/UPDATE conversations                 │
-      │                         │  5. INSERT runs (DISPATCH_PENDING)              │
-      │                         │  6. INSERT activities (PENDING)                 │
-      │                         │  7. INSERT run_requests (幂等记录)              │
-      │                         │  8. INSERT artifact_links                       │
-      │                         │  9. INSERT run_events (seq 1-4)                 │
-      │                         │     ├─ USER_MESSAGE_COMMITTED                   │
-      │                         │     ├─ RUN_STATUS_CHANGED (None→ACCEPTED)       │
-      │                         │     ├─ RUN_STATUS_CHANGED (ACCEPTED→DISPATCH)   │
-      │                         │     └─ ACTIVITY_STATUS_CHANGED (None→PENDING)   │
-      │                         │  10. COMMIT                                     │
-      │                         │                        │                        │
-      │<─202 Accepted───────────│                        │                        │
-      │  {run_id, events_url}   │                        │                        │
-      │                         │                        │                        │
-      │                         │                        │    (250ms 轮询)        │
-      │                         │                        │<─────claim_next────────│
-      │                         │                        │  [Claim 事务]          │
-      │                         │                        │  1. SELECT activities  │
-      │                         │                        │     WHERE state=PENDING│
-      │                         │                        │  2. UPDATE activities  │
-      │                         │                        │     SET state=CLAIMED  │
-      │                         │                        │     fencing_token+1    │
-      │                         │                        │  3. UPDATE runs        │
-      │                         │                        │     SET state=RUNNING  │
-      │                         │                        │  4. INSERT run_events  │
-      │                         │                        │     ├─ ACTIVITY: PENDING→CLAIMED│
-      │                         │                        │     └─ RUN: DISPATCH→RUNNING  │
-      │                         │                        │  5. COMMIT             │
-      │                         │                        │                        │
-      │──GET /runs/{id}/events──>│                        │                        │
-      │  ?after_seq=0           │                        │                        │
-      │                         │──list_events───────────>│                        │
-      │                         │<─返回 seq 1-4───────────│                        │
-      │<─SSE id:1 event:user_message──│                   │                        │
-      │<─SSE id:2 event:run_status────│                   │                        │
-      │<─SSE id:3 event:run_status────│                   │                        │
-      │<─SSE id:4 event:activity_status─│                 │                        │
-      │                         │                        │                        │
-      │                         │                        │    execute_claim()     │
-      │                         │                        │    ┌───────────────────┤
-      │                         │                        │    │ mark_activity_running
-      │                         │                        │    │ 检查 release 兼容性
-      │                         │                        │    │ compile_history()  │
-      │                         │                        │    │ EngineAdapter.execute()
-      │                         │                        │    │  ┌─────────────────┤
-      │                         │                        │    │  │ 引擎循环执行     │
-      │                         │                        │    │  │ LLM 调用         │
-      │                         │                        │    │  │ 工具调用         │
-      │                         │                        │    │  │ CommittedEventSink
-      │                         │                        │    │  │  ┌───────────────┤
-      │                         │                        │    │  │  │ emit() events │
-      │                         │                        │    │  │  │ _flush_locked() 聚合 │
-      │                         │                        │    │  │  └───────────────┤
-      │                         │                        │    │  │ engine_outcome   │
-      │                         │                        │    │  └─────────────────┤
-      │                         │                        │    │ finalize_success() │
-      │                         │                        │    │  ┌─────────────────┤
-      │                         │                        │    │  │ [Finalize 事务] │
-      │                         │                        │    │  │ INSERT events   │
-      │                         │                        │    │  │ ├─ ASSISTANT_MSG│
-      │                         │                        │    │  │ ├─ CITATION_SET │
-      │                         │                        │    │  │ └─ RUN_TERMINATED
-      │                         │                        │    │  │ UPDATE runs     │
-      │                         │                        │    │  │ SET state=SUCCEEDED
-      │                         │                        │    │  └─────────────────┤
-      │                         │                        │    └───────────────────┤
-      │                         │                        │                        │
-      │                         │                        │                        │
-      │<─SSE id:5 event:text────│                        │                        │
-      │  delta: "混合召回是..." │                        │                        │
-      │<─SSE id:6 event:tool_call─│                      │                        │
-      │<─SSE id:7 event:tool_result─│                    │                        │
-      │<─...────────────────────│                        │                        │
-      │                         │                        │                        │
-      │<─": heartbeat\n\n"────────│  (15秒无事件时)       │                        │
-      │                         │                        │                        │
-      │<─SSE id:N event:terminal─│                       │                        │
-      │  terminal_status:SUCCEEDED                      │                        │
-      │                         │                        │                        │
-      │──连接关闭────────────────X                        │                        │
+空库
+→ BEGIN IMMEDIATE
+→ 一次性创建完整 schema
+→ schema_meta(id, schema_digest, created_at)
+→ COMMIT
+
+非空库
+→ 计算完整 schema.sql 原始字节 SHA-256
+→ 必须与 schema_meta.schema_digest 完全一致
+→ 否则 CURRENT_SCHEMA_MISMATCH
 ```
 
----
+没有 migration、`ALTER TABLE`、upgrader、shadow read/write 或旧 checkpoint codec。schema 变化后由用户显式删库重建。
 
-## 3. 阶段一：HTTP 入口 → CreateRun
+### 2.2 strict ToolCatalog
 
-### 3.1 调用栈
+Worker 加载 builtin、远程 Skill、本地 Claude Skill、A2A 与 `read_artifact` 后：
+
+1. 收集 `native_loop` 和 `agent_loop` 的工具面；
+2. 校验 name、description、normalized schema、effect/result policy parity；
+3. 构造唯一 `ToolCatalog`；
+4. 严格注册 `ToolBroker`；
+5. catalog digest 进入 release identity。
+
+重复名称、空 schema fallback、非法 Draft 2020-12 object schema、畸形成功目录、缺 executor/result adapter 都会阻止启动。远程目录连接失败可以 best-effort 为空；成功响应则必须全量有效。
+
+### 2.3 三份 release 原子激活
+
+`ReleaseManifest` 当前只包含 `engine + components`。components 覆盖 schema/source/catalog/provider/checkpoint/语义配置/资源上限和真实安装依赖版本。
+
+`store.activate_current_releases(...)` 必须一次传入：
 
 ```text
-[API 进程]
+plan_execute + agent_loop + native_loop
+```
+
+在一个 `BEGIN IMMEDIATE` 中写入或核对 immutable manifests、检查是否有异 fingerprint 非终态 Run、再同时切换三个 active pointer。中间任一失败会全部回滚。
+
+## 3. 阶段一：HTTP CreateRun
+
+入口：`agent/runtime/api/runs.py::create_run`
+
+```http
 POST /api/v1/runs
-├─ TraceMiddleware (设置 trace_id contextvar)
-│
-├─ create_run() runs.py:131
-│   │
-│   ├─ Pydantic 校验 CreateRunBody runs.py:40-48
-│   │   ├─ engine: Literal["plan_execute", "agent_loop", "native_loop"]
-│   │   ├─ input.text: min_length=1, max_length=200000
-│   │   └─ input.attachment_refs: max_length=32
-│   │
-│   ├─ get_trace_id() ← 从 contextvar 获取
-│   │
-│   └─ AdmissionService.create() admission.py:50
-│       │
-│       ├─ 校验 idempotency_key 非空
-│       │   └─ 空 → RuntimeFault("IDEMPOTENCY_KEY_REQUIRED", 400)
-│       │
-│       ├─ 计算 deadline
-│       │   ├─ 未提供 → now + default_deadline_ms(600s)
-│       │   └─ deadline <= now → RuntimeFault("DEADLINE_IN_PAST", 400)
-│       │
-│       ├─ 计算 request digest
-│       │   └─ sha256_json(request.digest_payload())
-│       │       └─ 包含: client_request_id, conversation_id, principal_id,
-│       │              agent_id, engine, input.text, input.attachment_refs, deadline_at
-│       │       └─ 不包含: trace_id (诊断信号，不影响幂等)
-│       │
-│       ├─ 构造 AdmissionCommand
-│       │   ├─ 生成 ID (UUIDv4): run_id, turn_id, request_id, cancel_token_id, input_event_id
-│       │   └─ activity_id = UUIDv5(run_id + "engine:0")  ← stable slot
-│       │
-│       └─ store.admit(command) ← 进入事务
-```
+Idempotency-Key: <required>
+Content-Type: application/json
 
-### 3.2 关键代码
-
-**文件**: `agent/runtime/api/runs.py:131-170`
-
-```python
-@router.post("", status_code=status.HTTP_202_ACCEPTED)
-async def create_run(
-    body: CreateRunBody,
-    request: Request,
-    response: Response,
-    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
-) -> dict[str, Any]:
-    settings: AgentSettings = request.app.state.settings
-    service = AdmissionService(
-        _store(request),
-        default_deadline_ms=settings.runtime_default_deadline_seconds * 1000,
-    )
-    result = await service.create(
-        CreateRunInput(
-            client_request_id=str(body.client_request_id),
-            conversation_id=body.conversation_id,
-            principal_id=body.principal_id,
-            agent_id=body.agent_id,
-            engine=body.engine,
-            text=body.input.text,
-            attachment_refs=tuple(body.input.attachment_refs),
-            deadline_at=rfc3339_to_ms(body.deadline_at),
-            trace_id=get_trace_id(),  # ← 诊断信号，不进 digest
-        ),
-        idempotency_key=idempotency_key or "",
-    )
-    run = result.run
-    base = f"/api/v1/runs/{run.envelope.run_id}"
-    response.headers["Location"] = base
-    return {
-        "run_id": run.envelope.run_id,
-        "turn_id": run.envelope.turn_id,
-        "conversation_id": run.envelope.conversation_id,
-        "status": run.status,
-        "reused": result.reused,
-        "status_url": base,
-        "events_url": base + "/events",
-    }
-```
-
----
-
-## 4. 阶段二：Admission → SQLite 事务
-
-### 4.1 调用栈
-
-```text
-[API 进程]
-store.admit(command) store.py:386
-├─ BEGIN IMMEDIATE 事务
-│
-├─ 1. 查 run_requests (幂等校验)
-│   └─ SELECT request_digest, run_id FROM run_requests
-│      WHERE (principal_id, agent_id, idempotency_key)
-│      ├─ 命中 + digest 不同 → 409 IDEMPOTENCY_KEY_REUSE
-│      └─ 命中 + digest 相同 → 返回原 Run, reused=True
-│
-├─ 2. 查 active_releases (release 校验)
-│   └─ SELECT release_fingerprint FROM active_releases WHERE engine=?
-│      └─ 无结果 → 503 NO_ACTIVE_RELEASE
-│
-├─ 3. 查 artifact_metadata (附件校验)
-│   └─ SELECT artifact_id FROM artifact_metadata WHERE artifact_id IN (...)
-│      └─ 缺失 → 400 ARTIFACT_NOT_FOUND
-│
-├─ 4. 处理 conversation
-│   ├─ conversation_id is null → INSERT 新 conversation, turn_seq=1
-│   ├─ 指定 id 但不存在 → 404 NOT_FOUND
-│   └─ 已存在 → 校验 ownership + UPDATE next_turn_seq+1
-│
-├─ 5. INSERT runs (state=DISPATCH_PENDING, next_seq=1)
-│
-├─ 6. INSERT activities (type=ENGINE_RUN, state=PENDING)
-│
-├─ 7. UPDATE runs SET current_activity_id
-│
-├─ 8. INSERT artifact_links (去重后的 INPUT_ATTACHMENT)
-│
-├─ 9. INSERT run_requests (幂等记录)
-│
-├─ 10. INSERT run_events (seq 1-4)
-│    ├─ USER_MESSAGE_COMMITTED (seq=1)
-│    ├─ RUN_STATUS_CHANGED: None → ACCEPTED (seq=2)
-│    ├─ RUN_STATUS_CHANGED: ACCEPTED → DISPATCH_PENDING (seq=3)
-│    └─ ACTIVITY_STATUS_CHANGED: None → PENDING (seq=4)
-│
-├─ 唯一约束检查
-│   └─ uq_active_run_per_conversation 违反 → 409 CONVERSATION_BUSY
-│
-└─ COMMIT (原子提交)
-```
-
-### 4.2 关键代码
-
-**文件**: `agent/runtime/adapters/sqlite/store.py:386-548`
-
-```python
-async def admit(self, command: AdmissionCommand) -> AdmissionResult:
-    try:
-        async with self.db.transaction() as conn:  # BEGIN IMMEDIATE
-            # 1. 幂等查询
-            prior = await (await conn.execute(
-                """SELECT request_digest,run_id FROM run_requests
-                   WHERE principal_id=? AND agent_id=? AND idempotency_key=?""",
-                (command.principal_id, command.agent_id, command.idempotency_key),
-            )).fetchone()
-            if prior is not None:
-                if prior["request_digest"] != command.request_digest:
-                    raise conflict("IDEMPOTENCY_KEY_REUSE", ...)
-                row = await self._require_run_row(conn, prior["run_id"])
-                return AdmissionResult(run=_run_from_row(row), reused=True)
-            
-            # 2. 检查 active release
-            release = await (await conn.execute(
-                "SELECT release_fingerprint FROM active_releases WHERE engine=?",
-                (command.engine,),
-            )).fetchone()
-            if release is None:
-                raise unavailable("NO_ACTIVE_RELEASE", ...)
-            
-            # ... 后续步骤 ...
-            
-            # 3. 处理 conversation
-            conversation_id = command.conversation_id or command.generated_conversation_id
-            conversation = await (await conn.execute(
-                "SELECT * FROM conversations WHERE conversation_id=?", (conversation_id,),
-            )).fetchone()
-            if conversation is None:
-                if command.conversation_id is not None:
-                    raise not_found("conversation", conversation_id)
-                await conn.execute(
-                    """INSERT INTO conversations ...""",
-                    (conversation_id, command.principal_id, command.agent_id, 2, 1, ...),
-                )
-                turn_seq = 1
-            else:
-                # 校验 ownership + 推进 turn_seq
-                turn_seq = int(conversation["next_turn_seq"])
-                await conn.execute(
-                    """UPDATE conversations SET next_turn_seq=next_turn_seq+1, ...""",
-                    ...
-                )
-            
-            # 4. INSERT runs
-            await conn.execute(
-                """INSERT INTO runs (...) VALUES (...)""",
-                (command.run_id, SCHEMA_VERSION, ..., RunStatus.DISPATCH_PENDING, ...)
-            )
-            
-            # 5. INSERT activities
-            activity_id = stable_id("act", command.run_id, "engine:0")
-            await conn.execute(
-                """INSERT INTO activities (...) VALUES (...)""",
-                (activity_id, command.run_id, ActivityType.ENGINE_RUN, ...)
-            )
-            
-            # 6. INSERT run_requests (幂等记录)
-            await conn.execute(
-                """INSERT INTO run_requests (...) VALUES (...)""",
-                ...
-            )
-            
-            # 7. INSERT run_events
-            await self._append_in_tx(conn, command.run_id, [
-                EventDraft(EventType.USER_MESSAGE_COMMITTED, {...}, event_id=command.input_event_id),
-                EventDraft(EventType.RUN_STATUS_CHANGED, {"from": None, "to": RunStatus.ACCEPTED}),
-                EventDraft(EventType.RUN_STATUS_CHANGED, {"from": RunStatus.ACCEPTED, "to": RunStatus.DISPATCH_PENDING}),
-                EventDraft(EventType.ACTIVITY_STATUS_CHANGED, {"from": None, "to": ActivityStatus.PENDING}, activity_id=activity_id),
-            ])
-            
-            row = await self._require_run_row(conn, command.run_id)
-            return AdmissionResult(run=_run_from_row(row), reused=False)
-    except sqlite3.IntegrityError as exc:
-        if "uq_active_run_per_conversation" in str(exc):
-            raise conflict("CONVERSATION_BUSY", ...)
-```
-
----
-
-## 5. 阶段三：Worker 领取 Claim
-
-### 5.1 调用栈
-
-```text
-[Worker 进程]
-RuntimeWorker.run() dispatcher.py:57
-├─ heartbeat_worker(ACTIVE) ← 启动时写 heartbeat
-│
-├─ while not self._stop.is_set():
-│   ├─ _maintenance(now) ← 触发定时器、恢复过期、清理 Artifact
-│   │
-│   └─ while len(self._tasks) < self.concurrency:
-│       ├─ claim_next() store.py:721
-│       │   └─ BEGIN IMMEDIATE 事务
-│       │       ├─ SELECT activities WHERE state=PENDING AND available_at<=now
-│       │       │   AND (run.state=DISPATCH_PENDING OR cancel_reconcile)
-│       │       │   AND run.deadline_at > now
-│       │       │   AND run.engine IN (worker支持的引擎)
-│       │       │   ORDER BY available_at, created_at LIMIT 1
-│       │       │
-│       │       ├─ UPDATE activities SET
-│       │       │   state='CLAIMED', attempt+1, lease_owner=?, lease_expires_at=?,
-│       │       │   fencing_token+1, revision+1
-│       │       │
-│       │       ├─ UPDATE runs SET state='RUNNING' (或保持 CANCEL_REQUESTED)
-│       │       │
-│       │       ├─ INSERT run_events
-│       │       │   ├─ ACTIVITY_STATUS_CHANGED: PENDING → CLAIMED
-│       │       │   └─ RUN_STATUS_CHANGED: DISPATCH_PENDING → RUNNING
-│       │       │
-│       │       └─ RETURN Claim(run, activity)
-│       │
-│       └─ create_task(_execute(claim)) ← 异步执行
-```
-
-### 5.2 关键代码
-
-**文件**: `agent/runtime/adapters/sqlite/store.py:721-805`
-
-```python
-async def claim_next(self, *, worker_id: str, lease_ms: int, now_ms: int, engines: Sequence[str]):
-    async with self.db.transaction() as conn:
-        cursor = await conn.execute(
-            f"""UPDATE activities SET
-                   state='CLAIMED', attempt=attempt+1, lease_owner=?, lease_expires_at=?,
-                   fencing_token=fencing_token+1, revision=revision+1, updated_at=?
-                 WHERE activity_id=(
-                   SELECT a.activity_id FROM activities a JOIN runs r ON r.run_id=a.run_id
-                   WHERE a.type='ENGINE_RUN' AND a.state='PENDING' AND a.available_at<=?
-                     AND (
-                       r.state='DISPATCH_PENDING'
-                       OR (r.state='CANCEL_REQUESTED' AND json_extract(...) = 'reconciliation')
-                     )
-                     AND r.deadline_at>?
-                     AND r.engine IN ({placeholders})
-                   ORDER BY a.available_at, a.created_at, a.activity_id LIMIT 1
-                 ) AND state='PENDING'
-                 RETURNING *""",
-            (worker_id, now_ms + lease_ms, now_ms, now_ms, RECONCILIATION_MARKER_KIND, now_ms, *engines),
-        )
-        activity_row = await cursor.fetchone()
-        if activity_row is None:
-            return None
-        
-        # 更新 runs 状态
-        if cancel_reconcile_claim:
-            updated = await conn.execute(
-                """UPDATE runs SET revision=revision+1, current_activity_id=?, updated_at=?
-                   WHERE run_id=? AND state='CANCEL_REQUESTED'""",
-                ...
-            )
-        else:
-            updated = await conn.execute(
-                """UPDATE runs SET state='RUNNING', revision=revision+1, current_activity_id=?, updated_at=?
-                   WHERE run_id=? AND state='DISPATCH_PENDING'""",
-                ...
-            )
-        
-        # 追加事件
-        await self._append_in_tx(conn, activity_row["run_id"], drafts)
-        
-        return Claim(run=_run_from_row(run_row), activity=_activity_from_row(activity_row))
-```
-
----
-
-## 6. 阶段四：RunCoordinator 执行
-
-### 6.1 调用栈
-
-```text
-[Worker 进程]
-RunCoordinator.execute_claim(claim) coordinator.py:65
-├─ use_trace_id(claim.run.trace_id or run_id) ← 恢复诊断关联
-│
-└─ _execute_claim() coordinator.py:76
-    │
-    ├─ 1. mark_activity_running() ← CAS + fencing
-    │   └─ UPDATE activities SET state='RUNNING' WHERE state='CLAIMED' AND fencing_token=?
-    │
-    ├─ 2. 检查 ToolReconciliationMarker
-    │   └─ resume_payload 是 reconcile marker → 只走 query hook，不执行引擎
-    │
-    ├─ 3. 检查 cancel 抢占
-    │   └─ marker=None + status=CANCEL_REQUESTED → finalize_failure(CANCELLED)
-    │
-    ├─ 4. Release 兼容性检查（本项目不提供 checkpoint 跨 release 升级路径，一律 fail closed）
-    │   └─ adapter.release_fingerprint != run.envelope.release_fingerprint
-    │         → 直接 finalize_failure(INCOMPATIBLE_RELEASE)；此判定不读 checkpoint，
-    │           因此发生在拉取 checkpoint 之前
-    │
-    ├─ 5. 拉取最新 checkpoint（可能为 None，代表首次执行）
-    │   Deadline 检查：now >= deadline_at → TIMED_OUT
-    │
-    ├─ 6. compile_history(run_id) ← 从 committed events 重建对话历史
-    │
-    ├─ 7. 构造 EngineRunRequest + CommittedEventSink
-    │   ├─ flush_ms=100, flush_bytes=2048
-    │   └─ attach_trace_span(span)
-    │
-    ├─ 8. adapter.execute(request, io) ← 引擎执行
-    │   ├─ TimeoutError/ConnectionError → RETRYABLE_FAILURE
-    │   └─ Exception → TERMINAL_FAILURE
-    │
-    └─ 9. 根据 outcome.kind 终结
-        ├─ COMPLETED + 无 unresolved → finalize_success
-        ├─ COMPLETED + 有 unresolved → wait_for_input(人工 reconcile)
-        ├─ WAITING_INPUT → wait_for_input
-        ├─ RETRYABLE_FAILURE + attempt<max → schedule_retry
-        └─ 其他 → finalize_failure
-```
-
-> release 不一致曾支持"从旧 checkpoint 升级到新 release"的路径（`ReleaseCompatibilityRegistry` + `CheckpointUpgrade*`），2026-08-12 的迁移机制清理提交（见 `sxw_aicoding/changelog/2026-08-12_移除migration机制与checkpoint-upgrader.md`）已整体删除：release 不一致时不再尝试升级，直接判 `INCOMPATIBLE_RELEASE`。
-
-### 6.2 关键代码
-
-**文件**: `agent/runtime/application/coordinator.py:65-443`
-
-```python
-async def execute_claim(self, claim: Claim, *, worker_id: str) -> RunStatus:
-    """恢复本 Run 的诊断 trace_id，再执行。"""
-    with use_trace_id(claim.run.trace_id or claim.run.envelope.run_id):
-        return await self._execute_claim(claim, worker_id=worker_id)
-
-async def _execute_claim(self, claim: Claim, *, worker_id: str) -> RunStatus:
-    # 1. 标记 Activity 为 RUNNING
-    activity = await self.store.mark_activity_running(
-        claim.activity.activity_id,
-        worker_id=worker_id,
-        fencing_token=claim.activity.fencing_token,
-        now_ms=self.clock.now_ms(),
-    )
-    
-    # 2. 检查 ToolReconciliationMarker
-    marker = ToolReconciliationMarker.parse_exact(activity.resume_payload)
-    if marker is not None:
-        # 只走 reconcile 路径，不执行引擎
-        await self.tool_reconciler.reconcile_only(...)
-        return (await self.store.settle_reconciliation_query(...)).status
-    
-    # 3. 检查 cancel 抢占
-    if marker is None and run.status is RunStatus.CANCEL_REQUESTED:
-        return (await self.store.finalize_failure(..., terminal_status=RunStatus.CANCELLED)).status
-    
-    # 4. Release 兼容性检查：不一致直接 fail closed，不尝试升级 checkpoint
-    adapter = self.registry.get(run.envelope.engine)
-    if adapter.release_fingerprint != run.envelope.release_fingerprint:
-        return (await self.store.finalize_failure(..., terminal_status=RunStatus.INCOMPATIBLE_RELEASE)).status
-    
-    # 5. 拉取最新 checkpoint（可能为 None） + Deadline 检查
-    checkpoint = await self.store.latest_checkpoint(run.envelope.run_id)
-    if self.clock.now_ms() >= run.envelope.deadline_at:
-        return (await self.store.finalize_failure(..., terminal_status=RunStatus.TIMED_OUT)).status
-    
-    # 6. 编译历史
-    history = await self.store.compile_history(run.envelope.run_id)
-    
-    # 7. 构造请求和 IO
-    request = EngineRunRequest(envelope=run.envelope, ...)
-    io = CommittedEventSink(self.store, run_id=..., flush_ms=100, flush_bytes=2048)
-    
-    # 8. 执行引擎
-    with start_span("runtime.engine_attempt", ...):
-        outcome = await adapter.execute(request, io)
-        await io.close()
-    
-    # 9. 根据 outcome 终结
-    if outcome.kind is EngineOutcomeKind.COMPLETED:
-        unresolved = await self.store.unresolved_tool_execution_ids(...)
-        if unresolved:
-            return (await self.store.wait_for_input(...)).status
-        else:
-            return (await self.store.finalize_success(...)).status
-    # ... 其他分支 ...
-```
-
----
-
-## 7. 阶段五：Engine 执行 → Event 产出
-
-### 7.1 调用栈
-
-```text
-[Worker 进程]
-LegacyEngineAdapter.execute(request, io) legacy_engines.py:65
-├─ 创建 ADK SessionService (per-attempt，attempt结束销毁)
-│
-├─ 编译 canonical_history → ADK session events
-│
-├─ 构造 user_message
-│   ├─ 图片附件 → 完整读取，物化为 Part.from_bytes
-│   └─ 非图片 → 8KiB preview + "[preview truncated...]"
-│
-├─ 构造 RunContext
-│   ├─ tool_broker, fencing_token, release_fingerprint
-│   ├─ runtime_io (CommittedEventSink)
-│   └─ engine_checkpoint, runtime_working_state
-│
-├─ engine = build_engine(context, "native_loop")
-│
-├─ async for event in engine.run_stream(rc):
-│   ├─ Broker-owned tool event → io.force_flush() + continue
-│   └─ Engine-owned event → io.emit(event_type, data)
-│       └─ CommittedEventSink.emit() events.py
-│           ├─ 聚合: 100ms 或 2048 bytes
-│           └─ flush 前: 切换 message/tool/checkpoint/terminal 时先 flush
-│
-├─ 返回 rc.engine_outcome (引擎显式设置，不能EOF推断)
-│
-└─ finally: reset_request_context(token)
-```
-
-### 7.2 CommittedEventSink
-
-**文件**: `agent/runtime/application/events.py`
-
-```python
-class CommittedEventSink:
-    """三代引擎共同使用的事件实现；RuntimeIO 是独立的 Protocol。"""
-    
-    async def emit(self, event_type: str, data: dict) -> None:
-        if event_type == "text":
-            await self.emit_text(data.get("delta", ""))
-            return
-        async with self._lock:
-            await self._flush_locked()
-            # engine-owned non-text 事件即时 append；Broker-owned tool 事件
-            # 在 LegacyEngineAdapter 层 force_flush 后跳过，不重复写入。
-            await self.store.append_events(self.run_id, [EventDraft(...)], ...)
-
-    async def force_flush(self) -> None:
-        async with self._lock:
-            await self._flush_locked()
-```
-
----
-
-## 8. 阶段六：SSE 推送 → 前端消费
-
-### 8.1 后端 SSE 端点
-
-**文件**: `agent/runtime/api/runs.py:272-316`
-
-```python
-@router.get("/{run_id}/events")
-async def stream_events(run_id: str, after_seq: int | None = None, last_event_id: str | None = None):
-    await store.get_run(run_id)  # 404 检查
-    initial_cursor = after_seq if after_seq is not None else parse_last_event_id(last_event_id)
-    
-    async def generate():
-        cursor = initial_cursor
-        last_write = time.monotonic()
-        while True:
-            # 1. 查询新事件
-            events = await store.list_events(run_id, after_seq=cursor, limit=500)
-            for event in events:
-                cursor = event.seq
-                yield _sse(event)
-                last_write = time.monotonic()
-                if event.event_type is EventType.RUN_TERMINATED:
-                    return
-            
-            # 2. 检查终态
-            run = await store.get_run(run_id)
-            if run.status in TERMINAL_RUN_STATUSES and not events:
-                return
-            
-            # 3. Heartbeat: 15秒无事件
-            if time.monotonic() - last_write >= settings.runtime_sse_heartbeat_seconds:
-                yield ": heartbeat\n\n"
-                last_write = time.monotonic()
-            
-            # 4. 轮询间隔 250ms
-            await asyncio.sleep(settings.runtime_sse_poll_ms / 1000)
-    
-    return StreamingResponse(generate(), media_type="text/event-stream")
-```
-
-### 8.2 前端 SSE 消费
-
-**文件**: `web/app.js`
-
-```javascript
-// 1. CreateRun 后启动 watch
-async function handleSubmit() {
-  const created = await createRun(query, refs);
-  const assistant = appendMessage("assistant", "");
-  await watchRun(assistant);
-}
-
-// 2. watchRun 循环
-async function watchRun(assistant) {
-  state.watching = true;
-  while (state.watching && !state.terminal) {
-    state.watchController = new AbortController();
-    try {
-      const response = await fetch(
-        `/api/v1/runs/${state.runId}/events?after_seq=${state.lastSeq}`,
-        { signal: state.watchController.signal }
-      );
-      await consumeSse(response, assistant);
-      if (!state.terminal && state.watching) await sleep(500);
-    } catch (error) {
-      if (error.name === "AbortError") break;
-      await sleep(750);  // 断线重连
-    }
-  }
-}
-
-// 3. consumeSse 流式解析
-async function consumeSse(response, assistant) {
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    
-    let boundary = buffer.indexOf("\n\n");
-    while (boundary !== -1) {
-      handleSseEvent(parseSseBlock(buffer.slice(0, boundary)), assistant);
-      buffer = buffer.slice(boundary + 2);
-      boundary = buffer.indexOf("\n\n");
-    }
-  }
-}
-
-// 4. handleSseEvent 渲染
-function handleSseEvent(event, assistant) {
-  if (!event.data) return;
-  let envelope = JSON.parse(event.data);
-  const payload = envelope.payload || {};
-  
-  if (event.id) {
-    state.lastSeq = Math.max(state.lastSeq, event.id);
-    localStorage.setItem("sxw.last_seq", String(state.lastSeq));
-  }
-  
-  if (event.type === "text") {
-    assistant.body.textContent += payload.delta || "";  // 增量追加
-  } else if (event.type === "assistant_message") {
-    assistant.body.textContent = payload.text || "";    // 完整覆盖
-  } else if (event.type === "tool_call" || event.type === "tool_result") {
-    addProcessItem(assistant.node, event.type, payload);
-  } else if (event.type === "terminal") {
-    state.terminal = true;
-    state.watching = false;
-    setStatus(`运行结束：${envelope.terminal_status}`);
+{
+  "client_request_id": "...uuid...",
+  "conversation_id": null,
+  "principal_id": "demo-user",
+  "agent_id": "demo-agent",
+  "engine": "native_loop",
+  "input": {
+    "text": "什么是 Tool Broker？",
+    "attachment_refs": []
   }
 }
 ```
 
----
+API 只做 schema/身份/附件/admission，不加载 LLM。
 
-## 9. 阶段七：前端渲染 → 终态
+### 3.1 Admission 事务顺序
 
-### 9.1 渲染流程
+`AdmissionService.create` 最终调用 Store admission 事务：
 
-```text
-前端渲染逻辑:
-├─ text 事件 → 增量追加文本 (assistant.body.textContent += delta)
-├─ assistant_message 事件 → 完整覆盖 (assistant.body.textContent = text)
-├─ tool_call 事件 → 添加到过程面板 (addProcessItem)
-├─ tool_result 事件 → 添加到过程面板 (addProcessItem)
-├─ citation 事件 → 添加引用 (addCitations)
-├─ terminal 事件 → 结束 (state.terminal = true)
-│   └─ 添加轨迹链接 (addTraceLink)
-└─ heartbeat → 忽略 (SSE comment)
+1. 按 `(principal_id, agent_id, idempotency_key)` 查 `run_requests`；
+2. 已存在且 request digest 相同：返回原 Run；
+3. 已存在但 digest 不同：`IDEMPOTENCY_KEY_REUSE`；
+4. 读取所选 Engine 的 active release pointer；
+5. 校验 conversation busy、附件 metadata；
+6. 创建/推进 Conversation、Run、ENGINE_RUN Activity；
+7. 写 `run_requests`、Artifact links；
+8. 原子追加 USER/Run/Activity canonical events；
+9. 返回 `202 Accepted`。
+
+幂等重放故意先于 conversation busy 检查。因此客户端超时重发同一请求时，仍能拿回原 `run_id`。
+
+Run 在 admission 时冻结：
+
+- engine；
+- release fingerprint；
+- absolute deadline；
+- input/attachment refs；
+- principal/agent/conversation identity。
+
+## 4. 阶段二：Worker exact-release claim
+
+入口：`agent/runtime/worker/dispatcher.py::RuntimeWorker.run`
+
+Worker 周期执行 maintenance，然后调用：
+
+```python
+store.claim_next(
+    worker_id=...,
+    lease_ms=...,
+    now_ms=...,
+    release_map={
+        "plan_execute": "...",
+        "agent_loop": "...",
+        "native_loop": "...",
+    },
+)
 ```
 
-### 9.2 页面刷新重建
+Claim SQL 同时匹配 `(engine, release_fingerprint)`，并在写事务中：
 
-```javascript
-// app.js:450-476
-async function resumeStoredRun() {
-  if (!state.runId) return;
-  
-  const run = await fetch(`/api/v1/runs/${state.runId}`).then(r => r.json());
-  
-  // 关键：lastSeq 重置为 0，从 committed events 重建 UI
-  state.lastSeq = 0;
-  state.terminal = false;
-  localStorage.setItem("sxw.last_seq", "0");
-  
-  const assistant = appendMessage("assistant", "");
-  await watchRun(assistant);  // 从 seq=0 重放所有事件
+- 选择一个可执行 PENDING Activity；
+- `PENDING → CLAIMED`；
+- attempt + 1；
+- fencing token + 1；
+- 设置 lease owner/expiry；
+- 普通 Run 从 `DISPATCH_PENDING → RUNNING`；
+- 追加状态事件。
+
+错误 release 的 Worker 根本领取不到该 Run，也不存在单独的“release 不兼容”终态：Run 继续 pending，等待正确 Worker或 absolute deadline 收口。
+
+### 4.1 lease renewal
+
+每个 claim 同时启动 attempt task 与 renewal task。续租失败会立即取消 attempt，并以 `AttemptOwnershipLost` 语义收口；不会把 Run 错判为 Engine failure。
+
+所有后续 Store 写都携带 fencing token。旧 Worker 即使在网络暂停后醒来，其 event/checkpoint/tool result/final 写入也会被拒绝。
+
+## 5. 阶段三：RunCoordinator 建立统一边界
+
+入口：`agent/runtime/application/coordinator.py::RunCoordinator.execute_claim`
+
+Coordinator 的核心顺序：
+
+1. `CLAIMED → RUNNING`，再次验证 fence；
+2. 重读最新 Run，处理 cancel/deadline/reconcile-only 分支；
+3. 从 `EngineRegistry` 选择 Adapter；
+4. 防御性核对 adapter release；
+5. 读取最新 checkpoint；
+6. 从 committed events 编译 canonical conversation history；
+7. 构造 `EngineRunRequest`；
+8. 构造 `CommittedEventSink`，作为 `RuntimeIO`；
+9. 调用统一端口 `adapter.execute(request, io)`；
+10. 根据 `EngineOutcome` 与数据库权威状态裁决 retry/wait/final。
+
+`CLAIM_RELEASE_MISMATCH` 是理论不可达的防御断言。若发生，只中止 attempt 并报警，不产生一个虚假的 release 不兼容 Run 终态。
+
+### 5.1 RuntimeIO 提供什么
+
+`RuntimeIO` 是 Adapter 写 Runtime authority 的唯一端口：
+
+- `emit(...)`
+- `force_flush()`
+- `checkpoint(..., events=...)`
+- `is_cancelled()`
+- `remaining_ms()`
+- mandatory `tool_broker`
+- `set_final_assistant(text, message_id, generation_id)`
+
+text delta 按约 100ms/2KiB 聚合；切换 generation、Tool、checkpoint、terminal 前会先 flush。所有公开输出都是先 commit、后对 SSE 可见。
+
+## 6. 阶段四：两个 ADK Adapter
+
+`plan_execute` 与 `agent_loop` 进入 `agent/runtime/adapters/adk_engines.py::AdkEngineAdapter`。
+
+每次 attempt 都新建 ADK `InMemorySessionService` 和 `InMemoryArtifactService`，把 canonical history 重放进去；attempt 结束即丢弃。跨 attempt 不依赖进程内 session。
+
+```text
+AdkEngineAdapter.execute
+→ 编译 history/current input/附件为 ADK Content
+→ 构造 RunContext
+→ build_engine(plan_execute | agent_loop)
+→ async for engine.run_stream(...)
+→ engine-owned event 交给 RuntimeIO
+→ Broker-owned tool projection 只 force_flush，不重复提交
+→ 必须读取显式 rc.engine_outcome
+```
+
+生成器自然 EOF 不等于成功；`engine_outcome` 缺失会以 `ENGINE_OUTCOME_MISSING` fail-closed。
+
+两个 ADK 引擎保持原有内部循环和粗粒度恢复语义，不宣称 mid-turn deterministic replay。
+
+## 7. 阶段五：NativeLoopAdapter 直连 RuntimeIO
+
+入口：`agent/engine/native_loop/engine.py::NativeLoopAdapter`
+
+### 7.1 输入与严格恢复
+
+Adapter 负责：
+
+- canonical history/current user input；
+- 图片从验证后的 CAS 分片物化；
+- 非图片附件只给有界 preview，并提示 `read_artifact`；
+- 当前 strict checkpoint decode；
+- 所有历史大 ToolResult ledger ref 重物化；
+- mandatory Broker session；
+- RuntimeIO event/checkpoint/final assistant。
+
+只有 `checkpoint is None` 才是新运行。checkpoint 存在但 contract、字段、phase、message role、call/result 配对或尾部状态不合法时，直接 `NATIVE_CHECKPOINT_INVALID`，不 fallback 到 canonical history 重跑。
+
+current phase 只有：
+
+```text
+MODEL_REQUEST
+MODEL_RESPONSE_COMMITTED
+TOOL_BATCH_COMMITTED
+TOOL_RESULT_COMMITTED
+NEXT_TURN
+COMPLETED
+```
+
+### 7.2 一次无工具的模型轮次
+
+```text
+control/deadline/budget/compact
+→ MODEL_REQUEST checkpoint + OUTPUT_GENERATION_STARTED
+→ provider stream
+→ 每个 delta await RuntimeIO.emit/flush 后才拉下一块
+→ 明确 finish=stop
+→ MODEL_RESPONSE_COMMITTED checkpoint
+→ 校验最终正文非空且无 ToolCall
+→ COMPLETED checkpoint
+→ RuntimeIO.set_final_assistant
+→ EngineOutcome(COMPLETED)
+```
+
+Provider 必须给出显式完整 finish marker。零 chunk、usage-only、silent EOF、缺 finish、finish 后继续 choice、多 choice、id/name 漂移、非连续 tool index 都不会被合成为成功。
+
+- 不完整网络流：`MODEL_STREAM_INCOMPLETE`，可重试；
+- 协议矛盾：`MODEL_PROTOCOL_INVALID`，终端失败；
+- 空最终正文：`MODEL_EMPTY_FINAL_RESPONSE`；
+- `length/content_filter/unknown finish`：fail-closed。
+
+### 7.3 generation 与 partial output
+
+每次 model slot 开始先原子提交 `OUTPUT_GENERATION_STARTED`，SSE 名为 `text_start`：
+
+```json
+{
+  "message_id": "稳定 model slot",
+  "generation_id": "本次 generation",
+  "supersedes_generation_id": null,
+  "reason": "initial|next_turn|retry|recovery|reactive_compact"
 }
 ```
 
----
+codec 接受上述五个 reason；当前 producer 实际发出 `initial`、`next_turn`、`recovery`、`reactive_compact`。Coordinator 级 retry 恢复到 `MODEL_REQUEST` 时归类为 `recovery`，当前没有单独发出 `retry` 的代码分支。
 
-## 10. 完整调用栈总览
+所有 Native text delta 带 message/generation id。重试或恢复创建新 generation；旧 partial event 保留审计，但 UI 收到 `text_start` 时只重置当前回答正文，不清空 Tool/Skill/Plan 卡片。最终 committed `assistant_message` 是权威覆盖。
+
+### 7.4 工具轮次：默认 early dispatch 关闭
+
+默认 `native_early_tool_dispatch=off`：
 
 ```text
-[浏览器]
-handleSubmit() app.js:401
-├─ createRun() app.js:363
-│   └─ POST /api/v1/runs
-├─ appendMessage("assistant", "")
-└─ watchRun() app.js:340
-    └─ consumeSse() app.js:323
-        └─ handleSseEvent() app.js:291
-
-          │
-          │ HTTP POST/GET
-          ▼
-
-[API 进程]
-create_run() runs.py:131
-├─ AdmissionService.create() admission.py:50
-│   └─ store.admit() store.py:386
-│       └─ BEGIN IMMEDIATE 事务
-│           ├─ INSERT runs/activities/events
-│           └─ COMMIT
-│
-stream_events() runs.py:272
-└─ generate() runs.py:290
-    └─ while True:
-        ├─ list_events() → yield SSE
-        └─ heartbeat → yield ": heartbeat\n\n"
-
-          │
-          │ SQLite
-          ▼
-
-[Worker 进程]
-RuntimeWorker.run() dispatcher.py:57
-├─ claim_next() store.py:721
-│   └─ BEGIN IMMEDIATE 事务
-│       ├─ UPDATE activities SET state=CLAIMED
-│       └─ COMMIT
-│
-└─ RunCoordinator.execute_claim() coordinator.py:65
-    ├─ mark_activity_running()
-    ├─ compile_history()
-    └─ LegacyEngineAdapter.execute() legacy_engines.py:65
-        └─ engine.run_stream()
-            ├─ engine-owned → CommittedEventSink.emit() → _flush_locked()/append_events()
-            └─ Broker-owned tool → ToolBroker/Store prepare/settle → tool_executions + run_events
+完整 provider stream + finish=tool_calls
+→ 严格验证整个 ToolCall batch
+→ MODEL_RESPONSE_COMMITTED checkpoint
+→ Broker 原子 PREPARE 整批 stable slots + ToolCall events
+→ TOOL_BATCH_COMMITTED checkpoint
+→ 安全 READ_ONLY 在上限内并发执行
+→ durable settlement 按 call ordinal
+→ 每个结果后 TOOL_RESULT_COMMITTED checkpoint
+→ NEXT_TURN
+→ 下一次 model request
 ```
 
----
+模型 finish 前不会创建工具执行 task。关闭提前派发不影响：
 
-## 11. 源码位置索引
+- 模型正文流式输出；
+- 完整 batch 后 READ_ONLY 受控并发；
+- 工具运行期间 Skill/Claude Skill 进度实时提交；
+- ToolResult 完成后一次性权威提交。
 
-### 11.1 API 层
+`experimental_heuristic` 仍可显式启用，但不是默认生产保证。它只允许安全 READ_ONLY，并使用有界队列/固定 worker；每个 early call 也必须先 Broker PREPARE。fragment 后续漂移会 `TOOL_REPLAY_MISMATCH`。
 
-| 功能 | 文件 | 行号 |
-|---|---|---|
-| HTTP 入口 | `agent/runtime/api/runs.py` | 131 |
-| Admission 服务 | `agent/runtime/application/admission.py` | 50 |
-| SQLite admit 事务 | `agent/runtime/adapters/sqlite/store.py` | 386 |
-| SSE 端点 | `agent/runtime/api/runs.py` | 272 |
-| SSE 生成器 | `agent/runtime/api/runs.py` | 290 |
+`provider_block_complete` 当前 provider 不支持，Worker 会在 release 激活前以 `EARLY_DISPATCH_CAPABILITY_UNAVAILABLE` 启动失败。
 
-### 11.2 Worker 层
+### 7.5 Native 资源上限
 
-| 功能 | 文件 | 行号 |
-|---|---|---|
-| Worker 主循环 | `agent/runtime/worker/dispatcher.py` | 57 |
-| claim_next | `agent/runtime/adapters/sqlite/store.py` | 721 |
-| RunCoordinator | `agent/runtime/application/coordinator.py` | 65（`execute_claim`）/ 76（`_execute_claim`） |
-| LegacyEngineAdapter | `agent/runtime/adapters/legacy_engines.py` | 65 |
-| CommittedEventSink | `agent/runtime/application/events.py` | 1 |
+默认硬限：
 
-### 11.3 前端
+| 项目 | 默认值 |
+|---|---:|
+| 工具并发 | 10 |
+| ToolCall/turn | 64 |
+| ToolCall/Run | 256 |
+| 单调用 args | 64 KiB |
+| 单 batch args | 256 KiB |
+| model output/generation | 1 MiB |
+| checkpoint | 2 MiB |
+| ToolCatalog | 1 MiB |
+| Skill UI frame | 64 KiB |
+| Skill UI events/Run | 2000 |
+| Skill UI bytes/Run | 8 MiB |
 
-| 功能 | 文件 | 行号 |
-|---|---|---|
-| CreateRun | `web/app.js` | 363 |
-| watchRun | `web/app.js` | 340 |
-| consumeSse | `web/app.js` | 323 |
-| handleSseEvent | `web/app.js` | 291 |
-| 页面刷新重建 | `web/app.js` | 450 |
+尺寸统一按 UTF-8 bytes。模型调用硬上限为 `max_loop_iters + 2`；`MODEL_REQUEST` 前预留调用次数，崩溃后不退款。
 
----
+## 8. 阶段六：ToolBroker 接触外部世界
 
-## 附录：关键设计原则
+ToolBroker 的完整说明见专门指南。全链路只需抓住：
 
-| 原则 | 体现 |
+```text
+ToolCall intent
+→ stable logical slot(turn + call ordinal)
+→ PREPARED + TOOL_CALL_COMMITTED
+→ effect-aware external dispatch
+→ strict ToolExecutionOutput
+→ Artifact/Evidence when needed
+→ ToolExecution settlement + TOOL_RESULT_COMMITTED
+→ ToolResultEnvelope back to Engine
+```
+
+同一 slot 的 name/request/release/effect 漂移会 `TOOL_REPLAY_MISMATCH`。READ_ONLY 可安全重试；幂等副作用必须透传稳定 idempotency key；非幂等/未知副作用不透明重试，结果不明则 reconcile/manual。
+
+普通大结果由 Broker 写入 Artifact，ledger 只保留有界 preview/ref；Native 恢复用 `materialize_committed_result` 恢复完整 envelope，不重复外部 effect。
+
+## 9. 阶段七：Coordinator 裁决 EngineOutcome
+
+Adapter 只返回候选 outcome，Coordinator 还会再次读取 cancel、deadline 和 unresolved tool effects。
+
+| EngineOutcome | Coordinator 行为 |
 |---|---|
-| **先 commit，后 SSE 可见** | 事件必须在 SQLite 事务提交后才能被 SSE 推送 |
-| **幂等 admission** | idempotency_key + digest 校验 |
-| **lease/fencing** | 防 Worker 崩溃锁死和过期提交 |
-| **append-only events** | 触发器保护，只追加不修改 |
-| **stable slot** | UUIDv5 派生，崩溃恢复可重算 |
-| **heartbeat 保活** | 15秒无事件发送 SSE comment |
+| `COMPLETED` 且无 unresolved effect | 原子提交 final assistant、citation、SUCCEEDED terminal |
+| `COMPLETED` 但 effect 不明 | `WAITING_INPUT`，要求 tool reconciliation |
+| `WAITING_INPUT` | 持久化 pending input，释放 Worker slot |
+| `RETRYABLE_FAILURE` 且未超次数 | `WAITING_RETRY` + durable timer/backoff |
+| `CANCELLED` | 在取消/效应规则允许时提交 CANCELLED |
+| terminal failure | FAILED；deadline 映射 TIMED_OUT |
 
----
+Native 通过 `set_final_assistant` 指定最后一个完整、非空、无 ToolCall assistant turn及其 generation identity。ADK 没有 override 时，Coordinator 继续使用 sink 累积文本。
 
-*文档生成时间: 2026-08-12*
-*基于项目版本: sxw_agent-2_demo R0 冻结规格*
+成功事务同时写：
+
+```text
+ASSISTANT_MESSAGE_COMMITTED
+CITATION_SET_COMMITTED
+RUN_TERMINATED(SUCCEEDED)
+```
+
+并推进 Run/Activity。Conversation history 只从过去 Run 的 committed USER 和成功 ASSISTANT event 编译；中间“我先查一下”、失败 partial、工具前正文都不会成为下一轮 assistant history。
+
+若崩溃发生在 Native `COMPLETED` checkpoint 与成功终态之间，恢复会从 checkpoint 精确设置 final assistant，不再调用模型，也不重放 delta。
+
+## 10. 阶段八：SSE replay/tail
+
+入口：`agent/runtime/api/runs.py::stream_events`
+
+客户端可以用：
+
+```http
+GET /api/v1/runs/{run_id}/events?after_seq=17
+Last-Event-ID: 17
+```
+
+显式 `after_seq` 优先。服务端循环短查询 `run_events`，按 seq 输出；无事件时发送无 seq 的 heartbeat。连接在 `RUN_TERMINATED` 后结束。
+
+主要映射：
+
+| Canonical Event | SSE name |
+|---|---|
+| `OUTPUT_GENERATION_STARTED` | `text_start` |
+| `OUTPUT_DELTA_COMMITTED` | `text` |
+| `TOOL_CALL_COMMITTED` | `tool_call` |
+| `TOOL_RESULT_COMMITTED` | `tool_result` |
+| `MODEL_PLAN_UPDATED` | `plan_step` |
+| `SKILL_UI_FRAME_COMMITTED` | `skill_event` |
+| `CITATION_SET_COMMITTED` | `citation` |
+| `ASSISTANT_MESSAGE_COMMITTED` | `assistant_message` |
+| `RUN_TERMINATED` | `terminal` |
+
+公开 visibility 过滤可能造成 seq 跳号，这是正常的。heartbeat 没有 seq。订阅断开不会取消 Run，cancel 必须走独立命令。
+
+### 10.1 前端 generation 处理
+
+`web/app.js` 的核心规则：
+
+- `text_start`：清空当前回答正文；保留工具、Skill、Plan 过程展示；
+- `text`：只追加当前 generation delta；
+- `assistant_message`：以 committed final text 权威覆盖；
+- `terminal`：根据 Runtime 终态结束 UI 状态。
+
+`eval/harness/sse_client.py` 使用相同规则，所以 fresh replay、断线续传、retry/recovery 不会把多个 generation partial 拼成最终答案。
+
+## 11. Cancel、deadline、retry 与恢复
+
+### 11.1 absolute deadline
+
+deadline 是 Run admission 时冻结的绝对 UTC 时间。Coordinator、Adapter、provider、Tool 都计算剩余预算，不在每层重开完整 timeout。
+
+### 11.2 cancel 与 effect
+
+cancel/complete 由提交顺序决定：
+
+- cancel 先提交，迟到 success 不能覆盖；
+- 已派发/未知外部 effect 时进入 `CANCEL_REQUESTED`，先 reconcile；
+- 没有 unresolved effect 才能完成 CANCELLED；
+- deadline 先赢则 TIMED_OUT。
+
+### 11.3 Native 恢复
+
+Native 从最后 committed current checkpoint 恢复：
+
+- 半个 model stream：新 generation 重做 model slot；
+- Tool batch：按 stable slot 查 ledger；
+- 已 COMMITTED effect：复用结果/Artifact，不重派发；
+- 历史任意位置的大 ToolResult ref：逐项重物化；
+- COMPLETED：直接恢复 final assistant。
+
+它保证 durable 边界的语义等价，不承诺 provider token 级 deterministic replay。
+
+## 12. 端到端简化时序图
+
+```text
+Client          Runtime API       SQLite            Worker/Coordinator       Native/Broker
+  │                  │               │                       │                     │
+  │ POST /runs       │               │                       │                     │
+  ├─────────────────>│ admit txn     │                       │                     │
+  │                  ├──────────────>│ Run+Activity+Events   │                     │
+  │<──── 202 run_id ─┤               │                       │                     │
+  │                  │               │<── exact claim ───────┤                     │
+  │                  │               │── Claim+fence ───────>│                     │
+  │ GET events       │               │                       │                     │
+  ├─────────────────>│ replay/tail   │                       │                     │
+  │                  ├──────────────>│                       │                     │
+  │                  │               │                       │ execute(request,io) │
+  │                  │               │                       ├────────────────────>│
+  │                  │               │<── text_start/delta checkpoint commits ────│
+  │<── text_start/text via SSE ──────┤                       │                     │
+  │                  │               │<── PREPARED+ToolCall ──────────────────────│
+  │<── tool_call ────┤               │                       │                     │
+  │                  │               │<── settle+ToolResult/Artifact ─────────────│
+  │<── tool_result ──┤               │                       │                     │
+  │                  │               │<── COMPLETED checkpoint ──────────────────│
+  │                  │               │<── assistant+citation+terminal txn ─┤     │
+  │<── assistant_message + terminal ─┤                       │                     │
+```
+
+## 13. 推荐阅读顺序
+
+### 13.1 先看 Runtime 主干
+
+```text
+agent/runtime/api/runs.py
+→ agent/runtime/application/admission.py
+→ agent/runtime/adapters/sqlite/store.py
+→ agent/runtime/worker/dispatcher.py
+→ agent/runtime/application/coordinator.py
+→ agent/runtime/ports/engine.py
+→ agent/runtime/application/events.py
+```
+
+### 13.2 再分引擎
+
+```text
+ADK:
+agent/runtime/adapters/adk_engines.py
+→ agent/engine/base.py
+→ plan_execute / agent_loop 实现
+
+Native:
+agent/engine/native_loop/engine.py
+→ agent/engine/native_loop/checkpoint.py
+→ agent/engine/native_loop/llm_client.py
+→ agent/engine/native_loop/loop.py
+→ agent/engine/native_loop/executor.py
+```
+
+### 13.3 最后看工具与交付
+
+```text
+agent/runtime/application/tool_catalog.py
+→ agent/runtime/application/tool_outputs.py
+→ agent/runtime/application/tool_broker.py
+→ agent/runtime/adapters/brokered_tools.py
+→ agent/runtime/api/runs.py::stream_events
+→ web/app.js
+→ eval/harness/sse_client.py
+```
+
+## 14. 阅读时最容易混淆的边界
+
+1. `RuntimeIO` 是进入 Runtime authority 的唯一写路径，但 text 可先进入有界聚合 buffer；只有 Store commit 后才对 SSE 可见。Native 每个 delta 都会 awaited emit 后再 force-flush，形成逐块背压。
+2. Native kernel 可被 Claude Skill 子 Runner 复用，但生产持久化语义在 `NativeLoopAdapter`，不能拿裸 kernel 结果推导 Runtime 终态。
+3. ToolCall/ToolResult event 是公开投影，工具是否真正发生由 ToolExecution ledger 裁决。
+4. `OUTPUT_DELTA_COMMITTED` 是过程输出；只有成功的 `ASSISTANT_MESSAGE_COMMITTED` 才进入后续 conversation history。
+5. SSE EOF 不是业务终态；客户端必须看 `terminal` 或 GET Run status。
+6. Trace 关闭后恢复逻辑必须完全不受影响，因为 Trace 从来不是 authority。
+
+## 15. 当前诚实边界
+
+- SQLite + 本机 Artifact CAS 只支持单机进程级恢复；
+- 两个 ADK 引擎没有 mid-turn deterministic replay；
+- Native 也不承诺 provider token 级重放；
+- 当前没有 PostgreSQL/Temporal/Redis、跨节点 Artifact、服务端 delivery ACK；
+- LocalSandbox 不是生产安全隔离；
+- Runtime signal/Artifact 的存在不代表所有子 Runner 已自动支持 HITL 或跨 Skill Artifact。
+
+这些限制不改变当前代码的核心不变量：单一事实源、exact release claim、fencing、commit-before-visible、Broker effect authority、strict current checkpoint，以及所有终态都必须由 Coordinator 的正常 EngineOutcome 路径或 Store 的权威命令事务提交。

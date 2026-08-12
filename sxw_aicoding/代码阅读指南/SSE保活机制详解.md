@@ -1,352 +1,182 @@
 # SSE 保活机制详解
 
-本文档梳理 SSE 连接在无事件时的保活机制、heartbeat 设计、连接生命周期管理。
+本文以当前 `agent/runtime/api/runs.py`、`web/app.js` 和 `eval/harness/sse_client.py` 为准，说明无业务事件时的 SSE heartbeat、连接收口与断线重连。
 
----
+## 1. Heartbeat 解决的问题
 
-## 目录
+CreateRun 已 durable accepted，但下一条公开事件可能需要很久：
 
-- [1. 核心问题](#1-核心问题)
-- [2. 服务端保活机制](#2-服务端保活机制)
-- [3. Heartbeat 详解](#3-heartbeat-详解)
-- [4. 连接生命周期](#4-连接生命周期)
-- [5. 前端处理](#5-前端处理)
-- [6. 源码位置索引](#6-源码位置索引)
+- Worker 还在等待 exact release claim；
+- provider 首 token 延迟较高；
+- 工具或 Skill 正在外部执行；
+- Run 等待人工输入；
+- 公开事件之间只有 INTERNAL 诊断事件。
 
----
+如果 HTTP 响应长时间无字节，中间代理、NAT 或客户端可能把连接当成空闲链路。Runtime 因此在未终态且无业务事件时发送 SSE comment。
 
-## 1. 核心问题
+Heartbeat 只证明当前 HTTP/SSE 响应仍在产生字节；它不证明 Worker 健康、引擎正在前进，也不代表 Run 成功。
 
-### 1.1 问题场景
+## 2. 服务端循环
+
+SSE endpoint 位于：
 
 ```text
-前端 CreateRun 后立即订阅 SSE：
-  GET /runs/{id}/events?after_seq=0
-
-此时可能的情况：
-  1. Worker 还没领取 Claim，没有新事件
-  2. Worker 正在执行引擎，但模型响应慢，还没产出事件
-  3. Worker 执行工具调用，工具执行时间长
-
-问题：SSE 连接会因为没有数据而卡住吗？会超时断开吗？
+GET /api/v1/runs/{run_id}/events
 ```
 
-### 1.2 答案
+启动 streaming response 前，API 先 `get_run(run_id)`，让不存在的 Run 以正常 404 结束，而不是在 SSE body 开始后才失败。
 
-**服务端发送 heartbeat 保持未终态连接；连接不会因为暂时没有业务事件而主动断开，Run 进入终态后会按协议结束。**
-
----
-
-## 2. 服务端保活机制
-
-### 2.1 SSE 生成器
-
-**文件**: `agent/runtime/api/runs.py:290-307`
+generator 的简化逻辑是：
 
 ```python
-async def generate():
-    cursor = initial_cursor
-    last_write = time.monotonic()  # 记录最后一次写入时间
-    
-    while True:
-        # 1. 查询新事件（短查询，limit=500）
-        events = await store.list_events(run_id, after_seq=cursor, limit=500)
-        
-        # 2. 推送事件
-        for event in events:
-            cursor = event.seq
-            yield _sse(event)
-            last_write = time.monotonic()  # 更新写入时间
-            if event.event_type is EventType.RUN_TERMINATED:
-                return  # 终态，关闭连接
-        
-        # 3. 检查 Run 是否已终态
-        run = await store.get_run(run_id)
-        if run.status in TERMINAL_RUN_STATUSES and not events:
-            return  # Run 已终态且无新事件，关闭连接
-        
-        # 4. Heartbeat：超过 15 秒无数据，发送 comment
-        if time.monotonic() - last_write >= settings.runtime_sse_heartbeat_seconds:
-            yield ": heartbeat\n\n"  # ← SSE comment
-            last_write = time.monotonic()  # 重置写入时间
-        
-        # 5. 轮询间隔 250ms
-        await asyncio.sleep(settings.runtime_sse_poll_ms / 1000)
+cursor = initial_cursor
+last_write = time.monotonic()
+
+while True:
+    events = await store.list_events(run_id, after_seq=cursor, limit=500)
+    for event in events:
+        cursor = event.seq
+        yield encode_sse(event)
+        last_write = time.monotonic()
+        if event is RUN_TERMINATED:
+            return
+
+    run = await store.get_run(run_id)
+    if run is terminal and not events:
+        return
+
+    if time.monotonic() - last_write >= heartbeat_seconds:
+        yield ": heartbeat\n\n"
+        last_write = time.monotonic()
+
+    await asyncio.sleep(poll_ms / 1000)
 ```
 
-### 2.2 保活流程图
+默认配置：
+
+| 配置 | 默认值 | 含义 |
+|---|---:|---|
+| `runtime_sse_poll_ms` | 250 ms | 无新事件时的短查询间隔 |
+| `runtime_sse_heartbeat_seconds` | 15 s | 距离最后一次实际 SSE write 的保活间隔 |
+
+`last_write` 在发送业务事件或 heartbeat 时更新，所以业务流量持续时不会额外穿插 heartbeat。
+
+## 3. Heartbeat 的线上格式
 
 ```text
-┌─────────────────────────────────────────────────────────────┐
-│                    SSE generate() 循环                       │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  while True:                                                │
-│    │                                                        │
-│    ├─ 1. list_events(after_seq=cursor)                      │
-│    │   ├─ 有事件 → yield 事件 → 更新 last_write             │
-│    │   └─ 无事件 → 继续                                     │
-│    │                                                        │
-│    ├─ 2. 检查终态                                           │
-│    │   └─ run.status in TERMINAL and not events → return    │
-│    │                                                        │
-│    ├─ 3. Heartbeat 检查                                     │
-│    │   └─ time.monotonic() - last_write >= 15s              │
-│    │       └─ yield ": heartbeat\n\n" → 重置 last_write     │
-│    │                                                        │
-│    └─ 4. sleep(250ms)                                       │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
+: heartbeat
+
 ```
 
----
-
-## 3. Heartbeat 详解
-
-### 3.1 Heartbeat 格式
-
-```text
-: heartbeat\n\n
-```
-
-- 以 `:` 开头 → SSE comment
-- 客户端自动忽略，不触发任何事件
-- 不携带 `id:` → 不更新 cursor
-- 不携带 `event:` → 不触发 onmessage
-
-### 3.2 为什么用 SSE Comment？
-
-| 设计选择 | 原因 |
-|---|---|
-| **SSE Comment** | 标准 SSE 协议支持，客户端自动忽略 |
-| **不携带 seq** | 不是真实事件，不更新 cursor |
-| **不触发事件** | 避免客户端误处理 |
-| **保持连接** | 代理/防火墙看到数据流，不会切断 |
-
-### 3.3 Heartbeat 时序
-
-```text
-时间轴 (秒)    事件
-────────────────────────────────────────────
-0.0            连接建立，推送 seq 1-4
-0.0            last_write = 0.0
-5.0            轮询，无事件，last_write 仍为 0.0
-10.0           轮询，无事件，last_write 仍为 0.0
-15.0           time.monotonic() - last_write = 15s
-15.0           yield ": heartbeat\n\n"
-15.0           last_write = 15.0
-20.0           轮询，无事件
-30.0           time.monotonic() - last_write = 15s
-30.0           yield ": heartbeat\n\n"
-30.0           last_write = 30.0
-...            (循环)
-45.0           Worker 产生新事件
-45.0           yield SSE id:5 event:text
-45.0           last_write = 45.0
-```
-
-### 3.4 配置参数
+实际字节是：
 
 ```python
-# .env 默认值
-RUNTIME_SSE_HEARTBEAT_SECONDS = 15   # heartbeat 间隔（秒）
-RUNTIME_SSE_POLL_MS = 250            # 轮询间隔（毫秒）
+": heartbeat\n\n"
 ```
 
----
+SSE 规范中，以 `:` 开头的行是 comment。它与业务 event 的根本差异是：
 
-## 4. 连接生命周期
-
-### 4.1 连接关闭条件
-
-| 情况 | 触发条件 | 代码位置 |
+| 属性 | 业务 Canonical Event | heartbeat comment |
 |---|---|---|
-| **收到终态事件** | `event_type is RUN_TERMINATED` | `runs.py:299-300` |
-| **Run 已终态且无新事件** | `run.status in TERMINAL and not events` | `runs.py:302-303` |
-| **客户端主动断开** | 浏览器关闭/网络断开/AbortController | 客户端行为 |
-| **代理/防火墙超时** | 无 heartbeat 超过代理超时时间 | 网络基础设施 |
+| 是否写入 `run_events` | 是 | 否 |
+| 是否有 `id`/seq | 是 | 否 |
+| 是否有 `event`/`data` | 是 | 否 |
+| 是否推进 reconnect cursor | 是 | 否 |
+| 是否改变 Run 状态 | 可能 | 否 |
+| 是否参与 replay | 是 | 否 |
 
-### 4.2 连接不会关闭的情况
+不要给 heartbeat 分配假 seq，也不要把它记成 Canonical Event；否则会污染 Run 事实流和 cursor 语义。
 
-| 情况 | 说明 |
-|---|---|
-| **Worker 未领取 Claim** | 持续轮询 + heartbeat |
-| **Worker 执行中但无事件** | 持续轮询 + heartbeat |
-| **模型响应慢** | 持续轮询 + heartbeat |
-| **工具执行时间长** | 持续轮询 + heartbeat |
+## 4. cursor 初始化和断线续传
 
-### 4.3 完整生命周期时序
+API 支持两种 cursor：
 
 ```text
-    浏览器                  API进程(:8000)              SQLite              Worker
-      │                         │                       │                    │
-      │──GET /events?after_seq=0──>│                    │                    │
-      │                         │──list_events─────────>│                    │
-      │                         │<─返回 seq 1-4─────────│                    │
-      │<─SSE id:1─────────────────│                     │                    │
-      │<─SSE id:2─────────────────│                     │                    │
-      │<─SSE id:3─────────────────│                     │                    │
-      │<─SSE id:4─────────────────│                     │                    │
-      │                         │                       │                    │
-      │                         │                       │    (Worker 未领取)  │
-      │                         │                       │                    │
-      │                         │   (轮询...)           │                    │
-      │                         │   (无事件)            │                    │
-      │                         │                       │                    │
-      │<─": heartbeat\n\n"────────│   (15秒后)          │                    │
-      │   (客户端忽略)            │                       │                    │
-      │                         │                       │                    │
-      │                         │                       │    (Worker 领取)    │
-      │                         │                       │<─claim_next────────│
-      │                         │                       │                    │
-      │                         │   (轮询...)           │                    │
-      │                         │   (无事件)            │                    │
-      │<─": heartbeat\n\n"────────│   (15秒后)          │                    │
-      │                         │                       │                    │
-      │                         │                       │    (引擎执行)      │
-      │                         │                       │                    │
-      │                         │                       │<─append_events─────│
-      │                         │──list_events─────────>│                    │
-      │<─SSE id:5 event:text────│                       │                    │
-      │                         │                       │                    │
-      │                         │   (继续轮询...)       │                    │
-      │<─": heartbeat\n\n"────────│   (无事件时)        │                    │
-      │                         │                       │                    │
-      │                         │                       │<─finalize──────────│
-      │                         │──list_events─────────>│                    │
-      │<─SSE id:N event:terminal─│                      │                    │
-      │                         │                       │                    │
-      │──连接关闭────────────────X                       │                    │
+?after_seq=<n>
+Last-Event-ID: <n>
 ```
 
----
+规则是：
 
-## 5. 前端处理
+1. query `after_seq` 存在时优先；
+2. 否则尝试解析 `Last-Event-ID`；
+3. header 非法时安全回到 0；
+4. `list_events()` 只返回 `seq > cursor` 的已提交公开事件。
 
-### 5.1 前端 SSE 消费
+heartbeat 没有 seq，因此在 heartbeat 后断线，客户端仍使用最后一个业务 event id 重连。这不会漏事件，也不需要服务端为 heartbeat 记住任何状态。
 
-**文件**: `web/app.js:323-338`
+## 5. 终态如何关闭连接
 
-```javascript
-async function consumeSse(response, assistant) {
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    
-    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
-    
-    // 按 \n\n 分割 SSE 块
-    let boundary = buffer.indexOf("\n\n");
-    while (boundary !== -1) {
-      handleSseEvent(parseSseBlock(buffer.slice(0, boundary)), assistant);
-      buffer = buffer.slice(boundary + 2);
-      boundary = buffer.indexOf("\n\n");
-    }
-  }
-}
+有两个安全收口：
+
+### 5.1 流中读到 `RUN_TERMINATED`
+
+API 先 yield 这条 terminal event，然后立即 return。客户端因此能先处理权威终态，再看到 response EOF。
+
+### 5.2 Run 已终态且 cursor 之后无事件
+
+这覆盖客户端从 terminal seq 之后误连或重连的情况。API 不会在已终态 Run 上无限 heartbeat。
+
+必须注意：**SSE EOF 本身不是 Run 终态权威。** 客户端应以 `terminal` 事件或 GET Run status 为准；网络断开只表示订阅失效。
+
+## 6. Web UI 如何忽略 heartbeat
+
+`web/app.js` 手工解析 SSE block。对 `: heartbeat`：
+
+- parser 不会得到 id/event/data 字段；
+- `handleSseEvent()` 发现 `event.data` 为空后直接返回；
+- `lastSeq`、回答正文、过程卡片和 Run terminal 都不变。
+
+这是正确行为：comment 的作用是让网络链路有字节，不是驱动 UI。
+
+## 7. Eval harness 如何忽略 heartbeat
+
+`eval/harness/sse_client.py` 只处理 `event:` 和 `data:` 行。comment 行不会设置 `event_type`，所以到空行边界时不调用 `_dispatch()`。
+
+断线时 harness 以最后业务 seq 同时填入 query 和 `Last-Event-ID` 重连。由于 query 优先，两者值一致时语义明确。
+
+## 8. 与 Native 背压的关系
+
+Native 直接 awaited RuntimeIO 的背压发生在 Worker 写 Runtime Store 的路径；heartbeat 发生在 API 读 Runtime Store 的路径。二者彼此独立：
+
+- Worker 提交慢：Native 不继续拉 provider；API 仍可在无新事件时发 heartbeat。
+- 客户端断开：API 的 subscription 结束，Worker Run 继续；不会把 GeneratorExit 传给 EngineAdapter。
+- API 重启：新 API 进程从 SQLite committed events 按 cursor replay，不需要恢复旧进程内 SSE queue。
+
+## 9. HTTP 响应头与代理
+
+SSE response 设置：
+
+```text
+Content-Type: text/event-stream
+Cache-Control: no-cache, no-transform
+X-Accel-Buffering: no
 ```
 
-### 5.2 Heartbeat 在前端的处理
+`no-transform` 避免中间层改写事件流，`X-Accel-Buffering: no` 用于提示兼容代理不要缓冲整段响应。但 heartbeat 间隔仍应小于真实部署中最短的代理 idle timeout；这是部署参数，不能只靠代码默认值猜测。
 
-```javascript
-// app.js:279-289
-function parseSseBlock(block) {
-  const event = { type: "message", id: null, data: "" };
-  const data = [];
-  
-  for (const line of block.split(/\r?\n/)) {
-    if (line.startsWith("id:")) event.id = Number(line.slice(3).trim());
-    else if (line.startsWith("event:")) event.type = line.slice(6).trim();
-    else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
-    // 注意：以 ":" 开头的行被忽略（SSE comment）
-  }
-  
-  event.data = data.join("\n");
-  return event;
-}
-```
+## 10. 常见误区
 
-**Heartbeat 处理**：
-- `: heartbeat\n\n` → `parseSseBlock` 返回 `{type: "message", id: null, data: ""}`
-- `handleSseEvent` 检查 `if (!event.data) return;` → 直接返回，不处理
+### 误区 1：收到 heartbeat 就说明 Worker 正在执行
 
-### 5.3 前端断线重连
+不对。heartbeat 由 API subscription 协程产生，与 Worker heartbeat/release readiness 是两套机制。
 
-```javascript
-// app.js:340-361
-async function watchRun(assistant) {
-  state.watching = true;
-  while (state.watching && !state.terminal) {
-    state.watchController = new AbortController();
-    try {
-      const response = await fetch(
-        `/api/v1/runs/${state.runId}/events?after_seq=${state.lastSeq}`,
-        { signal: state.watchController.signal }
-      );
-      if (!response.ok || !response.body) throw new Error(`SSE 订阅失败`);
-      await consumeSse(response, assistant);
-      // 连接断开但未终态：等待 500ms 后重连
-      if (!state.terminal && state.watching) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-      }
-    } catch (error) {
-      if (error.name === "AbortError") break;
-      // 断线重连：750ms 后按 cursor 续订
-      setStatus("订阅断开，正在按 cursor 重连...");
-      await new Promise(resolve => setTimeout(resolve, 750));
-    }
-  }
-}
-```
+### 误区 2：heartbeat 可以作为 cursor
 
----
+不对。它没有 seq，重连必须使用最后已处理的业务 event id。
 
-## 6. 源码位置索引
+### 误区 3：断开 SSE 可以取消 Run
 
-| 功能 | 文件 | 行号 |
-|---|---|---|
-| SSE 生成器 | `agent/runtime/api/runs.py` | 290 |
-| Heartbeat 逻辑 | `agent/runtime/api/runs.py` | 304-306 |
-| 终态检查 | `agent/runtime/api/runs.py` | 301-303 |
-| 配置参数 | `agent/config.py` | (搜索 SSE) |
-| 前端 SSE 消费 | `web/app.js` | 323 |
-| 前端 Heartbeat 处理 | `web/app.js` | 279 |
-| 前端断线重连 | `web/app.js` | 340 |
+不对。断开只停止读投影；取消必须发送显式 cancel command。
 
----
+### 误区 4：只要 response EOF，Run 就结束了
 
-## 附录：关键配置
+不对。终态只看 `RUN_TERMINATED` 或 GET Run status。未看到 terminal 就 EOF 应视为传输中断并按 cursor 重连。
 
-| 参数 | 默认值 | 说明 |
-|---|---|---|
-| `RUNTIME_SSE_HEARTBEAT_SECONDS` | 15 | 无业务事件多久后发送 heartbeat |
-| `RUNTIME_SSE_POLL_MS` | 250 | 轮询间隔（毫秒） |
+## 11. 源码阅读索引
 
----
-
-## 常见问题
-
-### Q1: Heartbeat 会不会影响 cursor？
-
-**A**: 不会。Heartbeat 是 SSE comment（以 `:` 开头），不携带 `id:`，客户端不会更新 `lastSeq`。
-
-### Q2: 如果代理超时时间小于 15 秒怎么办？
-
-**A**: 可以调小 `RUNTIME_SSE_HEARTBEAT_SECONDS`，比如设为 5 秒。
-
-### Q3: Heartbeat 会不会被误认为是事件？
-
-**A**: 不会。SSE 协议规定以 `:` 开头的行是 comment，客户端自动忽略。
-
-### Q4: 为什么不用 WebSocket？
-
-**A**: SSE 足够满足单向推送需求，且断线重连更简单（按 cursor 续订即可）。WebSocket 需要双向通信，增加复杂度。
-
----
-
-*文档生成时间: 2026-08-12*
-*基于项目版本: sxw_agent-2_demo R0 冻结规格*
+- `agent/runtime/api/runs.py`：SSE 编码、cursor、poll、heartbeat 和 terminal 收口。
+- `agent/config.py`：`runtime_sse_poll_ms` / `runtime_sse_heartbeat_seconds`。
+- `web/app.js`：`parseSseBlock()`、`handleSseEvent()`、`watchRun()`。
+- `eval/harness/sse_client.py`：按 committed cursor 的消费与重连。
+- `tests/reliability/test_runtime_api.py`：cursor 优先级、heartbeat 与 replay 契约。

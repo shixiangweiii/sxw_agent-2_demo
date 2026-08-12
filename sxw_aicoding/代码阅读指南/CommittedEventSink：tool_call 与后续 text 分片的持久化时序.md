@@ -1,219 +1,123 @@
-# CommittedEventSink：tool_call 与后续 text 分片的持久化时序
+# CommittedEventSink：ToolCall 与后续 text 分片的持久化时序
 
-本文记录一次围绕 `CommittedEventSink` 锁、`tool_call` 和后续 text 分片的讨论。重点不是 SSE 展示顺序，而是：当 text 正在聚合、`tool_call` 先获得锁时，新到达的 text 会如何保存，以及为什么这种顺序是正确的。
+本文专门回答一个时序问题：已有 text 在 buffer 中，中间出现 ToolCall，随后又来了 text，新旧分片会怎么入库？
 
-相关实现位于：
+## 1. 最短结论
 
-- `agent/runtime/application/events.py`：`CommittedEventSink.emit()`、`emit_text()` 与 `_flush_locked()`；
-- `agent/runtime/adapters/legacy_engines.py`：Broker-owned 工具事件前的 `io.force_flush()`；
-- `agent/runtime/adapters/brokered_tools.py`：Broker 准备 ToolExecution 前的 `runtime_io.force_flush()`。
-
-> 范围：本文讨论进入 `CommittedEventSink` 的 engine-owned 事件。Broker-owned 的 `tool_call/tool_result` 由 ToolBroker/Store 的事务写入，但它在写入前同样会先 `force_flush()`，因此 text 的持久化边界结论一致。
-
----
-
-## 1. 原始提问
-
-问题是：
-
-> 假如 `tool_call` 先抢到锁，先让 text 落盘；但此次 text 还没有累积完，入库后又有新的 text 分片，怎么办？
-
-这里的“还没有累积完”指 text 按 `100ms / 2KiB` 聚合，原本可能还会继续拼进同一条 `OUTPUT_DELTA_COMMITTED`，但中间出现了 `tool_call`。
-
----
-
-## 2. 先给结论
-
-不会丢 text，也不会把新旧 text 混在一起。`tool_call` 会成为一次明确的持久化边界：
+ToolCall 是一个不可跨越的提交边界：
 
 ```text
-tool_call 之前已进入 buffer 的 text
-  → 强制 flush 并提交 OUTPUT_DELTA_COMMITTED
-  → 提交 TOOL_CALL_COMMITTED
-  → 释放锁
-tool_call 之后到达的 text
-  → 进入一个新的 buffer
-  → 在后续阈值、定时器、下一语义边界、checkpoint 或 Run 收尾时提交
+ToolCall 前已交给 Runtime 的 text
+  → 先 flush 为 OUTPUT_DELTA_COMMITTED
+  → 再提交 ToolCall 事实
+
+ToolCall 后的 text
+  → 进入新 buffer/generation
+  → 在后续阈值、timer、checkpoint 或 close 边界提交
 ```
 
-因此，`tool_call` 的出现最多会让一段 text 的聚合粒度变小；它不会截断、覆盖或丢失 text。
+这不会丢失 text，也不会把 ToolCall 的 JSON 拼进助手文本。它只可能让 text 聚合粒度变小。
 
----
+## 2. 需要先区分两类 ToolCall
 
-## 3. 例子：事件日志与最终回答是两件事
+### 2.1 Broker-owned 正常工具调用
 
-假设上游模型流的语义顺序为：
+这是生产主路径。`ToolBroker.prepare_batch()` 会让 Store 在一个事务内：
+
+- 预检整个稳定 slot batch；
+- 新建 Tool Activity 和 ToolExecution；
+- 写入 `TOOL_CALL_COMMITTED`；
+- 如任一旧 slot 与新的 tool/request/release/effect 不一致，整批回滚。
+
+工具完成后，Store 在另一个结算事务内更新 effect/activity/result/artifact link，并写 `TOOL_RESULT_COMMITTED`。
+
+这些事件不进入 Sink 重复写入。text 与 ToolCall 的顺序由 Tool Broker 之前的 flush/checkpoint 屏障保证。
+
+### 2.2 engine-owned 合成工具事件
+
+默认 `native_early_tool_dispatch=off` 时，如果模型给出不合法参数或不存在的工具，整批必须零 dispatch。此时不创建真实 ToolExecution，但仍需要向模型和 UI 提交成对 call/result。Native 把这组合成事件作为 `NEXT_TURN` checkpoint 的 `events` 一起原子提交。实验模式可能在完整 batch 校验前已逐 slot 执行安全 READ_ONLY 前缀；随后会停止派发并 fail-closed，已完成执行只会被浪费。
+
+这是 engine-owned tool event 的主要现实用途，不能与已派发工具的 Broker 账本混为一谈。
+
+## 3. Native 默认 `off` 模式的真实时序
+
+Native 现在直接实现 `EngineAdapter.execute(request, RuntimeIO)`，不经过 ADK queue/merge。默认 `native_early_tool_dispatch=off` 时，一个有工具的 model turn 时序是：
 
 ```text
-"你好，我" → tool_call("search") → tool_result(...) → "查到结果了"
+1. save MODEL_REQUEST checkpoint
+   + 同事务提交 OUTPUT_GENERATION_STARTED
+
+2. provider 输出 text delta
+   → NativeLoopAdapter await io.emit(text)
+   → await io.force_flush()
+   → 前一帧提交完才能拉下一帧
+
+3. provider 显式 finish=tool_calls
+   → 验证完整 batch
+   → save MODEL_RESPONSE_COMMITTED checkpoint
+
+4. Broker 单事务 PREPARE 全部 slots
+   → ToolExecution / Tool Activity / TOOL_CALL_COMMITTED 一起提交
+
+5. save TOOL_BATCH_COMMITTED checkpoint
+   → 到这之后才允许 dispatch
+
+6. 外部执行可按 effect policy 受控并发
+   → Broker 按 call ordinal 结算 TOOL_RESULT_COMMITTED
+   → save TOOL_RESULT_COMMITTED checkpoint
+
+7. 全批配对后 save NEXT_TURN
+   → 下一次 model generation
 ```
 
-那么 `run_events` 中的规范事件应按该因果顺序保存：
+因此，当前 Native 默认路径中，ToolCall 不会在 provider 还在产生可变 fragment 时偷跑到 text 前面。
+
+## 4. “后续 text”其实属于哪个 generation
+
+常见例子：
 
 ```text
-OUTPUT_DELTA_COMMITTED: "你好，我"
-TOOL_CALL_COMMITTED:    { name: "search", ... }
-TOOL_RESULT_COMMITTED:  { ... }
-OUTPUT_DELTA_COMMITTED: "查到结果了"
+中间正文 → ToolCall → ToolResult → 最终正文
 ```
 
-这并不表示最终助手文本会把 `tool_call` 的 JSON 拼进去。`CommittedEventSink._full_text` 只累积 text delta，最终助手文本仍然是：
+在 Native loop 中，ToolResult 之后的“最终正文”是下一次 model turn，会先提交新的 `OUTPUT_GENERATION_STARTED`，并使用对应 generation identity。它不会继续拼入工具前那个 generation 的 buffer。
+
+客户端收到 `text_start` 时会清空当前回答正文，但保留 Tool/Skill/plan 过程卡片；后续 delta 重建新 generation 的正文。
+
+最终 `ASSISTANT_MESSAGE_COMMITTED` 再以完整 text 权威覆盖客户端拼接结果。所以“中间正文”可以保留在审计事件中，但不会错误进入 Conversation history 的最终 Assistant。
+
+## 5. Sink 内部的竞争时序
+
+对任何真正进入 `emit()` 的非 text 事件，可以用下图理解：
 
 ```text
-你好，我查到结果了
+主流程      emit_text("A") ─────────▶ emit(non-text) ───▶ emit_text("B")
+                     │                       │
+Sink lock           ├─ append buffer         ├─ acquire
+                     │                       ├─ flush "A"
+100ms timer          └─ scheduled             ├─ cancel timer
+                                             ├─ append non-text
+                                             └─ release
+
+最终 DB seq    OUTPUT_DELTA("A") → non-text event → OUTPUT_DELTA("B")
 ```
 
-工具调用和工具结果是独立的结构化事实事件：SSE/UI 可以将它们投影为工具调用卡片；恢复、审计和排障也需要保留它们在 text 中间出现的真实位置。
+如果 timer 先拿锁，它先 flush A，非 text 事件随后看到空 buffer 并入库；如果非 text 事件先拿锁，它自己 flush A 再入库。两种 interleaving 得到相同因果顺序。
 
----
+## 6. 不能从 SSE 反推的事情
 
-## 4. 为什么不是“旧 text → 新 text → tool_call”？
+SSE 只是 `run_events` 的已提交公开投影：
 
-讨论中一个自然的直觉是：既然新 text 还没有“攒够”，能否先继续攒完：
+- 它不是 Engine 到 Runtime 的写入通道；
+- heartbeat 没有 seq，不代表业务状态改变；
+- INTERNAL 事件会导致公开 seq 看起来跳号，不代表丢事件；
+- SSE 断开不取消 Run；重连按 `after_seq` / `Last-Event-ID` 读取后续已提交事件。
 
-```text
-"你好，我" → "查到结果了" → tool_call
-```
+## 7. 源码阅读索引
 
-答案取决于**上游模型流的真实顺序**，而不是 buffer 是否已满。
-
-### 情况 A：模型流确实先给出 tool_call
-
-若上游顺序是：
-
-```text
-"你好，我" → tool_call → "查到结果了"
-```
-
-则必须保存为：
-
-```text
-"你好，我" → tool_call → "查到结果了"
-```
-
-特别是在典型工具调用流程中，后续文本往往依赖工具结果：
-
-```text
-"你好，我" → tool_call → tool_result → "查到结果了"
-```
-
-若把后面的 text 提前到 `tool_call` 前，事件回放会声称模型在调用工具之前已经得到结果。这会破坏因果顺序，也会让故障恢复和审计失真。
-
-### 情况 B：模型流实际先给出全部 text
-
-若上游顺序原本就是：
-
-```text
-"你好，我" → "查到结果了" → tool_call
-```
-
-第二个 text 分片会先通过 `emit_text()` 进入 buffer。随后 `tool_call` 获得锁，调用 `_flush_locked()` 时会将二者合并提交：
-
-```text
-OUTPUT_DELTA_COMMITTED: "你好，我查到结果了"
-TOOL_CALL_COMMITTED:    { ... }
-```
-
-也就是说，锁不会自行改变模型流顺序；它只在非 text 语义边界前，将**已经收到的** text 变为 durable event。
-
----
-
-## 5. 对“tool_call 抢到锁”的准确理解
-
-本次讨论最终形成的理解是：
-
-> 当 `tool_call` 抢到锁时，它代表当前已按模型流顺序交给 Runtime 的下一个语义边界。
-
-它的含义不是“无论调用方怎样并发调度，抢锁者天然就是真实的最新 LLM 内容”；锁本身不能从乱序并发任务中恢复因果关系。它依赖上游流消费者遵守下面的契约：
-
-```python
-for event in provider_stream:
-    await io.emit(event.type, event.payload)
-```
-
-即按 provider 给出的顺序逐个 `await` 投递，而不是对多个 `emit_text()` / `emit("tool_call")` 随意 `create_task()` 并发投递。
-
-在这个前提下：
-
-1. `tool_call` 之前的 text 已经进入 buffer，或已单独提交；
-2. `tool_call` 持锁后先 `_flush_locked()`，将 buffer 中的旧 text 提交；
-3. 再提交 `TOOL_CALL_COMMITTED`；
-4. 在锁持有期间到达的后续 text 只能等待；
-5. 锁释放后，后续 text 进入新的 buffer，等待下一次 flush。
-
-所以可将其概括为：
-
-```text
-旧 text → tool_call → 新 text
-```
-
-这里的“旧/新”按**模型流的语义位置**区分，而非按“是否凑满 2KiB”区分。
-
----
-
-## 6. 与源码的对应关系
-
-`CommittedEventSink.emit()` 对非 text 事件使用同一把 `asyncio.Lock`：
-
-```python
-async with self._lock:
-    await self._flush_locked()
-    await self.store.append_events(...)
-```
-
-因此，进入 Sink 的 `tool_call` 会在写入自己之前，先写出所有已有 text buffer。
-
-`emit_text()` 也使用这把锁：
-
-```python
-async with self._lock:
-    self._buffer.append(delta)
-    self._full_text.append(delta)
-    ...
-```
-
-所以在 `tool_call` 的“flush 旧 text → 写 tool_call”临界区内，新的 text 不可能插入旧 buffer。它只能等锁释放后写入新的 buffer。
-
-新 buffer 的后续提交触发条件为：
-
-- 累计达到 `flush_bytes`（默认 2KiB）；
-- `flush_ms` 定时器到期（默认 100ms）；
-- 后续非 text 事件、checkpoint 调用 `force_flush()`；
-- Sink `close()` 时的最终 flush。
-
----
-
-## 7. 时序图
-
-```text
-模型流：     text("你好，我") ─────→ tool_call(search) ─────→ text("查到结果了")
-                                      │
-text buffer： ["你好，我"]            │
-                                      ▼
-tool_call：                         获取同一把锁
-                                      │
-                                      ├─ flush → OUTPUT_DELTA_COMMITTED("你好，我")
-                                      ├─ append → TOOL_CALL_COMMITTED(search)
-                                      └─ 释放锁
-                                                                         │
-新 text：                                                               ▼
-                                                               进入新 buffer
-                                                               ["查到结果了"]
-                                                                         │
-                                              timer / 阈值 / 下一边界 / close
-                                                                         ▼
-                                           OUTPUT_DELTA_COMMITTED("查到结果了")
-```
-
----
-
-## 8. 最终结论
-
-`tool_call` 抢锁不是为了“抢在 text 完整输出之前写自己”，而是为了将其作为一个不可跨越的语义边界：先持久化边界前所有已收到的 text，再持久化 `tool_call`，边界后的 text 则进入下一段聚合。
-
-因此，正确性来自两个条件的组合：
-
-1. 上游按模型流顺序将事件交给 Runtime；
-2. Sink 用同一把锁串行化 buffer 操作和“flush text → 写非 text 事件”的提交。
-
-最终得到的不是“所有 text 必须先攒完整再写 tool_call”，而是“text 的聚合不能跨越 `tool_call` 这类语义边界”。
+- `agent/runtime/application/events.py`：text buffer、锁、flush、checkpoint。
+- `agent/engine/native_loop/loop.py`：Native checkpoint phase 与 generation 时序。
+- `agent/engine/native_loop/engine.py`：直接 awaited RuntimeIO 和 final assistant override。
+- `agent/runtime/application/tool_broker.py`：`prepare_batch()` / `execute_prepared()`。
+- `agent/runtime/adapters/sqlite/store.py`：ToolExecution batch PREPARE 与结算事务。
+- `agent/runtime/api/runs.py`：Canonical Event 到 SSE event name 的投影。

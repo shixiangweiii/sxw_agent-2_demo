@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.reliability.support.runtime_releases import activate_test_release
+
 import uuid
 from dataclasses import dataclass
 
@@ -9,6 +11,7 @@ from agent.runtime.adapters.filesystem_artifact import FilesystemArtifactStore
 from agent.runtime.adapters.sqlite import RuntimeDatabase, SqliteRuntimeStore
 from agent.runtime.application.admission import AdmissionService, CreateRunInput
 from agent.runtime.application.tool_broker import ToolBroker
+from agent.runtime.application.tool_outputs import skill_center_output
 from agent.runtime.domain.errors import RuntimeFault
 from agent.runtime.domain.models import (
     ActivityStatus,
@@ -38,9 +41,8 @@ async def _running_parent(tmp_path):
     clock = FakeClock()
     store = SqliteRuntimeStore(RuntimeDatabase(tmp_path / "runtime.db"))
     await store.initialize()
-    await store.register_release(
+    await activate_test_release(store,
         ReleaseManifest(engine="native_loop", components={"tool-state-test": "v1"}),
-        activate=True,
     )
     admitted = await AdmissionService(
         store, clock=clock, default_deadline_ms=60_000
@@ -58,6 +60,7 @@ async def _running_parent(tmp_path):
         idempotency_key=str(uuid.uuid4()),
     )
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="tool-state-worker",
         lease_ms=30_000,
         now_ms=clock.now_ms(),
@@ -234,6 +237,7 @@ async def test_tool_reported_errors_are_bounded_before_durable_failure(tmp_path)
             max_attempts=1,
         ),
         oversized_error,
+        result_adapter=skill_center_output,
     )
     result = await broker.execute(
         run_id=run.envelope.run_id,
@@ -895,6 +899,7 @@ async def test_expired_parent_requeues_safe_dispatch_but_not_unknown_effect(tmp_
     assert (await store.get_activity(prepared["activity_id"])).status is ActivityStatus.RUNNING
 
     replacement = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="replacement-worker", lease_ms=30_000, now_ms=clock.now_ms()
     )
     assert replacement is not None
@@ -964,6 +969,7 @@ async def test_expired_parent_requeues_safe_dispatch_but_not_unknown_effect(tmp_
     ] == "MANUAL_REQUIRED"
     assert (await store2.get_activity(unknown["activity_id"])).status is ActivityStatus.MANUAL
     assert await store2.claim_next(
+        release_map=await store2.active_releases(),
         worker_id="must-not-claim", lease_ms=30_000, now_ms=clock2.now_ms()
     ) is None
 

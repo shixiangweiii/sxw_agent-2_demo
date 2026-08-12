@@ -54,6 +54,11 @@ def from_agent_tool(tool: Any) -> ToolSpec:
     agent = getattr(tool, "agent", None)
     if agent is None:
         raise RuntimeError(f"AgentTool {name} 缺少内部 agent，无法桥接")
+    result_protocol = getattr(tool, "result_protocol", None)
+    if result_protocol not in {"plain", "a2a"}:
+        raise ValueError(
+            f"AgentTool {name} must explicitly declare result_protocol=plain|a2a"
+        )
 
     async def run(args: dict[str, Any], ctx: NativeToolContext) -> Any:
         return await _run_agent(agent, args, name=name)
@@ -65,6 +70,8 @@ def from_agent_tool(tool: Any) -> ToolSpec:
         run=run,
         # 远程子代理有副作用且不可控，一律串行（与 CC 对非只读工具的处理一致）。
         concurrency_safe=False,
+        result_protocol=result_protocol,
+        implementation=f"{type(tool).__module__}.{type(tool).__qualname__}",
     )
 
 

@@ -10,13 +10,15 @@ from pydantic import ValidationError as PydanticValidationError
 from referencing import Registry, Resource
 
 from agent.runtime.api.runs import _sse
-from agent.runtime.application.tool_broker import _normalize_evidence_set
 from agent.runtime.domain.artifact import ArtifactRef
 from agent.runtime.domain.models import (
     CanonicalEvent,
+    EvidenceItem,
+    EvidenceSet,
     EventType,
     RunStatus,
     RuntimeEnvelope,
+    RetrievalStatus,
     ToolResultEnvelope,
     ToolResultStatus,
     WorkingState,
@@ -100,7 +102,6 @@ def _authority_objects(now_ms: int = 1_800_000_000_000):
         budget={"deadline_at": now_ms + 60_000, "model_calls_used": 1},
         artifact_refs=["b" * 64],
         evidence_refs=["ev_example"],
-        release_fingerprint=release,
     )
     return envelope, event, working_state
 
@@ -127,6 +128,22 @@ def test_terminal_event_schema_matches_store_terminal_annotation() -> None:
     })
 
     _validate("canonical-event-v1.schema.json", terminal.model_dump(mode="json"))
+
+
+def test_native_generation_start_is_a_canonical_event_contract() -> None:
+    _, event, _ = _authority_objects()
+    generation = event.model_copy(update={
+        "event_id": new_id("evt"),
+        "event_type": EventType.OUTPUT_GENERATION_STARTED,
+        "payload": {
+            "message_id": "model-slot-1",
+            "generation_id": "generation-1",
+            "supersedes_generation_id": None,
+            "reason": "recovery",
+        },
+    })
+
+    _validate("canonical-event-v1.schema.json", generation.model_dump(mode="json"))
 
 
 @pytest.mark.parametrize(
@@ -215,58 +232,49 @@ def test_artifact_ref_schema_validates_public_model_dump() -> None:
 
 
 def test_evidence_schema_validates_broker_authority_with_full_provenance() -> None:
-    now_ms = 1_800_000_000_000
     run_id = new_id("run")
     activity_id = stable_id("act", run_id, "tool:knowledge:0")
     tool_execution_id = stable_id("tool", run_id, "knowledge:0")
     content = "SQLite WAL separates readers from committed writes."
-    raw = {
-        "schema_version": "1",
-        "query": "How does WAL help?",
-        "query_id": "qry_" + "e" * 64,
-        "run_id": run_id,
-        "activity_id": activity_id,
-        "principal_id": "demo-user",
-        "dataset_scope": ["runtime-docs"],
-        "scope": "public",
-        "retrieval_status": "HIT",
-        "rewrites": ["SQLite WAL reliability"],
-        "cost_ms": 12,
-        "degraded_reasons": [],
-        "retrieved_at": "2027-01-15T08:00:00Z",
-        "evidence": [{
-            "n": 1,
-            "evidence_id": "ev_" + "f" * 64,
-            "chunk_id": "chunk_1",
-            "doc_id": "runtime-guide",
-            "title": "Runtime Guide",
-            "document_id": "doc_1",
-            "document_version_id": "dver_1",
-            "index_version": "dver_1",
-            "content_hash": "1" * 64,
-            "dataset_id": "runtime-docs",
-            "scope": "public",
-            "query_id": "qry_" + "e" * 64,
-            "page": 2,
-            "span_start": 10,
-            "span_end": 62,
-            "content": content,
-            "score": 0.91,
-            "source": "fused",
-        }],
-    }
-    evidence_set = _normalize_evidence_set(
-        raw,
-        {
-            "run_id": run_id,
-            "activity_id": activity_id,
-            "tool_execution_id": tool_execution_id,
-        },
-        retrieved_at_ms=now_ms,
+    evidence_set = EvidenceSet(
+        query="How does WAL help?",
+        query_id="qry_" + "e" * 64,
+        run_id=run_id,
+        activity_id=activity_id,
+        principal_id="demo-user",
+        dataset_scope=("runtime-docs",),
+        scope="public",
+        retrieval_status=RetrievalStatus.HIT,
+        rewrites=("SQLite WAL reliability",),
+        cost_ms=12,
+        degraded_reasons=(),
+        tool_execution_id=tool_execution_id,
+        retrieved_at="2027-01-15T08:00:00Z",
+        evidence=(EvidenceItem(
+            n=1,
+            evidence_id="ev_" + "f" * 64,
+            chunk_id="chunk_1",
+            doc_id="runtime-guide",
+            title="Runtime Guide",
+            document_id="doc_1",
+            document_version_id="dver_1",
+            index_version="dver_1",
+            content_hash="1" * 64,
+            dataset_id="runtime-docs",
+            scope="public",
+            query_id="qry_" + "e" * 64,
+            page=2,
+            span_start=10,
+            span_end=62,
+            content=content,
+            score=0.91,
+            source="fused",
+        ),),
     )
 
-    _validate("evidence-v1.schema.json", evidence_set)
-    evidence = evidence_set["evidence"][0]
+    dumped = evidence_set.model_dump(mode="json")
+    _validate("evidence-v1.schema.json", dumped)
+    evidence = dumped["evidence"][0]
     assert {
         "document_id",
         "document_version_id",

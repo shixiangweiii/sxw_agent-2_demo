@@ -19,7 +19,7 @@ WAITING_INPUT | CANCEL_REQUESTED
 
 ```text
 SUCCEEDED | FAILED | CANCELLED | TIMED_OUT |
-REJECTED | INCOMPATIBLE_RELEASE
+REJECTED
 ```
 
 `REJECTED` 只用于请求已持久受理、但在执行资格策略检查中被拒绝；校验失败或 admission 事务未提交不是 Run，也没有 `REJECTED` Run。
@@ -36,7 +36,6 @@ REJECTED | INCOMPATIBLE_RELEASE
 | `DISPATCH_PENDING` | `CANCELLED` | cancel CAS 先提交，且无 unresolved effect |
 | `DISPATCH_PENDING` | `CANCEL_REQUESTED` | cancel CAS 先提交，但已有 `DISPATCHED/UNKNOWN/RECONCILING/MANUAL_REQUIRED` effect；不得直接宣称无副作用取消 |
 | `DISPATCH_PENDING` | `TIMED_OUT` | deadline 到且无 unresolved effect |
-| `DISPATCH_PENDING` | `INCOMPATIBLE_RELEASE` | Worker release 与冻结 release/schema 不匹配 |
 | `RUNNING` | `WAITING_RETRY` | Outcome 为 retryable，attempt 未耗尽；已创建唯一 retry timer |
 | `RUNNING` | `WAITING_INPUT` | Outcome 为 `WAITING_INPUT`/`INTERRUPT`；pending input 已 checkpoint，Activity 不占 lease |
 | `RUNNING` | `CANCEL_REQUESTED` | cancel CAS 先提交，且存在正在执行或 `DISPATCHED/UNKNOWN/RECONCILING/MANUAL_REQUIRED` effect，必须等待安全边界/reconcile |
@@ -44,17 +43,14 @@ REJECTED | INCOMPATIBLE_RELEASE
 | `RUNNING` | `FAILED` | Coordinator 判定 terminal failure，且不存在应继续 reconcile 的 unknown effect |
 | `RUNNING` | `CANCELLED` | cancel 已生效，且确认无 unresolved effect；late result 不得覆盖 |
 | `RUNNING` | `TIMED_OUT` | deadline 到；terminal payload 列出所有 unresolved tool execution IDs |
-| `RUNNING` | `INCOMPATIBLE_RELEASE` | 恢复时发现冻结 release/schema 无法解释 checkpoint |
 | `WAITING_RETRY` | `DISPATCH_PENDING` | 唯一 retry timer CAS `SCHEDULED → FIRED` 后重新排队 |
 | `WAITING_RETRY` | `CANCELLED` | cancel CAS 先于 timer/resume，且无 unresolved effect |
 | `WAITING_RETRY` | `CANCEL_REQUESTED` | cancel CAS 先提交，但已有 unresolved effect；取消只停止普通 retry，随后进入 reconcile/deadline 收口 |
 | `WAITING_RETRY` | `TIMED_OUT` | deadline 到；不得再触发普通 retry |
-| `WAITING_RETRY` | `INCOMPATIBLE_RELEASE` | 恢复前 release/schema 检查失败 |
 | `WAITING_INPUT` | `DISPATCH_PENDING` | 唯一 signal 首次消费并提交 resume Activity；重复 signal 不重复唤醒 |
 | `WAITING_INPUT` | `CANCELLED` | cancel CAS 先于 signal 消费，且无 unresolved effect |
 | `WAITING_INPUT` | `CANCEL_REQUESTED` | cancel CAS 先提交，但已有 unresolved effect；原人工输入不能绕过 Tool reconcile 语义 |
 | `WAITING_INPUT` | `TIMED_OUT` | deadline 或 wait timeout 到；迟到 signal 写审计后拒绝 |
-| `WAITING_INPUT` | `INCOMPATIBLE_RELEASE` | signal 恢复前 release/schema 检查失败 |
 | `CANCEL_REQUESTED` | `CANCELLED` | 执行到安全边界，或 reconcile 已证明 effect 状态，且不再有 unresolved execution |
 | `CANCEL_REQUESTED` | `TIMED_OUT` | 到 deadline 仍存在 unresolved effect；terminal payload 必须列出 IDs |
 | 任一终态 | 无 | 终态不可变；同一 Run 最多一个 terminal |
@@ -64,6 +60,7 @@ REJECTED | INCOMPATIBLE_RELEASE
 - clean EOF、生成器正常退出、旧 `done`/`error` 事件都不是 Run 迁移依据。
 - SSE 断开不触发任何 Run 迁移。
 - Worker 丢失只触发 Activity lease recovery，不直接令 Run `FAILED`。
+- Worker 只能精确 claim 其 `release_map` 中 `(engine, release_fingerprint)` 匹配的 Activity；release 不匹配不是 Run 状态迁移。
 - terminal 事务先提交时，后续 cancel 返回 `409 RUN_ALREADY_TERMINAL`。
 - cancel CAS 先提交时，后续执行结果仅记为 late result，不能提交 `SUCCEEDED`。
 - 存在 `DISPATCHED/UNKNOWN/RECONCILING/MANUAL_REQUIRED` ToolEffect 的 cancel 不能直接宣称 `CANCELLED`。
@@ -264,11 +261,13 @@ Canonical Event committed → AVAILABLE
 | `TOOL_RECONCILIATION_MISMATCH` | 409 | ToolExecution 不属于当前 Run/pending unresolved boundary |
 | `TOOL_RECONCILE_UNSUPPORTED` | 409 | `reconcile` action 的 ToolExecution 未持久化 reconcile 能力 |
 | `TOOL_RECONCILIATION_SIGNAL_REQUIRED` | 409 | 普通 signal 尝试唤醒 ToolEffect reconciliation boundary |
-| `CHECKPOINT_REVISION_CONFLICT` | 内部可重读 | checkpoint expected revision 不匹配 |
+| `CHECKPOINT_REVISION_CONFLICT` | 内部 ownership loss | checkpoint expected revision 不匹配；Adapter 转为 `AttemptOwnershipLost` 并冒泡给 Worker，不继续重读执行 |
 | `EVENT_SEQUENCE_CONFLICT` | 内部错误 | seq 唯一约束或 `next_seq` CAS 失败 |
 | `SIGNAL_REPLAY_MISMATCH` | 409 | 同 signal_id 的规范化 digest 不同 |
 | `SIGNAL_REJECTED_LATE` | 409 | terminal Run 的 signal；仍写 `REJECTED_LATE` 审计行 |
 | `TIMER_ALREADY_FIRED` | 内部幂等成功 | timer CAS 已由其他执行者完成 |
-| `RELEASE_INCOMPATIBLE` | terminal | 冻结 release/schema 与 Worker 不一致，Run 收口 `INCOMPATIBLE_RELEASE` |
+| `ACTIVE_RUNS_BLOCK_RELEASE_ACTIVATION` | 启动失败 | 激活新 fingerprint 时存在不同 fingerprint 的非终态 Run |
+| `CLAIM_RELEASE_MISMATCH` | 不可达防御断言 | Coordinator 收到与 Adapter release 不一致的 claim；只中止 attempt 并报警，不终态化 Run |
+| `CURRENT_SCHEMA_MISMATCH` | 启动失败 | 非空数据库的 `schema_digest` 与完整 current `schema.sql` SHA-256 不一致，或缺少 identity |
 
 未知或未列出的迁移一律 fail closed，不通过日志警告后继续。

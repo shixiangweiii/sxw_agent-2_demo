@@ -28,6 +28,8 @@ _A2A_REQUEST_DESCRIPTION = (
 class SelfContainedA2AAgentTool(AgentTool):
     """只增强 A2A request 声明，不改写 ADK 的执行与响应 schema。"""
 
+    result_protocol = "a2a"
+
     def _get_declaration(self) -> FunctionDeclaration:
         declaration = super()._get_declaration()
         json_schema = declaration.parameters_json_schema
@@ -51,7 +53,6 @@ class SelfContainedA2AAgentTool(AgentTool):
 async def load_a2a_agent_tools(settings: AgentSettings) -> list[AgentTool]:
     base_url = settings.skill_center_base_url.rstrip("/")
     url = f"{base_url}/api/v1/a2a-agents/instance/list"
-    tools: list[AgentTool] = []
     try:
         async with httpx.AsyncClient(timeout=settings.skill_center_timeout_ms / 1000.0) as http:
             resp = await http.post(
@@ -60,16 +61,31 @@ async def load_a2a_agent_tools(settings: AgentSettings) -> list[AgentTool]:
                 headers={"X-Trace-Id": get_trace_id() or "", "Content-Type": "application/json"},
             )
             resp.raise_for_status()
-            data = resp.json()
-        for inst in data["result"]["a2AAgentInstances"]:
-            remote = RemoteA2aAgent(
-                name=inst["agentInstanceId"],
-                agent_card=inst["cardUrl"],     # ADK 在首次调用时按 well-known 解析该卡
-                description=inst.get("description", ""),
-            )
-            tools.append(SelfContainedA2AAgentTool(agent=remote))
-        log_kv(logger, logging.INFO, "A2ALoad", "loaded",
-               count=len(tools), names=[i["agentInstanceId"] for i in data["result"]["a2AAgentInstances"]])
-    except Exception as exc:  # noqa: BLE001 - skill-center / a2a 不可用不阻断启动
+    except httpx.HTTPError as exc:
         log_kv(logger, logging.WARNING, "A2ALoad", "load failed, skip", error=type(exc).__name__)
+        return []
+
+    data = resp.json()
+    instances = data["result"]["a2AAgentInstances"]
+    if not isinstance(instances, list):
+        raise ValueError("A2A catalog instances must be a list")
+    tools: list[AgentTool] = []
+    for inst in instances:
+        if not isinstance(inst, dict):
+            raise ValueError("A2A catalog entry must be an object")
+        name = inst["agentInstanceId"]
+        card_url = inst["cardUrl"]
+        description = inst["description"]
+        if not all(isinstance(value, str) and value.strip() for value in (
+            name, card_url, description,
+        )):
+            raise ValueError("A2A catalog name, cardUrl and description must be non-empty")
+        remote = RemoteA2aAgent(
+            name=name,
+            agent_card=card_url,
+            description=description,
+        )
+        tools.append(SelfContainedA2AAgentTool(agent=remote))
+    log_kv(logger, logging.INFO, "A2ALoad", "loaded",
+           count=len(tools), names=[i["agentInstanceId"] for i in instances])
     return tools

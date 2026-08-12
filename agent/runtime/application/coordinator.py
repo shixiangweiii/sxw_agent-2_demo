@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from typing import Any
 
 from agent.runtime.application.events import CommittedEventSink
-from agent.runtime.domain.errors import RuntimeFault
+from agent.runtime.domain.errors import (
+    AttemptOwnershipLost,
+    RuntimeFault,
+    raise_if_ownership_lost,
+)
 from agent.runtime.domain.models import (
     EngineOutcome,
     EngineOutcomeKind,
@@ -52,6 +57,10 @@ class RunCoordinator:
         event_flush_bytes: int = 2048,
         max_model_attempts: int = 2,
         tool_reconciler: ToolReconciliationExecutor | None = None,
+        tool_broker: Any | None = None,
+        max_skill_event_bytes: int = 64 * 1024,
+        max_skill_events: int = 2000,
+        max_skill_event_total_bytes: int = 8 * 1024 * 1024,
     ) -> None:
         self.store = store
         self.registry = registry
@@ -61,6 +70,10 @@ class RunCoordinator:
         self.event_flush_bytes = event_flush_bytes
         self.max_model_attempts = max_model_attempts
         self.tool_reconciler = tool_reconciler
+        self.tool_broker = tool_broker
+        self.max_skill_event_bytes = max_skill_event_bytes
+        self.max_skill_events = max_skill_events
+        self.max_skill_event_total_bytes = max_skill_event_total_bytes
 
     async def execute_claim(self, claim: Claim, *, worker_id: str) -> RunStatus:
         """恢复本 Run 的诊断 trace_id，再执行。
@@ -72,7 +85,11 @@ class RunCoordinator:
         哪怕调用方没带 x-trace-id。
         """
         with use_trace_id(claim.run.trace_id or claim.run.envelope.run_id):
-            return await self._execute_claim(claim, worker_id=worker_id)
+            try:
+                return await self._execute_claim(claim, worker_id=worker_id)
+            except RuntimeFault as exc:
+                raise_if_ownership_lost(exc)
+                raise
 
     async def _execute_claim(self, claim: Claim, *, worker_id: str) -> RunStatus:
         # 第 1 步：把 Activity 从 CLAIMED 推进到 RUNNING。这一步带 fencing token 做 CAS，
@@ -186,25 +203,21 @@ class RunCoordinator:
         # 以下进入正常的引擎执行路径。
         # 第 4 步：按 Run 声明的 engine 名字取出适配器。
         adapter = self.registry.get(run.envelope.engine)
-        # 分支 4：Worker 当前 release 与 Run 冻结的 release 不一致（典型场景：代码升级
-        # 重启 Worker 后，要接手一个旧版本留下的未终态 Run）。本项目不提供 checkpoint
-        # 跨 release 升级路径，此处一律 fail closed。INCOMPATIBLE_RELEASE 是一个独立
-        # 终态，与普通 FAILED 区分开，便于运维识别版本问题。
-        # 该判定不需要 checkpoint，因此放在加载 checkpoint 之前。
+        # Exact-release claim SQL makes this branch unreachable during normal
+        # operation.  Keep a defence against registry/store corruption, but do
+        # not turn a Worker ownership violation into a Run terminal fact.
         if adapter.release_fingerprint != run.envelope.release_fingerprint:
-            terminal = await self.store.finalize_failure(
-                run_id=run.envelope.run_id,
-                activity_id=activity.activity_id,
-                fencing_token=activity.fencing_token,
-                code="INCOMPATIBLE_RELEASE",
-                message=(
-                    f"Run release {run.envelope.release_fingerprint} cannot be resumed by "
-                    f"worker release {adapter.release_fingerprint}"
-                ),
-                terminal_status=RunStatus.INCOMPATIBLE_RELEASE,
-                now_ms=self.clock.now_ms(),
+            raise RuntimeFault(
+                "CLAIM_RELEASE_MISMATCH",
+                "claimed Run does not match the executing Worker release",
+                500,
+                {
+                    "run_id": run.envelope.run_id,
+                    "engine": run.envelope.engine,
+                    "run_release": run.envelope.release_fingerprint,
+                    "worker_release": adapter.release_fingerprint,
+                },
             )
-            return terminal.status
         # 拉出最新一份 checkpoint（可能为 None，说明是首次执行而不是恢复）。
         checkpoint = await self.store.latest_checkpoint(run.envelope.run_id)
         # 分支 5：认领和恢复准备可能消耗了不少时间，所以在真正进引擎前再校一次 deadline。
@@ -247,6 +260,10 @@ class RunCoordinator:
             flush_ms=self.event_flush_ms,
             flush_bytes=self.event_flush_bytes,
             clock=self.clock,
+            tool_broker=self.tool_broker,
+            max_skill_event_bytes=self.max_skill_event_bytes,
+            max_skill_events=self.max_skill_events,
+            max_skill_event_total_bytes=self.max_skill_event_total_bytes,
         )
 
         outcome: EngineOutcome
@@ -268,27 +285,23 @@ class RunCoordinator:
                 # 但代码结构上它同时也是异常、取消、超时、HITL 等所有分支共同的起点——Coordinator 故意不信任这里返回的 outcome 是最终事实,
                 # 后面还要用 DB 里的权威状（cancel_requested、deadline、unresolved tool effects）逐层覆盖它
 
-                # 运行时 adapter.execute 的实际实现类有三个，整体是两级结构
-                # 第一级：EngineAdapter 是 Protocol（鸭子类型接口）
-                # 第二级：三个具体实现类
-                #   第一个：LegacyEngineAdapter
-                #       plan_execute PlanExecuteEngine 先规划再执行
-                #       agent_loop AgentLoopEngine 循环在 ADK BaseLlmFlow 内部
-                #       native_loop NativeLoopEngine 自研 while 循环，在 native_loop/engine.py
-                #   第二个：NativeReliabilityDemoAdapter
-                #   第三个：RoutedNativeAdapter
-                # 注册表中的实际映射（Worker 启动时构建）
-                '''
-                adapters["plan_execute"]  = LegacyEngineAdapter(engine="plan_execute")
-                adapters["agent_loop"]    = LegacyEngineAdapter(engine="agent_loop")
-                adapters["native_loop"]   = RoutedNativeAdapter(
-                                                normal = LegacyEngineAdapter(engine="native_loop"),
-                                                demo   = NativeReliabilityDemoAdapter(...)
-                                            )
-                '''
                 outcome = await adapter.execute(request, io)
             # 网络/超时/IO 类异常视为可重试：这类错误通常是瞬时性的，
             # 交给下面的重试分支安排退避重试。
+            except asyncio.CancelledError:
+                await io.abort()
+                raise
+            except AttemptOwnershipLost:
+                await io.abort()
+                raise
+            except RuntimeFault as exc:
+                raise_if_ownership_lost(exc)
+                span.set_status("error").set(error=exc.code)
+                outcome = EngineOutcome(
+                    kind=EngineOutcomeKind.TERMINAL_FAILURE,
+                    error_code=exc.code,
+                    message=exc.message,
+                )
             except (TimeoutError, ConnectionError, OSError) as exc:
                 span.set_status("error").set(error=type(exc).__name__)
                 outcome = EngineOutcome(
@@ -374,15 +387,25 @@ class RunCoordinator:
             # 子分支 9b：没有未决效果，可以正常提交成功终态。
             # final assistant 文本 + citation + 成功终态在同一个事务里落库。
             else:
+                final_assistant = io.final_assistant
+                assistant_text = (
+                    final_assistant[0] if final_assistant is not None else io.assistant_text
+                )
                 final = await self.store.finalize_success(
                     run_id=run.envelope.run_id,
                     activity_id=activity.activity_id,
                     fencing_token=activity.fencing_token,
-                    assistant_text=io.assistant_text,
+                    assistant_text=assistant_text,
                     # SQLite finalize derives citations from committed EvidenceSet indexes;
                     # request-local engine emissions cannot influence durable authority.
                     citations=[],
                     now_ms=self.clock.now_ms(),
+                    message_id=(
+                        final_assistant[1] if final_assistant is not None else None
+                    ),
+                    generation_id=(
+                        final_assistant[2] if final_assistant is not None else None
+                    ),
                 )
         # 分支 10：引擎主动请求等待外部输入（如 HITL 信号）。这不是终态，
         # Run 置为 WAITING_INPUT 后释放 worker slot，等 signal 到了再重新派发。

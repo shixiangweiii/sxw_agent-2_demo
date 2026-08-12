@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from tests.reliability.support.runtime_releases import activate_test_release
+
 import json
+import hashlib
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,12 +14,19 @@ from agent.runtime.adapters.filesystem_artifact import FilesystemArtifactStore
 from agent.runtime.adapters.sqlite import RuntimeDatabase, SqliteRuntimeStore
 from agent.runtime.application.admission import AdmissionService, CreateRunInput
 from agent.runtime.application.tool_broker import ToolBroker
+from agent.runtime.domain.errors import RuntimeFault
 from agent.runtime.domain.models import (
     EventType,
+    EvidenceItem,
+    EvidenceSet,
     ReleaseManifest,
     RunStatus,
+    RetrievalStatus,
     ToolEffectClass,
     ToolManifest,
+    ToolExecutionOutput,
+    ToolResultEnvelope,
+    ToolResultStatus,
 )
 
 
@@ -35,9 +45,8 @@ async def _runtime(tmp_path: Path):
     store = SqliteRuntimeStore(RuntimeDatabase(tmp_path / "runtime.db"))
     await store.initialize()
     clock = FakeClock()
-    await store.register_release(
+    await activate_test_release(store,
         ReleaseManifest(engine="native_loop", components={"test": "evidence-v1"}),
-        activate=True,
     )
     admitted = await AdmissionService(store, clock=clock).create(
         CreateRunInput(
@@ -53,6 +62,7 @@ async def _runtime(tmp_path: Path):
         idempotency_key="evidence-test",
     )
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="worker-a", lease_ms=30_000, now_ms=clock.now_ms()
     )
     assert claim is not None
@@ -77,6 +87,41 @@ def _manifest() -> ToolManifest:
 
 
 @pytest.mark.asyncio
+async def test_missing_evidence_is_fail_closed_without_legacy_hit_synthesis(
+    tmp_path: Path,
+) -> None:
+    store, clock, run, activity = await _runtime(tmp_path)
+    broker = ToolBroker(
+        store,
+        FilesystemArtifactStore(tmp_path / "artifacts"),
+        clock=clock,
+    )
+
+    async def legacy_hits(_arguments, _context):
+        return {"hits": [{"content": "missing provenance"}]}
+
+    broker.register(_manifest(), legacy_hits)
+    with pytest.raises(RuntimeFault) as invalid:
+        await broker.execute(
+            run_id=run.envelope.run_id,
+            parent_activity_id=activity.activity_id,
+            fencing_token=activity.fencing_token,
+            logical_key="native:turn:0:call:legacy",
+            tool_name="knowledge_search",
+            arguments={"query": "durability"},
+            deadline_at_ms=run.envelope.deadline_at,
+        )
+    assert invalid.value.code == "EVIDENCE_CONTRACT_INVALID"
+    execution_id = next(
+        event.tool_execution_id
+        for event in await store.list_events(run.envelope.run_id, visibility=None)
+        if event.event_type is EventType.TOOL_CALL_COMMITTED
+    )
+    execution = await store.get_tool_execution(execution_id)
+    assert execution["effect_status"] == "FAILED"
+
+
+@pytest.mark.asyncio
 async def test_evidence_artifact_and_citation_finalize_are_traceable(tmp_path: Path) -> None:
     store, clock, run, activity = await _runtime(tmp_path)
     artifacts = FilesystemArtifactStore(tmp_path / "artifacts")
@@ -84,41 +129,57 @@ async def test_evidence_artifact_and_citation_finalize_are_traceable(tmp_path: P
     full_content = "durable-evidence-" + "x" * 5000
     calls = 0
 
-    async def search(_arguments, _context):
+    async def search(_arguments, context):
         nonlocal calls
         calls += 1
-        return {
-            "hits": [{"n": 1, "title": "SQLite", "doc_id": "doc-1", "content": full_content}],
-            "count": 1,
-            "note": "cite with [n]",
-            "__evidence_set__": {
-                "schema_version": "1",
-                "query": "durability",
-                "query_id": "qry-1",
-                "retrieval_status": "HIT",
-                "rewrites": ["durability"],
-                "cost_ms": 12,
-                "evidence": [{
-                    "n": 1,
-                    "evidence_id": "ev-1",
-                    "title": "SQLite",
-                    "doc_id": "doc-1",
-                    "document_id": "doc-internal-1",
-                    "document_version_id": "dver-1",
-                    "index_version": "dver-1",
-                    "content_hash": "hash-1",
-                    "dataset_id": "kb",
-                    "scope": "public",
-                    "query_id": "qry-1",
-                    "page": 2,
-                    "span_start": 10,
-                    "span_end": 20,
-                    "content": full_content,
-                    "score": 0.9,
-                    "source": "fused",
-                }],
-            },
-        }
+        return ToolExecutionOutput(
+            result=ToolResultEnvelope(
+                status=ToolResultStatus.SUCCESS,
+                preview={
+                    "hits": [{
+                        "n": 1, "title": "SQLite", "doc_id": "doc-1",
+                        "content": full_content,
+                    }],
+                    "count": 1,
+                    "note": "cite with [n]",
+                },
+            ),
+            evidence=EvidenceSet(
+                query="durability",
+                query_id="qry-1",
+                run_id=context.run_id,
+                activity_id=context.tool_activity_id,
+                principal_id="demo-user",
+                dataset_scope=("kb",),
+                scope="public",
+                retrieval_status=RetrievalStatus.HIT,
+                rewrites=("durability",),
+                cost_ms=12,
+                degraded_reasons=(),
+                tool_execution_id=context.tool_execution_id,
+                retrieved_at="2027-01-15T08:00:00Z",
+                evidence=(EvidenceItem(
+                    n=1,
+                    evidence_id="ev-1",
+                    chunk_id="chunk-1",
+                    title="SQLite",
+                    doc_id="doc-1",
+                    document_id="doc-internal-1",
+                    document_version_id="dver-1",
+                    index_version="dver-1",
+                    content_hash=hashlib.sha256(full_content.encode()).hexdigest(),
+                    dataset_id="kb",
+                    scope="public",
+                    query_id="qry-1",
+                    page=2,
+                    span_start=10,
+                    span_end=20,
+                    content=full_content,
+                    score=0.9,
+                    source="fused",
+                ),),
+            ),
+        )
 
     broker.register(_manifest(), search)
     result = await broker.execute(
@@ -143,7 +204,6 @@ async def test_evidence_artifact_and_citation_finalize_are_traceable(tmp_path: P
     assert result.result_ref
     assert replay == result
     assert calls == 1
-    assert "__evidence_set__" not in result.preview
     assert len(json.dumps(result.preview, ensure_ascii=False).encode()) <= 512
     artifact = await artifacts.read_bounded(result.result_ref, max_bytes=16_000)
     evidence_set = json.loads(artifact.data)

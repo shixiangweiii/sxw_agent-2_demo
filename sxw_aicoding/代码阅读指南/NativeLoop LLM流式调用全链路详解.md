@@ -1,828 +1,354 @@
 # NativeLoop LLM 流式调用全链路详解
 
-本文档深入分析 `native_loop` 的底层物理层——直面 OpenAI 兼容流式协议的完整流程：从组装 OpenAI 请求报文、发起 SSE 流式调用、逐 chunk 解析累积 tool_calls、到向上层抛 `TextDelta` / `ToolCallReady` / `TurnEnd`。
+> 本文以当前代码为准，说明 `native_loop` 从 Runtime 领取一次 Activity，到模型流、工具批次、checkpoint 和最终 Assistant 提交的完整链路。重点不是 OpenAI SDK 的调用语法，而是“哪些事实何时成为可恢复的权威状态”。
 
-附带**真实的 chunk 形状示例**（来自 `scripts/probe_dashscope_tool_stream.py` 探针）与**完整时序图 / 调用栈图**。
+## 1. 先建立正确的分层图
 
----
-
-## 目录
-
-- [1. 核心问题与总体思路](#1-核心问题与总体思路)
-- [2. 关键源码位置索引](#2-关键源码位置索引)
-- [3. 各层数据结构概览](#3-各层数据结构概览)
-- [4. OpenAI 流式报文的真实形状](#4-openai-流式报文的真实形状)
-- [5. 上层组装：`_build_request` + `wire_declarations`](#5-上层组装_build_request--wire_declarations)
-- [6. 物理层：`NativeLlmClient.stream`](#6-物理层_nativellmclientstream)
-- [7. 累积器：`_ToolCallAccumulator`](#7-累积器_toolcallaccumulator)
-- [8. 就绪判定与提前派发](#8-就绪判定与提前派发)
-- [9. 异常分类与超长恢复](#9-异常分类与超长恢复)
-- [10. 端到端时序图](#10-端到端时序图)
-- [11. 完整调用栈图（含源码定位）](#11-完整调用栈图含源码定位)
-- [12. 关键不变量](#12-关键不变量)
-
----
-
-## 1. 核心问题与总体思路
-
-### 1.1 问题场景
-
-`native_loop` 的自研循环要直面 OpenAI 兼容协议的**流式 SSE**，需要解决：
-
-1. **各家分片规则不一致**：标准 OpenAI 首片带 `id + name`、后续片只追加 `arguments` 字符串；部分厂商一次性吐完整 tool_call。累积器必须两种都吃。
-2. **流式工具执行**：为降低端到端延迟，希望**一个 tool call 参数凑齐就立刻派发执行**，不等整轮流完。但 JSON 参数可能半截，必须有"已就绪"的安全闸。
-3. **上下文超长恢复**：模型报上下文超限错误（常见为 400/413）不是终止条件，而是"压缩后重来一轮"。
-4. **token 用量回压**：流尾的 `usage` 用于压缩阈值估算，但 provider 不一定支持 `include_usage`，要优雅降级。
-
-### 1.2 总体架构
+`native_loop` 生产路径分为三层：
 
 ```text
-                     ┌───────────────────────────────┐
-                     │ NativeLoop.run() 主循环        │
-                     │ loop.py:137                    │
-                     └──────────────┬────────────────┘
-                                    │ await self._client.stream(...)
-                                    ▼
-                     ┌───────────────────────────────┐
-                     │ NativeLlmClient.stream()      │
-                     │ llm_client.py:191              │
-                     │   - 组装 payload               │
-                     │   - 打开 llm span              │
-                     │   - 调用 _consume 迭代          │
-                     │   - 异常分类 + 降级重试          │
-                     └──────────────┬────────────────┘
-                                    │ async for chunk in stream
-                                    ▼
-                     ┌───────────────────────────────┐
-                     │ NativeLlmClient._consume()    │
-                     │ llm_client.py:274              │
-                     │   - 累积 tool_calls            │
-                     │   - 产出 TextDelta             │
-                     │   - 就绪时产出 ToolCallReady    │
-                     │   - 流结束产出 TurnEnd         │
-                     └──────────────┬────────────────┘
-                                    │
-        ┌───────────────────────────┼───────────────────────────┐
-        │                           │                           │
-        ▼                           ▼                           ▼
-  ┌──────────┐              ┌────────────────┐          ┌──────────┐
-  │TextDelta │              │ToolCallReady   │          │TurnEnd   │
-  │(文本增量)│              │(完整 tool call)│          │(轮结束)  │
-  └──────────┘              └────────────────┘          └──────────┘
-        │                           │                           │
-        │   openai.AsyncOpenAI.chat.completions.create(stream=True)
-        │                           │
-        ▼                           ▼                           ▼
-     ┌─────────────────────────────────────────────────────────────┐
-     │  DashScope / OpenAI / 任意 OpenAI 兼容 Provider (SSE 流)   │
-     └─────────────────────────────────────────────────────────────┘
+RunCoordinator
+  └─ NativeLoopAdapter.execute(EngineRunRequest, RuntimeIO)
+       ├─ 编译 canonical history / current input / 附件
+       ├─ 解码唯一 current checkpoint，重物化大 ToolResult
+       ├─ 绑定强制 Tool Broker 和 RuntimeIO 回调
+       └─ NativeLoop.run(...)
+            └─ NativeLlmClient.stream(...)
+                 └─ OpenAI-compatible provider stream
 ```
 
----
+三层职责不能混淆：
 
-## 2. 关键源码位置索引
+- `NativeLoopAdapter` 是生产级 EngineAdapter，直接接收 `RuntimeIO`。它负责持久化、fencing、绝对 deadline、cancel、Broker、Artifact 和最终消息指定。
+- `NativeLoop` 是 Runtime-independent kernel，持有扁平 `messages` 和 `LoopState`，负责模型—工具循环的语义顺序。它通过窄回调接入 checkpoint、Broker 和控制探针，因而仍可供 Claude Skill 子 Runner 复用。
+- `NativeLlmClient` 是唯一直面 provider 线协议的组件，它将 chunk 解析为 `TextDelta | ToolCallReady | TurnEnd`，不决定 Runtime 终态。
 
-| 模块 | 文件路径 | 关键符号 |
-|---|---|---|
-| 流式客户端 | `agent/engine/native_loop/llm_client.py` | `NativeLlmClient`, `stream`, `_consume`, `_ToolCallAccumulator`, `_PartialCall`, `TextDelta`, `ToolCallReady`, `TurnEnd`, `StreamItem`, `ContextOverflowError`, `_classify`, `_observe` |
-| 主循环 | `agent/engine/native_loop/loop.py` | `NativeLoop.run`, `_build_request`, `_execute`, `_call_events`, `_result_events` |
-| 消息模型 | `agent/engine/native_loop/messages.py` | `Msg`, `ToolCall`, `Usage`, `to_wire`, `CHARS_PER_TOKEN` |
-| 工具执行 | `agent/engine/native_loop/executor.py` | `ToolOutcome`, `parse_arguments`, `run_calls`, `execute_one` |
-| 工具注册 | `agent/engine/native_loop/tools.py` | `ToolRegistry`, `ToolSpec`, `wire_declarations` |
-| 流式探针 | `scripts/probe_dashscope_tool_stream.py` | 真实 chunk 形状实测（换 provider 必须重跑） |
-| 异常分类 | `agent/llm/exceptions.py` | `classify_llm_error`, `CONTEXT_OVERFLOW` |
+Native 不经过 ADK 的 `ReasoningEngine`、后台无界队列或事件 merge 路径。`plan_execute` 和 `agent_loop` 仍走 ADK Adapter，两条路径是隔离的。
 
----
+## 2. 主要源码导航
 
-## 3. 各层数据结构概览
+| 职责 | 文件 / 入口 |
+|---|---|
+| 生产 Adapter | `agent/engine/native_loop/engine.py` 的 `NativeLoopAdapter.execute` |
+| 自研 while 循环 | `agent/engine/native_loop/loop.py` 的 `NativeLoop.run` |
+| provider 流协议 | `agent/engine/native_loop/llm_client.py` 的 `NativeLlmClient.stream/_consume` |
+| 消息与原子单元 | `agent/engine/native_loop/messages.py` |
+| current checkpoint | `agent/engine/native_loop/checkpoint.py` |
+| 工具执行与并发分组 | `agent/engine/native_loop/executor.py` |
+| Native 工具目录 | `agent/engine/native_loop/tools.py` |
+| Native—Broker 绑定 | `agent/runtime/adapters/brokered_tools.py` |
+| RuntimeIO 端口 | `agent/runtime/ports/engine.py` |
+| committed event sink | `agent/runtime/application/events.py` |
 
-### 3.1 给 LLM 的请求（上层组装，`Msg.to_wire` 转换后）
+本文不写固定行号：这些不变量比行号更值得记住。
 
-`messages.py:49-70`：
+## 3. Adapter 进入循环前做了什么
 
-```python
-def to_wire(self) -> dict[str, Any]:
-    if self.role == "tool":
-        return {"role": "tool", "tool_call_id": self.tool_call_id or "",
-                "content": _as_text(self.content)}
-    wire: dict[str, Any] = {"role": self.role}
-    wire["content"] = self.content if self.content not in ("", None) else None
-    if self.tool_calls:
-        wire["tool_calls"] = [
-            {"id": tc.id, "type": "function",
-             "function": {"name": tc.name, "arguments": tc.arguments or "{}"}}
-            for tc in self.tool_calls
-        ]
-    return wire
-```
+### 3.1 编译本次模型输入
 
-**示例（最终进入 OpenAI 请求体的 messages）**：
+`_compile_input` 从 `EngineRunRequest` 构造 Native `Msg`：
 
-```json
-[
-  {"role": "system", "content": "你是一个有用的助手..."},
-  {"role": "user", "content": "同时算 12*12 并查杭州天气"},
-  {"role": "assistant",
-   "tool_calls": [
-     {"id": "call_abc", "type": "function",
-      "function": {"name": "calculator", "arguments": "{\"expression\":\"12*12\"}"}},
-     {"id": "call_def", "type": "function",
-      "function": {"name": "get_weather", "arguments": "{\"city\":\"杭州\"}"}}
-   ]},
-  {"role": "tool", "tool_call_id": "call_abc", "content": "144"},
-  {"role": "tool", "tool_call_id": "call_def", "content": "晴，25℃"}
-]
-```
+1. 将 committed canonical history 转成 `user/assistant` 消息。
+2. 将当前 `input_text` 放入最后一条 user 消息。
+3. 图片附件从已校验 Artifact CAS 分段读取，转为多模态 `image_url` block。
+4. 非图片附件只嵌入有界 preview，如需全文由模型调用 `read_artifact`。
 
-**示例（tools 参数，由 `ToolRegistry.wire_declarations()` 产出）**：
+当 `request.checkpoint is None` 时，才从这批消息初始化 `LoopState`。只要 checkpoint 存在，就必须用 current codec 严格恢复，不会猜字段、降级或回退到 history 重跑。
 
-```json
-[
-  {"type": "function", "function": {
-      "name": "calculator",
-      "description": "计算一个数学算术表达式并返回结果。",
-      "parameters": {"type": "object",
-                     "properties": {"expression": {"type": "string", "description": "..."}},
-                     "required": ["expression"]}}},
-  {"type": "function", "function": {
-      "name": "get_weather",
-      "description": "查询指定城市的天气。",
-      "parameters": {"type": "object",
-                     "properties": {"city": {"type": "string", "description": "..."}},
-                     "required": ["city"]}}}
-]
-```
+### 3.2 恢复大 ToolResult
 
-### 3.2 OpenAI SSE 流的 chunk 形状
-
-来自探针 `scripts/probe_dashscope_tool_stream.py` 的真实测量结果——**标准分片形态**：
+checkpoint 不复制大结果正文，而是保存 `tool_execution_id`引用。Adapter 恢复时扫描全部历史位置，通过：
 
 ```text
-[并行工具调用 case：parallel_tools]
-
-chunk #001  tool_call idx=0  id='call_abc123…'  name='calculator'  arguments=''
-chunk #002  tool_call idx=0  id=None             name=None          arguments='{"exp'
-chunk #003  tool_call idx=0  id=None             name=None          arguments='ression":"1'
-chunk #004  tool_call idx=0  id=None             name=None          arguments='2*12"}'
-chunk #005  tool_call idx=1  id='call_def456…'  name='get_weather' arguments=''
-chunk #006  tool_call idx=1  id=None             name=None          arguments='{"cit'
-chunk #007  tool_call idx=1  id=None             name=None          arguments='y":"杭州"}'
-chunk #008  <no choices>  (finish_reason=None)
-chunk #009  finish_reason='tool_calls'  usage=Usage(prompt_tokens=..., completion_tokens=..., total_tokens=...)
+ToolBroker.materialize_committed_result(tool_execution_id, ...)
+  → ToolExecution ledger / Artifact authority
+  → 重建模型可见的 role=tool content
 ```
 
-**关键事实（本探针和常见 OpenAI 兼容实现观察到的形态）**：
-- `id` / `name` 通常只在首片出现，后续片为空；provider 变化时必须重跑探针验证
-- `arguments` 是**字符串分片**，必须逐片拼接
-- `index` 区分同一轮内的多个 tool call
-- `usage` 通常单独一个 chunk（无 choices），且仅在启用 `include_usage` 时返回
-- 部分厂商可能一次性吐完整 tool_call（单分片），累积器必须两种都吃
+这使跨多轮、任意位置的大结果都可恢复，而不会撑爆 checkpoint。
 
-### 3.3 上层产出的三种 StreamItem
+### 3.3 注入 Runtime 回调
 
-`llm_client.py:62-83`：
+Adapter 将以下窄能力交给 kernel：
 
-```python
-@dataclass
-class TextDelta:
-    text: str                                # 正文增量
+- `checkpoint` → 编码 current state，用 revision CAS 保存，可与 engine-owned events 同事务。
+- `prepare_tool_batch` → Broker 原子 PREPARE 完整稳定 slot 批次。
+- `run_tool_calls/execute_tool` → 只执行 Broker 绑定后的工具。
+- `control_probe` → 检查 Runtime cancel 与绝对 deadline。
+- `message_id_factory` → 基于 Run 和 model ordinal 生成稳定 model message slot。
 
-@dataclass
-class ToolCallReady:
-    call: ToolCall                           # 参数已完整、可投递的完整 tool call
+Skill UI 也使用 Native 专用 awaited sink：每个 frame 先等待 `RuntimeIO.emit` 提交，再继续下游流。
 
-@dataclass
-class TurnEnd:
-    finish_reason: Optional[str] = None      # 通常为 "tool_calls" 或 "stop"
-    usage: Optional[Usage] = None            # token 用量
+## 4. 每个 model turn 的提交顺序
 
-StreamItem = TextDelta | ToolCallReady | TurnEnd
+默认 `native_early_tool_dispatch=off` 时，一轮的生产顺序是：
+
+```text
+control probe / hard cap / proactive compact
+  → 预留 model_call_count 与 generation
+  → [同事务] MODEL_REQUEST checkpoint
+                  + OUTPUT_GENERATION_STARTED event
+  → 发起 provider stream
+  → 每个 TextDelta: await RuntimeIO.emit(text)
+  → 收到唯一显式 finish marker
+  → 校验完整 ToolCall batch
+  → MODEL_RESPONSE_COMMITTED checkpoint
+  ├─ stop + 非空正文
+  │    → COMPLETED checkpoint
+  │    → set_final_assistant(...)
+  │    → EngineOutcome.COMPLETED
+  └─ tool_calls + 完整 calls
+       → Broker PREPARE 全批 stable slots
+       → TOOL_BATCH_COMMITTED checkpoint
+       → 受控执行工具
+       → 按 call ordinal 逐个 TOOL_RESULT_COMMITTED
+       → NEXT_TURN checkpoint
+       → 下一次 model turn
 ```
 
-### 3.4 ToolCall：LLM 的调用决策（非执行结果）
+关键提交屏障是：
 
-`messages.py:24-36`：
+- `MODEL_REQUEST` 落盘之前不能请求 provider；因此崩溃不能绕过 model-call 硬上限。
+- 默认模式下，显式 finish 之前工具执行计数必须为零。
+- 完整 batch PREPARE 失败不能暴露半批 slot。
+- `TOOL_BATCH_COMMITTED` 之前不允许默认生产路径 dispatch。
+- 外部 READ_ONLY 工具可并发，但 Broker 结算、模型中的 ToolResult 顺序与 checkpoint 始终按 call ordinal 稳定。
 
-```python
-@dataclass
-class ToolCall:
-    id: str                  # provider 给的 call id（用于消息关联）
-    name: str                # 工具名，例如 "knowledge_search"
-    arguments: str = ""      # ★ 原始 JSON 字符串（不解析），保留失败可喂回模型
-    logical_key: str = ""    # native_loop 另行设置的稳定身份（用于 replay / Broker 匹配）
-```
+## 5. generation：为什么不能只有 text delta
 
----
+模型流可能在输出了部分正文后崩溃。恢复时不能把新 delta 接在旧半截正文后面，因此每次真正拉流前都建立 generation：
 
-## 4. OpenAI 流式报文的真实形状
-
-### 4.1 请求体（payload）
-
-`llm_client.py:200-212`：
-
-```python
-payload: dict[str, Any] = {
-    "model": self._model,                      # 来自 settings.llm_model（当前默认 qwen3.7-plus）
-    "messages": to_wire(messages),             # ★ 见上文 3.1 的 messages 示例
-    "stream": True,                            # ★ 必须流式
-    "temperature": 0.2,
-    "extra_body": {"enable_thinking": False},  # 关掉 Qwen 思考过程，避免混进正文流
+```json
+{
+  "message_id": "稳定的 model slot",
+  "generation_id": "本次尝试唯一 generation",
+  "supersedes_generation_id": "被取代的 generation 或 null",
+  "reason": "initial | next_turn | recovery | reactive_compact"
 }
-if tools:
-    payload["tools"] = tools                   # ★ 见上文 3.1 的 tools 示例
-if self._include_usage:
-    payload["stream_options"] = {"include_usage": True}
 ```
 
-### 4.2 流中 chunk 的 Python 对象结构
+kernel 将内部 `output_generation_started` 转为 Canonical Event `OUTPUT_GENERATION_STARTED`，SSE 投影名为 `text_start`。每个 `text` delta 必须同时带 `message_id` 和 `generation_id`。
 
-`openai` SDK 把 SSE 流解析成如下对象（`_consume` 用 `getattr` 安全读取）：
+UI 收到 `text_start` 时只清空当前回答正文，不清除工具、Skill 或计划过程卡片。最终 `assistant_message` 是权威覆盖；fresh replay 和断线续传都用同一规则重建。
 
-```python
-chunk = ChatCompletionChunk(
-    id="chatcmpl-xxx",
-    choices=[
-        Choice(
-            delta=ChoiceDelta(
-                content="我来查一下…" | None,          # 文本增量（可空）
-                tool_calls=[                           # 工具分片数组（可空）
-                    ChatCompletionChunkToolCall(
-                        index=0,                       # ★ 关键：区分第几个 tool call
-                        id="call_abc123" | None,       # 首片有，后续片 None
-                        type="function",
-                        function=Function(
-                            name="calculator" | None,      # 首片有，后续片 None
-                            arguments='{"exp'              # 字符串分片，需拼接
-                        )
-                    )
-                ]
-            ),
-            finish_reason="tool_calls" | None | "stop"
-        )
-    ],
-    usage=Usage(prompt_tokens=..., completion_tokens=..., total_tokens=...) | None  # 仅末片
-)
-```
+`message_id` 表示语义上的 model slot，`generation_id` 表示该 slot 的一次实际生成尝试。恢复 `MODEL_REQUEST` 时 message slot 不变，但 generation 必须换新。
 
-### 4.3 探针输出的真实示例
+## 6. 为什么 `await RuntimeIO.emit` 是正确性机制
 
-单工具：
+Adapter 消费 kernel 的每个 `StreamEvent` 时都直接 await RuntimeIO：
 
 ```text
-[case] single_tool  tools=True
-  #001 tool_call idx=0 type='function' id='call_abc1…' name='calculator' arguments=''
-  #002 tool_call idx=0 type=None id=None name=None arguments='{"expression":'
-  #003 tool_call idx=0 type=None id=None name=None arguments='"3*(4+5)"'
-  #004 tool_call idx=0 type=None id=None name=None arguments='}'
-  #005 finish_reason='tool_calls'
-  ---- 结论 ----
-  idx=0 fragments=4 id_at=[1] name_at=[1] arg_fragments=3
-    joined_arguments='{"expression":"3*(4+5)"}'  → json_ok type=dict
-  → 线形状：标准分片（arguments 需跨 chunk 拼接）
+provider 吐出 delta
+  → kernel yield text
+  → Adapter await io.emit
+  → Runtime 聚合/提交 OUTPUT_DELTA_COMMITTED
+  → await 返回
+  → 才能继续拉下一个 provider item
 ```
 
-并行工具：
+这是自然反压，不是性能细节。如果 Runtime 被阻塞，kernel 不能继续拉流、PREPARE、dispatch 或完成。因此“用户已看到”和“Runtime 已提交”之间不存在无界的进程内缓冲缺口。
+
+Runtime 会按时间/字节阈值聚合 delta，切换 generation、提交 checkpoint 或非 text 事件前先 flush。Adapter 还在每个 text event 后 `force_flush`，以确保下一次 kernel 推进之前本 delta 已进入权威存储。
+
+## 7. Provider 流协议：只接受显式完成
+
+### 7.1 请求形状
+
+`NativeLlmClient.stream` 构造 OpenAI-compatible payload：
+
+- `messages` 由 `Msg.to_wire` 转换。
+- `tools` 来自启动期已严格校验的 `ToolRegistry.wire_declarations()`。
+- `stream=True`，如 provider 支持则请求 usage。
+- 显式关闭 provider thinking 正文混入。
+
+provider 不支持 `stream_options` 时，只允许在尚未产出任何 item 前去掉 usage 选项重试一次。已经 emit 后绝不重试，否则会复制正文。
+
+### 7.2 `_consume` 的严格规则
+
+provider 流必须满足：
+
+- 仅一个 choice，且 choice index 只能是 0。
+- text delta 必须是字符串。
+- ToolCall fragment 必须有非负整数 index；id/name/arguments 如果出现必须是字符串。
+- ToolCall index 在结束时必须从 0 连续。
+- id/name 不能在后续 fragment 变更，完整 batch 内 id 必须唯一。
+- 必须看到一次显式 finish marker，finish 之后不能再有 choice data。
+- usage-only chunk 可用于记录 usage，但不能独自证明 turn 完成。
+
+流完成只能是下列两种语义：
+
+| finish reason | 必须搭配 | 禁止 |
+|---|---|---|
+| `stop` | 非空最终正文 | 任何 ToolCall |
+| `tool_calls` | 至少一个完整 ToolCall | 空 batch |
+
+`length`、`content_filter`、未知 reason、reason 与 batch 矛盾都是 `MODEL_PROTOCOL_INVALID`。`stop` 但正文空是 `MODEL_EMPTY_FINAL_RESPONSE`。
+
+零 chunk、只有 usage、自然 EOF、缺 finish marker 都是 `MODEL_STREAM_INCOMPLETE`。这一类是 Adapter 唯一明确转为 `RETRYABLE_FAILURE` 的流协议错误；它不会被合成为一个伪 `TurnEnd`。
+
+### 7.3 输出与参数体积限制
+
+所有大小都按 UTF-8 bytes 计算：
+
+| 边界 | 默认值 | 错误码 |
+|---|---:|---|
+| 每 generation 模型输出 | 1 MiB | `MODEL_OUTPUT_LIMIT_EXCEEDED` |
+| 每轮 ToolCall 数 | 64 | `TOOL_CALL_LIMIT_EXCEEDED` |
+| 每 Run ToolCall 数 | 256 | `TOOL_CALL_LIMIT_EXCEEDED` |
+| 单 ToolCall arguments | 64 KiB | `TOOL_ARGUMENTS_TOO_LARGE` |
+| 整批 arguments | 256 KiB | `TOOL_BATCH_TOO_LARGE` |
+| checkpoint | 2 MiB | `CHECKPOINT_TOO_LARGE` |
+
+模型调用硬上限是 `max_loop_iters + 2`，默认 10。计数在请求前的 checkpoint 中预留，崩溃不退还。
+
+## 8. 工具提前派发与工具流式展示不是一件事
+
+`native_early_tool_dispatch` 有三个值：
+
+### 8.1 `off`：生产默认
+
+- 模型流未完成时，`ToolCallReady` 不会被提前产出。
+- 收到显式 finish 后才得到完整 batch。
+- 正文仍逐 delta 流式展示。
+- 工具运行期间的 Skill/Claude Skill 进度 frame 仍实时提交。
+- 完整 batch 后，经评审的 READ_ONLY、`concurrency_safe=true`、无独占资源工具仍可受控并发。
+
+所以，关闭“提前派发”并不等于关闭正文流式输出，也不等于关闭工具运行过程的 UI 流。
+
+### 8.2 `experimental_heuristic`：显式实验模式
+
+累积器只在“已出现更高 index + 当前 arguments 可解析为 JSON object”时将前一个调用视为启发式就绪。就绪调用还必须满足：
+
+- 工具是已评审 READ_ONLY。
+- `concurrency_safe=true` 且无 `exclusive_resources`。
+- 参数通过 JSON Schema 校验。
+- 执行前先通过 Broker 建立当前 stable slot 和 ToolCall 事实。
+
+调度器使用固定 worker 数与有界 queue，`submit()` 本身会把反压传回 provider 迭代。不会为每个 call 无界 `create_task`。cancel、EOF、异常或 GeneratorExit 都必须取消并 await worker/future。
+
+一旦提前派发后 provider 又追加该 index 的 id/name/arguments fragment，立即以 `TOOL_REPLAY_MISMATCH` 失败关闭。已完成的只读执行可被浪费，但不能被重解释为另一个调用。该模式不属于默认生产可靠性承诺。
+
+### 8.3 `provider_block_complete`：未来协议位
+
+只有 provider adapter 明确声明 `tool_call_block_complete` 能力时才能使用。当前 OpenAI-compatible adapter 返回 `False`，所以 Worker 在 release 激活前就以 `EARLY_DISPATCH_CAPABILITY_UNAVAILABLE` 启动失败，kernel 内还有一层防御。
+
+## 9. ToolCall 校验失败与 Runtime 故障必须分开
+
+模型生成了完整但不可执行的 batch 时：
+
+- 工具不存在 → 对应 call 得到 `TOOL_NOT_FOUND`。
+- arguments 不是 JSON object 或不符合 schema → 对应 call 得到 `TOOL_ARGUMENTS_INVALID`。
+- 同 batch 其他 call → `TOOL_BATCH_REJECTED`。
+
+默认 `off` 模式下整批零 dispatch，kernel 生成按顺序配对的 call/result，并在 `NEXT_TURN` checkpoint 中原子保存，让模型下轮自我修正。`experimental_heuristic` 可能已逐 slot PREPARE 并执行安全 READ_ONLY 前缀；发现完整 batch 非法后会停止后续派发并 fail-closed，已完成的只读执行只能被浪费，不能被重解释成别的调用。
+
+但下列错误不能伪装成普通 ToolResult 喂回模型：
+
+- stable slot 漂移：`TOOL_REPLAY_MISMATCH`。
+- ToolResult/Evidence 契约错误。
+- stale fencing、lease loss、checkpoint CAS 冲突等 attempt ownership 故障。
+
+这些是 Runtime 控制决策，必须原样冒泡给 Worker/Coordinator，否则模型可能“绕过”权威边界后错误完成 Run。
+
+## 10. cancel、deadline 与资源清理
+
+Native 同时在两个粒度检查控制信号：
+
+1. kernel 在恢复工具、预留 model request 等安全边界调用 `control_probe`。
+2. Adapter 拉取每个 kernel event 时以短周期等待，持续检查 `remaining_ms()` 和 `is_cancelled()`。
+
+所有下游 timeout 使用同一个 Run 绝对 deadline 的剩余预算，不在每层重新起钟。任何 cancel、deadline、GeneratorExit、Adapter 异常或 ownership loss 都必须：
+
+- `aclose()` provider/kernel stream；
+- 取消并 await early scheduler worker/future；
+- 让 Broker/HTTP/Skill 子进程获得取消；
+- 不把旧 fencing attempt 的结果写成 Run 终态。
+
+Adapter 本身只返回 `EngineOutcome`，无权直接写 Run。正常 EngineOutcome 由 Coordinator 收口；cancel、deadline、recovery/reconciliation 命令则可由 Store 在权威事务中直接提交 terminal。生成器 EOF、内部 error event 或 SSE 断开都不是终态事实。
+
+## 11. Checkpoint 恢复对流式语义的影响
+
+current checkpoint 只有六个 phase：
 
 ```text
-[case] parallel_tools  tools=True
-  #001 tool_call idx=0 id='call_a1…' name='calculator' arguments=''
-  #002 tool_call idx=0 id=None name=None arguments='{"expression":"12*'
-  #003 tool_call idx=0 id=None name=None arguments='12"}'
-  #004 tool_call idx=1 id='call_d1…' name='get_weather' arguments=''
-  #005 tool_call idx=1 id=None name=None arguments='{"city":"杭州"}'
-  #006 finish_reason='tool_calls'
-  ---- 结论 ----
-  idx=0 fragments=3 id_at=[1] name_at=[1]
-  idx=1 fragments=2 id_at=[1] name_at=[1]
-  → 线形状：标准分片（arguments 需跨 chunk 拼接）
+MODEL_REQUEST
+MODEL_RESPONSE_COMMITTED
+TOOL_BATCH_COMMITTED
+TOOL_RESULT_COMMITTED
+NEXT_TURN
+COMPLETED
 ```
 
----
+与流式相关的恢复规则：
 
-## 5. 上层组装：`_build_request` + `wire_declarations`
+- `MODEL_REQUEST`：上一次 provider 流没有完整提交。保留稳定 message slot，新建 `reason=recovery` generation；已消耗 model-call 预算不退还。
+- `MODEL_RESPONSE_COMMITTED`：如果尾部是无 ToolCall 的非空 assistant，Adapter 直接写 `COMPLETED` 并指定精确 final assistant，不再请求模型。如果是 ToolCall batch，继续 PREPARE/恢复工具。
+- `TOOL_BATCH_COMMITTED` / `TOOL_RESULT_COMMITTED`：重建 attempt-local 关联，Broker 复用已提交结果，只补齐未配对后缀。
+- `NEXT_TURN`：上一批已完整配对，可预留下一个 model request。
+- `COMPLETED`：恢复精确 `final_text/message_id/generation_id`，不重放 delta、不重请求 provider。
 
-`loop.py:438-476`（`_build_request` 定义）+ `tools.py:96-97`：
+详细 phase 不变量见 checkpoint 代码与本目录的 Runtime 持久化阅读文档。
 
-```python
-# 主循环的每轮迭代
-with start_span("native.turn", KIND_TURN, iter=state.iters) as turn_span:
-    await self._maybe_proactive_compact(state)           # ① 主动压缩
-    await self._checkpoint(state, "MODEL_REQUEST")       # ② checkpoint
-    request_messages = self._build_request(state)        # ③ 组装消息视图
-    async for item in self._client.stream(
-        messages=request_messages,
-        tools=self._registry.wire_declarations() or None,  # ④ 工具面
-        allow_early_tool_dispatch=cfg.streaming_tool_exec, # ⑤ 是否提前派发
-    ):
-        ...
-```
-
-`_build_request` 给 LLM 看的"视野"：
-
-```text
-request = [
-    system: self._system,                           # 系统指令
-    *clone(messages_after_boundary(state.messages)),# 历史（compact boundary 后）
-        └─ apply_tool_result_budget(max_chars)      #    超长 tool_result 截断
-    Msg(user, PLAN_CONTINUATION_REMINDER),           # 计划续推提醒（按需）
-    Msg(user, FORCE_SUMMARY_REMINDER),               # 软收尾劝停（按需）
-]
-```
-
-**关键点**：
-- 返回**副本**（`clone`），体积治理与临时提醒只作用于本次请求，不写回历史
-- `wire_declarations()` 把所有注册工具转 OpenAI `tools` JSON Schema 列表
-- 空列表 `[] or None` 降级为 None，避免空列表在某些 provider 上校验失败
-
----
-
-## 6. 物理层：`NativeLlmClient.stream`
-
-`llm_client.py:191-272`：
-
-```python
-async def stream(
-    self, *, messages, tools=None, allow_early_tool_dispatch=True, temperature=0.2,
-) -> AsyncIterator[StreamItem]:
-    payload = {...}                          # 见 4.1
-    request_chars = _payload_chars(payload)  # 体积兜底判据用
-
-    span = open_span("native.llm", KIND_LLM, model=self._model, ...)
-    span.set_payload("messages", [m.to_wire() for m in messages])
-    status = STATUS_OK
-    try:
-        emitted = False
-        try:
-            async for item in self._consume(payload, allow_early_tool_dispatch):
-                emitted = True
-                yield _observe(span, item)          # ★ 给 span 记一笔，原样放行
-            return
-        except openai.BadRequestError as exc:
-            # 仅"上游不认 stream_options"一种情况值得降级重试
-            if emitted or not (self._include_usage and _mentions_stream_options(exc)):
-                raise self._classify(exc, request_chars) from exc
-            self._include_usage = False              # ★ 永久记住 provider 不支持
-            payload.pop("stream_options", None)
-            span.set(stream_options_downgraded=True)
-        except Exception as exc:
-            raise self._classify(exc, request_chars) from exc
-
-        # 降级重试（不带 usage）
-        try:
-            async for item in self._consume(payload, allow_early_tool_dispatch):
-                yield _observe(span, item)
-        except Exception as exc:
-            raise self._classify(exc, request_chars) from exc
-    except GeneratorExit:
-        status = STATUS_CANCELLED
-        raise
-    except BaseException as exc:
-        status = STATUS_CANCELLED if isinstance(exc, CancelledError) else STATUS_ERROR
-        ...
-        raise
-    finally:
-        close_span(span, status)
-```
-
-**关键语义**：
-- `open_span` 而非 `with start_span`：后者会把 llm span 压进 contextvar，而**流式工具执行**是在本流迭代过程中 `asyncio.create_task` 投递的——工具 span 应该挂到 turn 下，不是 llm 下
-- `stream_options` 降级只发生一次：`self._include_usage = False` 后整进程记住，避免每轮都试错
-- `emitted` 守卫：一旦吐过内容绝不重试，避免重复输出
-
----
-
-## 7. 累积器：`_ToolCallAccumulator`
-
-`llm_client.py:88-164`：
-
-```python
-@dataclass
-class _PartialCall:
-    index: int
-    id: str = ""
-    name: str = ""
-    arguments: str = ""      # ★ 逐片拼接的原始 JSON 字符串
-    emitted: bool = False
-
-    def merge(self, call_id, name, arguments):
-        if call_id and not self.id: self.id = str(call_id)       # ★ id 取首次非空
-        if name and not self.name: self.name = str(name)         # ★ name 取首次非空
-        if arguments: self.arguments += str(arguments)            # ★ arguments 持续拼接
-
-    def is_parseable(self) -> bool:
-        """参数能解析成 JSON 对象 —— 提前判定就绪的安全闸。"""
-        text = self.arguments.strip()
-        if not text: return False
-        try:
-            return isinstance(json.loads(text), dict)             # ★ 必须是 dict
-        except (TypeError, ValueError):
-            return False
-
-    def to_call(self) -> ToolCall:
-        return ToolCall(id=self.id, name=self.name, arguments=self.arguments)
-
-
-class _ToolCallAccumulator:
-    def __init__(self):
-        self._calls: dict[int, _PartialCall] = {}     # ★ 按 index 分桶
-        self._max_index: int = -1
-
-    def add(self, index, call_id, name, arguments):
-        partial = self._calls.get(index) or _PartialCall(index=index)
-        self._calls[index] = partial
-        if partial.emitted and arguments:
-            log_kv(logger, WARNING, "fragment arrived after emitted", index=index)
-        partial.merge(call_id, name, arguments)
-        self._max_index = max(self._max_index, index)
-
-    def take_ready(self, *, allow_early):              # ★ 流式派发
-        if not allow_early: return []
-        ready = []
-        for index in sorted(self._calls):
-            partial = self._calls[index]
-            if partial.emitted: continue
-            # ★ 三个条件：已出现更高 index + name 非空 + arguments 可 parse
-            if index < self._max_index and partial.name and partial.is_parseable():
-                partial.emitted = True
-                ready.append(partial.to_call())
-        return ready
-
-    def take_remaining(self):                          # ★ 流结束兜底
-        remaining = []
-        for index in sorted(self._calls):
-            partial = self._calls[index]
-            if partial.emitted: continue
-            partial.emitted = True
-            remaining.append(partial.to_call())
-        return remaining
-```
-
----
-
-## 8. 就绪判定与提前派发
-
-### 8.1 就绪的三条件
-
-```text
-partial.emitted == False
-  AND index < self._max_index         (1) 已出现更高 index
-  AND partial.name                    (2) 函数名已拿到
-  AND partial.is_parseable()          (3) arguments 能 parse 成 dict
-```
-
-**为什么需要"已出现更高 index"**：标准分片下，后续片的 arguments 会持续追加；只有看到下一个 index 的起始分片，才能确认当前 index 的 arguments 已经完整。这是"提前派发"的安全闸——半截 JSON 不能 parse 成 dict，`is_parseable()` 返回 False，不会误判就绪。
-
-### 8.2 上层如何使用 `ToolCallReady`
-
-`loop.py:200-221`：
-
-```python
-elif isinstance(item, ToolCallReady):
-    item.call.logical_key = (
-        f"native:turn:{state.iters - 1}:call:{len(ready_calls)}"
-    )                                                   # ★ 单独设置稳定身份，不覆盖 provider call id
-    ready_calls.append(item.call)                       # ★ 累积本轮
-    for ev in self._call_events(item.call):
-        yield ev                                        # ★ 翻译为 StreamEvent
-    if early_allowed and self._is_concurrency_safe(item.call):
-        turn_span.incr("early_dispatched")
-        early_tasks.append((item.call, asyncio.create_task(
-            self._execute(item.call, state),            # ★ 立刻派发执行
-        )))
-    else:
-        early_allowed = False                            # 一旦出现非安全工具，后续全推迟
-        deferred_calls.append(item.call)
-```
-
-**CC 的 `partitionToolCalls` 语义**：并发安全的前缀立刻派发，遇到第一个非安全工具后所有后续一律推迟到流结束后按批次串行执行。
-
----
-
-## 9. 异常分类与超长恢复
-
-### 9.1 异常分类：`_classify`
-
-`llm_client.py:321-350`：
-
-```python
-def _classify(self, exc, request_chars=0):
-    kind = classify_llm_error(exc)                     # ★ 共享判据
-    message = f"{type(exc).__name__}: {exc}"
-    if kind == CONTEXT_OVERFLOW:
-        return ContextOverflowError(message)
-
-    # ★ provider 无关的体积兜底判据
-    if (isinstance(exc, openai.BadRequestError)
-            and request_chars >= self._overflow_chars_threshold > 0):
-        log_kv(logger, WARNING, "unrecognized 400 with oversized request, "
-                                "treating as context overflow", ...)
-        return ContextOverflowError(message)
-
-    return NativeLlmError(message, kind)
-```
-
-**兜底判据**：400 + 请求体积 ≥ `context_window_tokens × 1.5 × 0.9` 字符，按超长处理。
-- 误判代价 = 多做一次压缩后重试（有单次守卫），远小于漏判导致恢复链路完全失效
-
-### 9.2 上层如何恢复
-
-`loop.py:226-242`：
-
-```python
-except ContextOverflowError as exc:
-    # ★ 恢复优先于失败
-    await self._cancel_tasks(early_tasks)
-    recovered = await self._reactive_compact(
-        state, already_emitted=bool(text_parts))
-    if recovered:
-        state.iters -= 1        # 这一轮没真正跑成，不计入软收尾预算
-        state.transition = T_REACTIVE_COMPACT
-        turn_span.set(transition=T_REACTIVE_COMPACT, recovered=True)
-        continue                 # ★ 重来一轮
-    ...
-```
-
----
-
-## 10. 端到端时序图
-
-### 10.1 正常并行工具调用
+## 12. 一张端到端时序图
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    participant Loop as NativeLoop.run<br/>loop.py:137
-    participant PC as _maybe_proactive_compact<br/>loop.py:348
-    participant Client as NativeLlmClient.stream<br/>llm_client.py:191
-    participant Consume as _consume<br/>llm_client.py:274
-    participant Acc as _ToolCallAccumulator<br/>llm_client.py:120
-    participant Provider as DashScope/OpenAI<br/>(SSE 流)
+    participant C as Coordinator
+    participant A as NativeLoopAdapter
+    participant K as NativeLoop kernel
+    participant R as RuntimeIO
+    participant L as NativeLlmClient
+    participant P as Provider
+    participant B as Tool Broker
 
-    Loop->>PC: ① 主动压缩
-    PC-->>Loop: done
-    Loop->>Client: ② await stream(messages, tools, allow_early=True)
-    Client->>Client: ③ 组装 payload（to_wire(messages) + wire_declarations）
-    Client->>Client: ④ open_span("native.llm")
-    Client->>Provider: ⑤ chat.completions.create(stream=True)
-    Provider-->>Client: SSE chunk stream
-
-    loop 每个 chunk
-        Client->>Consume: async for chunk in stream
-        Consume->>Consume: ⑥ 解析 choice.delta
-        alt delta.content 非空
-            Consume-->>Client: yield TextDelta(content)
-            Client-->>Loop: yield TextDelta
-            Loop-->>Loop: yield StreamEvent("text", {delta})
-        else delta.tool_calls 非空
-            Consume->>Acc: add(index, id, name, arguments)
-            Consume->>Acc: take_ready(allow_early=True)
-            alt 三个就绪条件都满足
-                Acc-->>Consume: [ToolCall]
-                Consume-->>Client: yield ToolCallReady(call)
-                Client->>Client: ⑦ _observe(span, item)
-                Client-->>Loop: yield ToolCallReady
-                Loop->>Loop: ⑧ 赋值 logical_key、ready_calls.append
-                Loop->>Loop: ⑨ yield StreamEvent("tool_call")
-                Loop->>Loop: ⑩ asyncio.create_task(_execute)（若并发安全）
-            else 未就绪
-                Acc-->>Consume: []
-            end
-        else chunk.usage 非空
-            Consume->>Consume: ⑪ 记录 usage
-        end
+    C->>A: execute(request, io)
+    A->>A: compile input / decode checkpoint
+    A->>K: run(initial_state)
+    K->>R: checkpoint MODEL_REQUEST + generation-start event
+    R-->>K: committed revision
+    K->>L: stream(messages, tools)
+    L->>P: streaming request
+    loop each text delta
+        P-->>L: chunk
+        L-->>K: TextDelta
+        K-->>A: text(message_id, generation_id)
+        A->>R: await emit + flush
+        R-->>A: committed
     end
-
-    Consume->>Acc: take_remaining()
-    Acc-->>Consume: [剩余的 ToolCall]
-    Consume-->>Client: yield ToolCallReady（每个剩余的）
-    Consume-->>Client: yield TurnEnd(finish_reason, usage)
-    Client-->>Loop: yield TurnEnd
-    Loop->>Loop: ⑫ 记录 state.last_usage
-    Client->>Client: ⑬ close_span(span, STATUS_OK)
+    P-->>L: explicit finish=tool_calls
+    L-->>K: complete ToolCalls + TurnEnd
+    K->>R: checkpoint MODEL_RESPONSE_COMMITTED
+    K->>B: atomic PREPARE complete batch
+    B-->>K: stable slots
+    K->>R: checkpoint TOOL_BATCH_COMMITTED
+    K->>B: execute prepared calls
+    B-->>K: ordinal-settled results
+    K->>R: TOOL_RESULT_COMMITTED checkpoints
+    K->>R: NEXT_TURN checkpoint
 ```
 
-### 10.2 上下文超长恢复
+## 13. 阅读代码时要带着的不变量
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Loop as NativeLoop.run
-    participant Client as NativeLlmClient.stream
-    participant Consume as _consume
-    participant Classify as _classify
-    participant Provider as DashScope/OpenAI
-    participant RC as _reactive_compact
+1. 没有显式 finish marker，就没有完整 turn。
+2. `stop` 只能对应非空最终正文；`tool_calls` 只能对应完整调用批次。
+3. 默认 `off` 下，模型 finish 前零工具执行。
+4. 每个 delta 必须经过 awaited RuntimeIO 提交边界，才能继续拉流。
+5. model request 先预留 checkpoint，工具先建 stable slot 并提交 batch，再执行。
+6. 外部执行可并发，权威结算和模型可见顺序必须稳定。
+7. generation 允许审计旧 partial，final assistant 只能指向最后一个完整、非空、无 ToolCall 的 assistant turn。
+8. cancel、deadline、lease/fencing/CAS 冲突不能被翻译成模型可修正的 ToolResult。
+9. Engine/Adapter 不能直接终态化 Run；正常 EngineOutcome 由 Coordinator 裁决，Store 的 cancel、deadline、recovery/reconciliation 命令路径保留直接终态事务。
 
-    Loop->>Client: await stream(...)
-    Client->>Provider: chat.completions.create(stream=True)
-    Provider-->>Client: 400 BadRequestError (context_length_exceeded)
-    Client->>Classify: _classify(exc, request_chars)
-    alt 关键词命中 OR 体积兜底命中
-        Classify-->>Client: ContextOverflowError
-    else
-        Classify-->>Client: NativeLlmError(other)
-        Client-->>Loop: raise NativeLlmError → Loop 报错退出
-    end
-    Client-->>Loop: raise ContextOverflowError
-    Loop->>Loop: except ContextOverflowError
-    Loop->>RC: _reactive_compact(state, already_emitted=False)
-    alt 成功
-        RC-->>Loop: True
-        Loop->>Loop: state.iters -= 1; continue
-        Note over Loop: 重来一轮（_maybe_proactive_compact 已压过，不会再压）
-    else budget 耗尽 OR 已流式输出给前端
-        RC-->>Loop: False
-        Loop->>Loop: 报错退出
-    end
-```
-
----
-
-## 11. 完整调用栈图（含源码定位）
+## 建议的实际阅读顺序
 
 ```text
-agent/engine/native_loop/engine.py
- └─ NativeLoopEngineAdapter.execute()
-     └─ NativeLoop(client=..., registry=..., system_instruction=..., config=...).run()
-
-agent/engine/native_loop/loop.py:137
- └─ NativeLoop.run()                                            ★ 主循环
-     │
-     │  每轮迭代：
-     │
-     ├─ await self._maybe_proactive_compact(state)              loop.py:173（调用处）/ 348（定义）
-     │     └─ （详见 NativeLoop上下文压缩全链路详解.md）
-     │
-     ├─ await self._checkpoint(state, "MODEL_REQUEST")          loop.py:175
-     │
-     ├─ request_messages = self._build_request(state)           loop.py:180（调用处）/ 438（定义）
-     │     ├─ clone(messages_after_boundary(state.messages))    messages.py:215
-     │     ├─ apply_tool_result_budget(live, max_chars)         messages.py:231
-     │     ├─ [Msg(system, self._system), *live]
-     │     └─ 按需追加 PLAN_CONTINUATION / FORCE_SUMMARY 提醒
-     │
-     └─ async for item in self._client.stream(                  loop.py:191
-              messages=request_messages,
-              tools=self._registry.wire_declarations() or None,  tools.py:96
-              allow_early_tool_dispatch=cfg.streaming_tool_exec,
-          ):
-          │
-          │  ★ 进入 NativeLlmClient.stream
-          │
-          └─ NativeLlmClient.stream()                            llm_client.py:191
-              ├─ payload = {                                       llm_client.py:200
-              │     "model": self._model,
-              │     "messages": to_wire(messages),
-              │     "stream": True,
-              │     "temperature": 0.2,
-              │     "extra_body": {"enable_thinking": False},
-              │     "tools": [...],                              # 如有
-              │     "stream_options": {"include_usage": True},   # 如支持
-              │   }
-              │
-              ├─ request_chars = _payload_chars(payload)           llm_client.py:216
-              ├─ span = open_span("native.llm", KIND_LLM, ...)    llm_client.py:228
-              │
-              └─ try:                                              llm_client.py:237
-                   │
-                   └─ async for item in self._consume(payload, allow_early):
-                        │
-                        └─ _consume(payload, allow_early)            llm_client.py:274
-                             ├─ accumulator = _ToolCallAccumulator()
-                             │
-                             ├─ async with await self._client.chat.completions.create(**payload) as stream:
-                             │     │
-                             │     │  ★ 物理层：OpenAI SDK 发起 HTTP 请求，拿 SSE 流
-                             │     │
-                             │     └─ async for chunk in stream:        llm_client.py:284
-                             │           │
-                             │           │  chunk 的真实形状（实测）：
-                             │           │  chunk.choices[0].delta =
-                             │           │    ChoiceDelta(
-                             │           │      content="我来查一下" | None,
-                             │           │      tool_calls=[
-                             │           │        ChatCompletionChunkToolCall(
-                             │           │          index=0,
-                             │           │          id="call_abc" | None,
-                             │           │          type="function",
-                             │           │          function=Function(
-                             │           │            name="calculator" | None,
-                             │           │            arguments='{"exp'     ← 字符串分片
-                             │           │          )
-                             │           │        )
-                             │           │      ]
-                             │           │    )
-                             │           │
-                             │           ├─ chunk.usage 非空 → 记录 usage      llm_client.py:285
-                             │           ├─ delta.content 非空：
-                             │           │     yield TextDelta(content)        llm_client.py:303
-                             │           └─ delta.tool_calls 非空：
-                             │                 for raw in delta.tool_calls:
-                             │                     accumulator.add(            llm_client.py:308
-                             │                         0 if raw.index is None else int(raw.index),
-                             │                         getattr(raw, "id", None),
-                             │                         raw.function.name,
-                             │                         raw.function.arguments,
-                             │                     )
-                             │                 for call in accumulator.take_ready(allow_early=...):
-                             │                     yield ToolCallReady(call)    llm_client.py:314
-                             │
-                             ├─ for call in accumulator.take_remaining():       llm_client.py:317
-                             │       yield ToolCallReady(call)
-                             └─ yield TurnEnd(finish_reason, usage)             llm_client.py:319
-                             │
-                             │  ★ 回到 NativeLlmClient.stream
-                             │
-                             └─ yield _observe(span, item)                    llm_client.py:240
-                                   │
-                                   │  _observe 给 span 记一笔，原样放行
-                                   │  TextDelta → span.incr("text_chars", len)
-                                   │  ToolCallReady → span.append("tool_calls", name)
-                                   │  TurnEnd → span.set(finish_reason, tokens...)
-                                   │
-                                   └─ → yield 给上层 NativeLoop.run
-          
-          │  ★ 回到 NativeLoop.run 的 async for item 分支
-          │
-          ├─ if isinstance(item, TextDelta):                    loop.py:197
-          │     text_parts.append(item.text)
-          │     yield StreamEvent("text", {"delta": item.text})
-          │
-          ├─ elif isinstance(item, ToolCallReady):              loop.py:200
-          │     item.call.logical_key = "native:turn:N:call:M"  loop.py:205
-          │     ready_calls.append(item.call)
-          │     for ev in self._call_events(item.call):         loop.py:548
-          │         yield ev
-          │     if early_allowed and self._is_concurrency_safe(item.call):
-          │         early_tasks.append((item.call, asyncio.create_task(
-          │             self._execute(item.call, state),        loop.py:217（调用处）/ 520（定义）
-          │         )))
-          │     else:
-          │         early_allowed = False
-          │         deferred_calls.append(item.call)
-          │
-          └─ elif isinstance(item, TurnEnd):                    loop.py:222
-                finish_reason = item.finish_reason
-                state.last_usage = item.usage                   # ★ 给下轮压缩阈值用
-
-     │
-     │  ★ 流结束后，工具执行与续推
-     │
-     ├─ await 所有 early_tasks
-     ├─ 串行执行 deferred_calls（如 cfg.streaming_tool_exec 关掉或非全并发安全）
-     ├─ 检查是否有 tool_calls → 有则 continue（下一轮）
-     └─ 无 tool_calls → return（循环结束）
+agent/runtime/ports/engine.py
+  → agent/engine/native_loop/engine.py
+  → agent/engine/native_loop/loop.py
+  → agent/engine/native_loop/llm_client.py
+  → agent/engine/native_loop/checkpoint.py
+  → agent/runtime/adapters/brokered_tools.py
+  → agent/runtime/application/events.py
 ```
 
----
-
-## 12. 关键不变量
-
-### 12.1 协议层
-
-| 不变量 | 含义 |
-|---|---|
-| **id / name 取首次非空** | 标准分片下它们只在首片出现，后续片的空值不能把已拿到的值覆盖掉 |
-| **arguments 持续拼接** | 字符串分片必须累加，直到能 parse 成 dict |
-| **index 区分多个 tool call** | 同一轮内并行多个 tool call 时，靠 `index` 分桶 |
-| **usage 通常在末片** | 无 choices 的 chunk 上才出现，且需 `stream_options.include_usage=True` |
-| **arguments 保持原始字符串** | 解析失败要能喂回模型，提前 parse 会把错误变成异常 |
-
-### 12.2 流式派发层
-
-| 不变量 | 含义 |
-|---|---|
-| **三个就绪条件** | 已出现更高 index + name 非空 + arguments 可 parse 成 dict |
-| **一旦误判已派发，后续分片告警** | `fragment arrived after emitted` 日志 |
-| **并发前缀 + 顺序其余** | CC `partitionToolCalls` 语义：安全前缀立即派发，首个非安全后全推迟 |
-| **logical_key 稳定** | `native:turn:N:call:M`，attempt 重放落同一 ToolExecution |
-
-### 12.3 异常与恢复层
-
-| 不变量 | 含义 |
-|---|---|
-| **emitted 守卫** | 一旦吐过内容绝不重试 stream_options 降级，避免重复输出 |
-| **stream_options 单次降级** | `_include_usage = False` 整进程记住，避免每轮都试错 |
-| **ContextOverflowError 单独类型** | 触发压缩后重来一轮，而不是直接失败 |
-| **体积兜底** | 400 + 请求体积逼近窗口 → 按超长处理，避免关键词漏判 |
-| **reactive 单次守卫** | `max_reactive_compacts=1` 防死循环 |
-
-### 12.4 诚实边界
-
-- **provider 切换需重跑探针**：`scripts/probe_dashscope_tool_stream.py` 的结论只对实际打到的那个 provider 成立，换 provider 必须重跑。
-- **字符估算有误差**：provider 不支持 `include_usage` 时，compact 阈值只能用字符估算，日志标 `estimated=true`。
-- **Arguments 不 parse**：`ToolCall.arguments` 是字符串，由 `executor.parse_arguments()` 在工具执行前解析，失败时喂回模型。
-- **provider 无关的体积兜底**：关键词漏判时，`_classify` 还有体积兜底判据，但**只对请求体积已逼近窗口的情况成立**。
-
----
-
-## 参考阅读
-
-- `agent/engine/native_loop/llm_client.py` —— 流式客户端 + 累积器 + 异常分类
-- `agent/engine/native_loop/loop.py` —— 主循环 + `_build_request` + `_call_events`
-- `agent/engine/native_loop/messages.py` —— 消息模型 + `to_wire` 协议转换
-- `agent/engine/native_loop/tools.py` —— `ToolRegistry.wire_declarations()`
-- `agent/engine/native_loop/executor.py` —— 工具执行 + `parse_arguments`
-- `scripts/probe_dashscope_tool_stream.py` —— 真实 chunk 形状探针（换 provider 必跑）
-- `agent/llm/exceptions.py` —— 共享异常分类 + `CONTEXT_OVERFLOW` 关键词
-- [NativeLoop上下文压缩全链路详解.md](./NativeLoop上下文压缩全链路详解.md) —— 上游压缩机制
+这个顺序先看权威边界，再看算法细节，更容易理解为什么 Native 的流式实现不是“边收 token 边扔进队列”这么简单。

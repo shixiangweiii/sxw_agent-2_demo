@@ -10,7 +10,6 @@ Skill discovery makes an explicit, auditable source registry safer.
 from __future__ import annotations
 
 import hashlib
-import inspect
 from collections.abc import Iterable, Mapping
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path, PurePosixPath
@@ -21,6 +20,7 @@ from agent.runtime.domain.models import (
     ReleaseManifest,
     sha256_json,
 )
+from common.sqlite_schema import schema_digest
 
 _ROOT = Path(__file__).resolve().parents[3]
 _SOURCE_DIGEST_VERSION = b"sxw-release-source-v2\0"
@@ -64,13 +64,51 @@ _INTEGRATION_SOURCES = (
 
 _DEPENDENCY_SOURCES = ("requirements.txt",)
 
+# Release identity covers the project's explicit runtime distributions, not an
+# environment-wide ``pip freeze``.  The latter contains platform-dependent
+# transitive packages (for example uvloop on only some hosts) and would make an
+# otherwise equivalent release depend on unrelated machine state.  Keep this
+# registry in one-to-one sync with the exact direct pins in requirements.txt.
+_RUNTIME_DISTRIBUTIONS: tuple[tuple[str, str], ...] = (
+    ("google_adk", "google-adk"),
+    ("a2a_sdk", "a2a-sdk"),
+    ("litellm", "litellm"),
+    ("google_genai", "google-genai"),
+    ("fastapi", "fastapi"),
+    ("starlette", "starlette"),
+    ("uvicorn", "uvicorn"),
+    ("python_multipart", "python-multipart"),
+    ("aiosqlite", "aiosqlite"),
+    ("httpx", "httpx"),
+    ("pydantic", "pydantic"),
+    ("pydantic_settings", "pydantic-settings"),
+    ("python_dotenv", "python-dotenv"),
+    ("pyyaml", "PyYAML"),
+    ("jsonschema", "jsonschema"),
+    ("openai", "openai"),
+    ("numpy", "numpy"),
+    ("rank_bm25", "rank-bm25"),
+    ("jieba", "jieba"),
+)
+
 _SEMANTIC_SETTING_NAMES = (
     "llm_model",
     "llm_base_url",
+    "embedding_model",
     "max_loop_iters",
     "sub_agent_engine",
-    "native_streaming_tool_exec",
+    "native_early_tool_dispatch",
     "native_max_tool_concurrency",
+    "native_max_tool_calls_per_turn",
+    "native_max_tool_calls_per_run",
+    "native_max_tool_argument_bytes",
+    "native_max_tool_batch_argument_bytes",
+    "native_max_model_output_bytes",
+    "native_max_checkpoint_bytes",
+    "native_max_tool_catalog_bytes",
+    "native_max_skill_event_bytes",
+    "native_max_skill_events_per_run",
+    "native_max_skill_event_bytes_per_run",
     "native_tool_result_max_chars",
     "context_window_tokens",
     "compact_buffer_tokens",
@@ -87,8 +125,10 @@ _SEMANTIC_SETTING_NAMES = (
     "skill_result_max_chars",
     "runtime_event_flush_ms",
     "runtime_event_flush_bytes",
+    "runtime_worker_concurrency",
     "runtime_lease_seconds",
     "runtime_lease_renew_seconds",
+    "runtime_default_deadline_seconds",
 )
 
 _IGNORED_DIRECTORY_NAMES = frozenset({
@@ -114,7 +154,7 @@ def release_source_specs(engine: EngineName) -> dict[str, tuple[str, ...]]:
     return {
         "engine_source": _ENGINE_SOURCES[engine],
         "shared_agent": _SHARED_AGENT_SOURCES,
-        "runtime_contract": _RUNTIME_SOURCES,
+        "runtime_source": _RUNTIME_SOURCES,
         "skill_a2a_integrations": _INTEGRATION_SOURCES,
         "dependency_lock": _DEPENDENCY_SOURCES,
     }
@@ -208,103 +248,42 @@ def release_semantic_config(settings: Any, engine: EngineName) -> dict[str, Any]
     return values
 
 
-def tool_catalog_snapshot(tools: Iterable[Any]) -> list[dict[str, Any]]:
-    """Serialize the actual post-discovery Worker tool surface.
-
-    Local source hashing covers implementation.  This snapshot additionally
-    pins remote Skill schemas, A2A card locations/descriptions, Claude Skill
-    frontmatter, and tool order as they were loaded at Worker startup.
-    """
-
-    snapshot: list[dict[str, Any]] = []
-    for tool in tools:
-        is_function = inspect.isfunction(tool) or inspect.ismethod(tool)
-        entry: dict[str, Any] = {
-            "name": (
-                getattr(tool, "name", None)
-                or getattr(tool, "__name__", None)
-                or type(tool).__name__
-            ),
-            "implementation": (
-                f"{getattr(tool, '__module__', type(tool).__module__)}."
-                f"{getattr(tool, '__qualname__', type(tool).__qualname__)}"
-            ),
-            "description": (
-                getattr(tool, "description", None)
-                or inspect.getdoc(tool)
-                or ""
-            ),
-        }
-        if is_function:
-            entry["signature"] = str(inspect.signature(tool))
-        declaration_loader = getattr(tool, "_get_declaration", None)
-        if callable(declaration_loader):
-            entry["declaration"] = _to_json_value(declaration_loader())
-
-        metadata: dict[str, Any] = {}
-        for attribute in (
-            "_skill_id",
-            "_tool_name",
-            "_raw_schema",
-            "concurrency_safe",
-            "exclusive_resources",
-        ):
-            if hasattr(tool, attribute):
-                metadata[attribute.lstrip("_")] = _to_json_value(
-                    getattr(tool, attribute)
-                )
-        skill = getattr(tool, "_skill", None)
-        if skill is not None:
-            metadata["claude_skill"] = {
-                key: _to_json_value(getattr(skill, key))
-                for key in (
-                    "skill_id",
-                    "name",
-                    "description",
-                    "parallel_safe",
-                    "exclusive_resources",
-                )
-            }
-        agent = getattr(tool, "agent", None)
-        if agent is not None:
-            metadata["agent"] = {
-                "implementation": f"{type(agent).__module__}.{type(agent).__qualname__}",
-                "name": getattr(agent, "name", None),
-                "description": getattr(agent, "description", None),
-                "agent_card_source": getattr(agent, "_agent_card_source", None),
-                "agent_card": _to_json_value(getattr(agent, "_agent_card", None)),
-            }
-        if metadata:
-            entry["metadata"] = metadata
-        snapshot.append(entry)
-    return snapshot
-
-
-def tool_catalog_digest(tools: Iterable[Any]) -> str:
-    return sha256_json(tool_catalog_snapshot(tools))
-
-
 def build_release_manifest(
     engine: EngineName,
     *,
     root: str | Path = _ROOT,
-    semantic_config: Mapping[str, Any] | None = None,
-    loaded_tool_catalog_sha256: str | None = None,
+    semantic_config: Mapping[str, Any],
+    loaded_tool_catalog_sha256: str,
 ) -> ReleaseManifest:
+    if len(loaded_tool_catalog_sha256) != 64 or any(
+        char not in "0123456789abcdef" for char in loaded_tool_catalog_sha256
+    ):
+        raise ValueError("loaded ToolCatalog digest must be lowercase SHA-256")
     paths = release_source_paths(engine, root=root)
     components = {
         f"{group}_sha256": source_digest(root, group_paths)
         for group, group_paths in paths.items()
     }
+    schema_path = Path(root).resolve() / "agent/runtime/adapters/sqlite/schema.sql"
+    model_provider_policy = {
+        key: semantic_config[key]
+        for key in ("llm_model", "llm_base_url")
+        if key in semantic_config
+    }
     components.update({
-        "semantic_config_sha256": sha256_json(dict(semantic_config or {})),
-        "loaded_tool_catalog_sha256": (
-            loaded_tool_catalog_sha256 or sha256_json([])
-        ),
-        "google_adk": _installed_version("google-adk", "2.6.2"),
-        "a2a_sdk": _installed_version("a2a-sdk", "1.1.2"),
-        "litellm": _installed_version("litellm", "unknown"),
-        "google_genai": _installed_version("google-genai", "unknown"),
+        "runtime_schema_digest": schema_digest(schema_path.read_bytes()),
+        "semantic_config_sha256": sha256_json(dict(semantic_config)),
+        "model_provider_policy_sha256": sha256_json(model_provider_policy),
+        "checkpoint_codec_sha256": sha256_json({
+            "engine": engine,
+            "engine_source_sha256": components["engine_source_sha256"],
+            "runtime_source_sha256": components["runtime_source_sha256"],
+        }),
+        "loaded_tool_catalog_sha256": loaded_tool_catalog_sha256,
+    })
+    components.update({
+        f"installed_dependency_{component}": _installed_version(distribution)
+        for component, distribution in _RUNTIME_DISTRIBUTIONS
     })
     return ReleaseManifest(engine=engine, components=components)
 
@@ -326,37 +305,11 @@ def _include_file(path: Path, root: Path) -> bool:
     return path.suffix.lower() not in _IGNORED_FILE_SUFFIXES
 
 
-def _installed_version(distribution: str, fallback: str) -> str:
+def _installed_version(distribution: str) -> str:
     try:
         return version(distribution)
-    except PackageNotFoundError:
-        return fallback
-
-
-def _to_json_value(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    model_dump = getattr(value, "model_dump", None)
-    if callable(model_dump):
-        return _to_json_value(model_dump(mode="json", exclude_none=True))
-    if isinstance(value, Mapping):
-        return {
-            str(key): _to_json_value(item)
-            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
-        }
-    if isinstance(value, (list, tuple)):
-        return [_to_json_value(item) for item in value]
-    if isinstance(value, (set, frozenset)):
-        return sorted((_to_json_value(item) for item in value), key=repr)
-    enum_value = getattr(value, "value", None)
-    if isinstance(enum_value, (str, int, float, bool)):
-        return enum_value
-    if hasattr(value, "__dict__"):
-        public = {
-            key: item
-            for key, item in vars(value).items()
-            if not key.startswith("_")
-        }
-        if public:
-            return _to_json_value(public)
-    return str(value)
+    except PackageNotFoundError as exc:
+        raise RuntimeError(
+            "RELEASE_DEPENDENCY_METADATA_MISSING: "
+            f"installed distribution metadata is unavailable for {distribution}"
+        ) from exc

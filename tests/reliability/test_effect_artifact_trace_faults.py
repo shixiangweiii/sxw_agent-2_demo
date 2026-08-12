@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.reliability.support.runtime_releases import activate_test_release
+
 import asyncio
 import hashlib
 import json
@@ -20,7 +22,7 @@ from agent.engine.native_loop.executor import execute_one
 from agent.engine.native_loop.messages import ToolCall
 from agent.engine.native_loop.tools import ToolRegistry, ToolSpec
 from agent.runtime.adapters.filesystem_artifact import FilesystemArtifactStore
-from agent.runtime.adapters.legacy_engines import LegacyEngineAdapter
+from agent.runtime.adapters.adk_engines import AdkEngineAdapter
 from agent.runtime.adapters.sqlite import RuntimeDatabase, SqliteRuntimeStore
 from agent.runtime.api.artifacts import router as artifact_router
 from agent.runtime.application.admission import AdmissionService, CreateRunInput
@@ -53,9 +55,8 @@ async def _running_parent(tmp_path: Path):
     clock = FakeClock()
     store = SqliteRuntimeStore(RuntimeDatabase(tmp_path / "runtime.db"))
     await store.initialize()
-    await store.register_release(
+    await activate_test_release(store,
         ReleaseManifest(engine="native_loop", components={"fault-boundary": "v1"}),
-        activate=True,
     )
     run = (
         await AdmissionService(
@@ -75,6 +76,7 @@ async def _running_parent(tmp_path: Path):
         )
     ).run
     claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="fault-worker",
         lease_ms=30_000,
         now_ms=clock.now_ms(),
@@ -335,6 +337,7 @@ async def test_fi_05_kill_while_read_only_executor_is_running_recovers_once(
     clock.value += 30_001
     assert await store.recover_expired(now_ms=clock.now_ms()) == 1
     replacement_claim = await store.claim_next(
+        release_map=await store.active_releases(),
         worker_id="replacement-worker",
         lease_ms=30_000,
         now_ms=clock.now_ms(),
@@ -447,8 +450,8 @@ async def test_rel_22_tampered_range_and_model_image_attachment_are_both_rejecte
     assert ranged.status_code == 409
     assert ranged.json()["error"]["code"] == "ARTIFACT_INTEGRITY_ERROR"
 
-    adapter = LegacyEngineAdapter(
-        engine="native_loop",
+    adapter = AdkEngineAdapter(
+        engine="agent_loop",
         context=None,
         release_fingerprint="test-release",
         artifact_store=artifacts,

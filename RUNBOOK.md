@@ -55,7 +55,6 @@ cp .env.example .env
 |---|---|---|
 | `RUNTIME_DB_PATH` | `local_storage/runtime/runtime.db` | Runtime 唯一持久化事实源 |
 | `ARTIFACT_ROOT` | `local_storage/artifacts` | SHA-256 CAS 根目录 |
-| `DEMO_EFFECTS_DB_PATH` | `local_storage/demo_effects/effects.db` | 模拟外部副作用系统，故意独立于 Runtime |
 | `RUNTIME_WORKER_ID` | `runtime-worker-local` | heartbeat/lease owner 标识 |
 | `RUNTIME_WORKER_CONCURRENCY` | `4` | 单 Worker 进程内并发 Activity 上限 |
 | `RUNTIME_WORKER_POLL_MS` | `250` | claim/maintenance 扫描间隔 |
@@ -71,7 +70,7 @@ cp .env.example .env
 | `RUNTIME_ARTIFACT_CLEANUP_INTERVAL_SECONDS` | `3600` | Worker 扫描 Artifact orphan 的间隔 |
 | `RUNTIME_ARTIFACT_ORPHAN_AGE_HOURS` | `24` | 无 metadata 引用 blob 的最短保留时间 |
 
-每个 Run 在 JSON 中必填 `engine`，不通过启动配置选择。Worker 启动时同时注册三种 engine 的 immutable release；API 没找到目标 active release 时拒绝 admission。
+每个 Run 在 JSON 中必填 `engine`，不通过启动配置选择。Worker 先完成 strict ToolCatalog，再计算并在一个事务中注册/激活三种 engine 的 immutable release。存在不同 fingerprint 的非终态 Run 时启动失败 `ACTIVE_RUNS_BLOCK_RELEASE_ACTIVATION`；API 没找到目标 active release 时拒绝 admission。
 
 ### 3.3 引擎、Skill 与沙箱
 
@@ -79,8 +78,18 @@ cp .env.example .env
 |---|---|---|
 | `MAX_LOOP_ITERS` | `8` | loop 软收尾轮次；硬上限为该值 + 2 |
 | `SUB_AGENT_ENGINE` | `auto` | `auto` 跟随当前 Run；或 `adk` / `native`；远端 A2A 不受影响 |
-| `NATIVE_STREAMING_TOOL_EXEC` | `true` | native 流式 Tool 提前执行安全阀 |
-| `NATIVE_MAX_TOOL_CONCURRENCY` | `10` | native 只读并发批次上限 |
+| `NATIVE_EARLY_TOOL_DISPATCH` | `off` | `off / experimental_heuristic / provider_block_complete`；当前生产保证只覆盖 `off` |
+| `NATIVE_MAX_TOOL_CONCURRENCY` | `10` | 完整 batch 后安全只读工具并发上限 |
+| `NATIVE_MAX_TOOL_CALLS_PER_TURN` | `64` | 单轮 ToolCall 硬上限 |
+| `NATIVE_MAX_TOOL_CALLS_PER_RUN` | `256` | 单 Run ToolCall 硬上限 |
+| `NATIVE_MAX_TOOL_ARGUMENT_BYTES` | `65536` | 单调用参数 UTF-8 bytes 上限 |
+| `NATIVE_MAX_TOOL_BATCH_ARGUMENT_BYTES` | `262144` | 单 batch 参数 UTF-8 bytes 上限 |
+| `NATIVE_MAX_MODEL_OUTPUT_BYTES` | `1048576` | 每 generation 模型输出上限 |
+| `NATIVE_MAX_CHECKPOINT_BYTES` | `2097152` | strict checkpoint 上限 |
+| `NATIVE_MAX_TOOL_CATALOG_BYTES` | `1048576` | 最终工具目录上限 |
+| `NATIVE_MAX_SKILL_EVENT_BYTES` | `65536` | 单 Skill UI event 上限 |
+| `NATIVE_MAX_SKILL_EVENTS_PER_RUN` | `2000` | 单 Run Skill UI event 数上限 |
+| `NATIVE_MAX_SKILL_EVENT_BYTES_PER_RUN` | `8388608` | 单 Run Skill UI 总字节上限 |
 | `NATIVE_TOOL_RESULT_MAX_CHARS` | `8000` | 进模型的单条 ToolResult 上限 |
 | `CONTEXT_WINDOW_TOKENS` | `128000` | native 上下文窗口估计 |
 | `COMPACT_BUFFER_TOKENS` | `13000` | compact buffer |
@@ -107,7 +116,7 @@ cp .env.example .env
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `TRACE_ENABLED` | `true` | 诊断轨迹开关；关闭不影响恢复 |
-| `TRACE_PAYLOAD_LEVEL` | `full` | `none / summary / full`；full 是本 demo 调试取向 |
+| `TRACE_PAYLOAD_LEVEL` | `summary` | `none / summary / full`；full 仅用于受控本机诊断 |
 | `TRACE_DIR` | `local_storage/traces` | 本机诊断目录 |
 | `TRACE_MAX_FIELD_CHARS` | `20000` | 单字段限制 |
 | `TRACE_RETENTION_DAYS` | `7` | `0` 表示不自动清理 |
@@ -122,6 +131,8 @@ cp .env.example .env
 关闭 tracing 时两者都返回 503 而不是空结果——空列表会被误读成"没有轨迹"。
 
 **Trace Console**（<http://127.0.0.1:8000/trace-ui/>）：左侧按日期/引擎/状态/子串浏览，中间是瀑布图与 Span 树，右侧展开单个 Span 的属性、payload 与事件时间线。默认按 `summary` 取 payload，避免把原始提问与完整模型输入整页铺开；需要原文再切 `full`。可开自动刷新观察进行中的轨迹（根 span 收口前显示为「进行中」）。
+
+`full` 会保留非敏感用户原文、模型 messages 与工具 payload，不得随评测报告分发。所有级别都会先对结构化敏感键和嵌套 JSON 字符串中的 `password/token/api_key` 等字段脱敏，并把图片、二进制和 Artifact-backed 大结果替换为摘要；但无结构的自由文本无法可靠推断秘密，开启 `full` 前仍须确认数据边界。
 
 关联键的来源固定为 CreateRun 那一刻：请求带 `x-trace-id` 就用它，没带则由 `TraceMiddleware` 生成，并在响应头 `x-trace-id` 里回显。该值随 Run 持久化（`runs.trace_id`），Worker 执行时再绑定回来——API 与 Worker 是两个进程，不落库就接不上（见 ADR-0007）。所以：
 
@@ -164,6 +175,8 @@ $PY -m uvicorn agent.main:app       --port 8000
 
 Worker 应先于 API admission 可用；若 API 先起，`GET /healthz` 的 `active_releases` 为空，CreateRun 会返回 `503 NO_ACTIVE_RELEASE`，直到 Worker 完成注册。
 
+Worker 启动顺序固定为：加载工具源 → 构造/严格校验最终 ToolCatalog → 计算 release → 创建 Adapter → 原子激活三 release。Skill/A2A 这类可选下游在连接层不可用时仍可以空目录 best-effort 启动；但只要目录已成功返回，重名、缺 manifest、非法 Draft 2020-12 object schema 或适配失败都会阻止启动，不跳过单个条目。
+
 ### 健康检查
 
 ```bash
@@ -177,9 +190,11 @@ curl -sS http://127.0.0.1:8300/.well-known/agent-card.json
 - ARAG 应显示 `document_authority=sqlite` 及 projection generation/chunk 数；
 - Worker 没有 HTTP 端口，通过日志和 `runtime_workers` 的新鲜 `ACTIVE` heartbeat/release map 观察，Run 恢复仍以 Activity lease 为准。
 
-## 6. 首次 R4 初始化或重置
+## 6. Current schema 初始化或重置
 
-不支持把旧本地 Session、旧向量文件或旧对话迁入新 schema。需要干净初始化时，先停全部进程，再把整个运行目录移走留作本机备份：
+Runtime 和 ARAG 各只接受一份 current `schema.sql`。空库在一个 `BEGIN IMMEDIATE` 内创建全表并写入 `schema_meta(id, schema_digest, created_at)`；非空库必须与完整 schema 文件字节的 SHA-256 完全一致，否则启动失败 `CURRENT_SCHEMA_MISMATCH`。没有 migration、`ALTER` 路径或 checkpoint upgrader。
+
+不支持把旧本地 Session、旧向量文件、旧 checkpoint 或旧对话迁入 current schema。需要干净初始化时，先停全部进程，再把整个运行目录移走留作本机备份：
 
 ```bash
 [ ! -e local_storage ] || mv local_storage "local_storage.pre-r4.$(date +%Y%m%d-%H%M%S)"
@@ -228,7 +243,7 @@ curl -sS http://127.0.0.1:8000/api/v1/runs/run_xxx
 
 关注：`status`、`revision`、`current_activity_id`、`pending_input`、`terminal`、`last_seq`、`release_fingerprint` 和绝对 `deadline_at`。
 
-终态：`SUCCEEDED / FAILED / CANCELLED / TIMED_OUT / REJECTED / INCOMPATIBLE_RELEASE`。
+终态：`SUCCEEDED / FAILED / CANCELLED / TIMED_OUT / REJECTED`。release 不匹配的 Worker 无权 claim，不会制造额外终态。
 
 ### 7.3 committed SSE replay/tail
 
@@ -392,39 +407,42 @@ curl -sS -X POST http://127.0.0.1:8100/v1/retrieve \
 
 进程还会周期校验 active embedding 的 model、维度和 checksum。缺失/损坏时先保留 BM25 并标记 `DEGRADED`，随后在事务外重新 embedding；结果只有在 active source digest 仍一致时才原子发布，失败按指数退避继续修复。
 
-## 10. native 恢复与长任务可靠性演示
+## 10. Native direct 恢复与工具流
 
-### 10.1 通用 kernel checkpoint
+### 10.1 唯一 current checkpoint
 
-普通 `engine=native_loop` Run 使用 `native-kernel-v1`，在以下边界提交 checkpoint：
+`NativeLoopAdapter` 直接消费 `RuntimeIO` 并驱动 Runtime-independent kernel，不经过 ADK `ReasoningEngine`、后台 merge queue 或非权威 event route。它只读写一个 strict current checkpoint codec，phase 为：
 
 ```text
 MODEL_REQUEST
+MODEL_RESPONSE_COMMITTED
 TOOL_BATCH_COMMITTED（完整 ToolCall batch）
 TOOL_RESULT_COMMITTED（每个结果）
 NEXT_TURN
 COMPLETED
 ```
 
-Worker 在崩溃后从最后 committed 边界恢复。半个 model stream 未形成完整 checkpoint 时会重放该 model slot；已经提交的 ToolExecution 依靠稳定 slot 与 Tool Broker 复用。这里不承诺 provider token 级、逐字节相同的流重放。
+Worker 在崩溃后从最后 committed 边界恢复。checkpoint 存在却缺字段、多字段、phase/消息状态矛盾或 call/result 不配对时直接 `NATIVE_CHECKPOINT_INVALID`，不 fallback 到 canonical history。大 ToolResult 以 `LedgerToolResultRef` 保存，恢复时由 Broker/Artifact 在全部历史位置重物化。
 
-### 10.2 确定性 HITL/副作用纵切
+半个 model stream 中断时会创建新 generation 重做该 model slot；SSE `text_start` 告诉客户端只重置回答正文，不清工具/Skill 过程卡片。已经提交的 ToolExecution 依靠稳定 slot 与 Tool Broker 复用。这里不承诺 provider token 级、逐字节相同的流重放。
 
-创建 `engine=native_loop` 且文本以 `/reliability-demo` 开头：
+### 10.2 工具提前派发与进度流
+
+默认 `NATIVE_EARLY_TOOL_DISPATCH=off`，执行顺序是：
 
 ```text
-slow_lookup（两次 retryable failure）
+模型流显式完整结束
+→ 校验完整 ToolCall batch
 → checkpoint
-→ WAITING_INPUT
-→ approval signal
-→ 独立 effects.db 中幂等 create_demo_task
-→ 大结果 Artifact
-→ final assistant + SUCCEEDED
+→ Broker 原子 PREPARE
+→ READ_ONLY 安全工具受控并发，其他工具串行
 ```
 
-等待阶段不占 Worker slot。可以在 `WAITING_INPUT` 停掉 API/Worker再重启，然后提交 signal；稳定 signal/tool identity 防重复消费和重复副作用。
+这只关闭“模型还在生成时就开始执行工具”的时序重叠；模型正文仍流式提交，Skill/Claude Skill 执行期的 `skill_event` 仍通过 awaited RuntimeIO sink 实时提交并形成自然背压。
 
-该确定性路由建立在通用 kernel checkpoint 之上，用于展示 WAITING_INPUT 和外部幂等副作用边界；不代表两个 ADK 引擎已经具备内部 ToolCall 边界的 HITL 恢复。
+`experimental_heuristic` 保留用于可靠性实验，只可提前派发已评审的安全 READ_ONLY 工具，不在生产保证内。每个实验调用仍须先按稳定 slot PREPARE，再由固定 worker/有界队列执行；PREPARE 与结果结算都按模型 call ordinal 落盘，完整流结束后重新核验整批一致性。当前 OpenAI-compatible provider 不声明 `tool_call_block_complete` capability，因此选择 `provider_block_complete` 会在启动时报 `EARLY_DISPATCH_CAPABILITY_UNAVAILABLE`。
+
+WAITING_INPUT → signal → 幂等外部副作用 → Artifact 的确定性纵切仍在 `tests/reliability` 中验证，但生产 Worker 不装配魔法 prompt 路由；普通输入不会触发测试 Adapter。
 
 ## 11. 可靠性门禁
 
@@ -475,7 +493,9 @@ ARAG-down pass 需要手动停 :8100 后单独执行。真实 LLM smoke/行为�
 | A2A 调用失败 | 错误作为 ToolResult 返回模型 | 检查 agent-card 与 :8300 |
 | projection 损坏/缺 embedding | 检索标记 `DEGRADED`，BM25 继续可用，后台自动重嵌入 | 检查 ARAG health/repair 日志与 embedding provider；通常无需手工改库 |
 | Artifact 被篡改 | 所有读取拒绝 | 从可信源重新上传，不要覆盖既有 digest 身份 |
-| release 不匹配 | Run=`INCOMPATIBLE_RELEASE` | 使用匹配 release 或明确清理开发数据 |
+| 新 release 激活被拒绝 | 存在不同 fingerprint 的非终态 Run | 等现有 Run 终态或在停服后显式重建开发数据；不要使用新 release 解释旧 checkpoint |
+| Run 长期无法被 claim | 没有精确匹配 `(engine, release_fingerprint)` 的 Worker | 恢复匹配 Worker；Run 保持 pending 并最终由绝对 deadline 收口 |
+| `CURRENT_SCHEMA_MISMATCH` | 本地库与 current `schema.sql` digest 不同 | 先停所有进程，显式移走/删除对应库及 WAL/SHM 后重建；不要迁移或手改 `schema_meta` |
 | trace 写失败 | Runtime 恢复不受影响 | 单独修复权限/空间 |
 
 ## 14. 常见排障

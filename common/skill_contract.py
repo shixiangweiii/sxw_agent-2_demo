@@ -119,18 +119,18 @@ class SkillResultDTO(BaseModel):
 
 # ---------- 技能目录 ----------
 class SkillToolDef(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, strict=True, extra="forbid")
     name: str
     description: str
     input_schema: dict[str, Any] = Field(alias="inputSchema")
 
 
 class SkillDef(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, strict=True, extra="forbid")
     skill_id: str = Field(alias="skillId")
     name: str
     description: str
-    tools: list[SkillToolDef] = Field(default_factory=list)
+    tools: list[SkillToolDef]
 
 
 class SkillListRequest(BaseModel):
@@ -140,4 +140,5 @@ class SkillListRequest(BaseModel):
 
 
 class SkillListResult(BaseModel):
-    skills: list[SkillDef] = Field(default_factory=list)
+    model_config = ConfigDict(strict=True, extra="forbid")
+    skills: list[SkillDef]

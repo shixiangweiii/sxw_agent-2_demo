@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.reliability.support.runtime_releases import activate_test_release
+
 import uuid
 
 import pytest
@@ -13,9 +15,8 @@ from agent.runtime.domain.models import ReleaseManifest
 async def test_cancel_and_signal_idempotency_ids_are_scoped_to_run(tmp_path):
     store = SqliteRuntimeStore(RuntimeDatabase(tmp_path / "runtime.db"))
     await store.initialize()
-    await store.register_release(
+    await activate_test_release(store,
         ReleaseManifest(engine="native_loop", components={"test": "command-scope-v1"}),
-        activate=True,
     )
     service = AdmissionService(store)
 
@@ -54,6 +55,7 @@ async def test_cancel_and_signal_idempotency_ids_are_scoped_to_run(tmp_path):
     expected_run_ids = {wait_a.envelope.run_id, wait_b.envelope.run_id}
     for index in range(2):
         claim = await store.claim_next(
+            release_map=await store.active_releases(),
             worker_id=f"signal-worker-{index}",
             lease_ms=30_000,
             now_ms=max(wait_a.envelope.created_at, wait_b.envelope.created_at),

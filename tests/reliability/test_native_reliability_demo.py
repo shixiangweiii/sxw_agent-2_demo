@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+from tests.reliability.support.runtime_releases import activate_test_release
+
 import uuid
 
 import pytest
 
 from agent.runtime.adapters.filesystem_artifact import FilesystemArtifactStore
-from agent.runtime.adapters.native_reliability_demo import DemoEffectsStore, NativeReliabilityDemoAdapter
 from agent.runtime.adapters.sqlite import RuntimeDatabase, SqliteRuntimeStore
 from agent.runtime.application.admission import AdmissionService, CreateRunInput
 from agent.runtime.application.coordinator import EngineRegistry, RunCoordinator
 from agent.runtime.application.tool_broker import ToolBroker
 from agent.runtime.domain.models import ReleaseManifest, RunStatus, sha256_json
+from tests.reliability.support.native_reliability_demo import (
+    DemoEffectsStore,
+    NativeReliabilityDemoAdapter,
+)
 
 
 @pytest.mark.asyncio
@@ -18,8 +23,8 @@ async def test_r3_native_retry_checkpoint_signal_effect_artifact_end_to_end(tmp_
     db_path = tmp_path / "runtime.db"
     store = SqliteRuntimeStore(RuntimeDatabase(db_path))
     await store.initialize()
-    release = await store.register_release(
-        ReleaseManifest(engine="native_loop", components={"demo": "v1"}), activate=True,
+    release = await activate_test_release(store,
+        ReleaseManifest(engine="native_loop", components={"demo": "v1"}),
     )
     admitted = await AdmissionService(store).create(
         CreateRunInput(
@@ -39,6 +44,7 @@ async def test_r3_native_retry_checkpoint_signal_effect_artifact_end_to_end(tmp_
     claim = await store.claim_next(
         worker_id="worker-before-wait", lease_ms=30_000,
         now_ms=admitted.run.envelope.created_at,
+        release_map={"native_loop": release},
     )
     assert claim is not None
     assert await coordinator.execute_claim(claim, worker_id="worker-before-wait") is RunStatus.WAITING_INPUT
@@ -76,6 +82,7 @@ async def test_r3_native_retry_checkpoint_signal_effect_artifact_end_to_end(tmp_
     resumed = await restarted.claim_next(
         worker_id="worker-after-restart", lease_ms=30_000,
         now_ms=waiting.updated_at + 2,
+        release_map={"native_loop": release},
     )
     assert resumed is not None
     assert await restarted_coordinator.execute_claim(
@@ -110,4 +117,3 @@ async def test_r3_native_retry_checkpoint_signal_effect_artifact_end_to_end(tmp_
         now_ms=terminal.updated_at + 1,
     )
     assert replay.reused is True
-

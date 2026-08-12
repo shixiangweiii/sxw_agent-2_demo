@@ -1,25 +1,29 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import inspect
 import json
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Sequence
 
-from agent.runtime.domain.artifact import ArtifactPurpose
-from agent.runtime.domain.errors import RuntimeFault
+from pydantic import ValidationError
+
+from agent.runtime.application.tool_outputs import ToolResultAdapter, plain_json_output
+from agent.runtime.domain.artifact import MAX_HTTP_RANGE_BYTES, ArtifactPurpose
+from agent.runtime.domain.errors import AttemptOwnershipLost, RuntimeFault
 from agent.runtime.domain.models import (
     ToolEffectClass,
+    EvidenceSet,
+    ToolExecutionOutput,
     ToolManifest,
     ToolResultEnvelope,
     ToolResultStatus,
     canonical_json,
-    ms_to_rfc3339,
     sha256_json,
 )
 from agent.runtime.ports.artifact import ArtifactStore
 from agent.runtime.ports.clock import Clock, SystemClock
+from agent.runtime.ports.store import ToolExecutionPreparation
 
 ToolExecutor = Callable[[dict[str, Any], "ToolCallContext"], Any | Awaitable[Any]]
 ReconcileHook = Callable[["ToolCallContext"], ToolResultEnvelope | None | Awaitable[ToolResultEnvelope | None]]
@@ -50,7 +54,153 @@ class ToolCallContext:
 class _RegisteredTool:
     manifest: ToolManifest
     executor: ToolExecutor
+    result_adapter: ToolResultAdapter
     reconcile: ReconcileHook | None = None
+
+
+@dataclass(frozen=True)
+class ToolBatchCall:
+    logical_key: str
+    tool_name: str
+    arguments: dict[str, Any]
+    framework_call_id: str | None = None
+    manifest_override: ToolManifest | None = None
+
+
+@dataclass(frozen=True)
+class PreparedToolExecution:
+    tool_execution_id: str
+    logical_key: str
+    tool_name: str
+    request_digest: str
+    arguments: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _SettlementAbort:
+    kind: str
+    code: str
+    message: str
+    http_status: int = 409
+    details: dict[str, Any] | None = None
+
+    @classmethod
+    def from_error(cls, error: BaseException) -> "_SettlementAbort":
+        if isinstance(error, RuntimeFault):
+            return cls(
+                "runtime",
+                error.code,
+                error.message,
+                error.http_status,
+                error.details,
+            )
+        if isinstance(error, AttemptOwnershipLost):
+            return cls("ownership", error.code, str(error))
+        if isinstance(error, (asyncio.CancelledError, GeneratorExit)):
+            return cls("cancelled", "TOOL_BATCH_CANCELLED", "tool batch was cancelled")
+        return cls(
+            "runtime",
+            "TOOL_BATCH_SETTLEMENT_ABORTED",
+            f"tool batch settlement aborted after {type(error).__name__}",
+            500,
+        )
+
+    def raise_error(self) -> None:
+        if self.kind == "cancelled":
+            raise asyncio.CancelledError(self.message)
+        if self.kind == "ownership":
+            raise AttemptOwnershipLost(self.code, self.message)
+        raise RuntimeFault(
+            self.code,
+            self.message,
+            self.http_status,
+            dict(self.details) if self.details is not None else None,
+        )
+
+
+class ToolSettlementOrder:
+    """One-attempt gate for ordered durable settlement of a concurrent batch.
+
+    Executor work and durable ``DISPATCHED`` transitions remain concurrent.
+    Each call waits only when it reaches its first ToolResult settlement.  A
+    control failure aborts every still-waiting ordinal synchronously, so task
+    cancellation or ownership loss cannot leave a waiter orphaned.
+    """
+
+    def __init__(self, size: int) -> None:
+        if size <= 0:
+            raise ValueError("ToolSettlementOrder size must be positive")
+        loop = asyncio.get_running_loop()
+        self._signals: list[asyncio.Future[_SettlementAbort | None]] = [
+            loop.create_future() for _ in range(size)
+        ]
+        self._signals[0].set_result(None)
+        self._next = 0
+        self._abort: _SettlementAbort | None = None
+
+    def turn(self, ordinal: int) -> "ToolSettlementTurn":
+        if ordinal < 0 or ordinal >= len(self._signals):
+            raise ValueError("tool settlement ordinal is outside the batch")
+        return ToolSettlementTurn(self, ordinal)
+
+    async def _wait(self, ordinal: int) -> None:
+        if self._abort is not None:
+            self._abort.raise_error()
+        signal = await asyncio.shield(self._signals[ordinal])
+        if self._abort is not None:
+            self._abort.raise_error()
+        if signal is not None:
+            signal.raise_error()
+
+    def _complete(self, ordinal: int) -> None:
+        if self._abort is not None:
+            return
+        if ordinal != self._next:
+            raise RuntimeError("tool settlement turn completed out of order")
+        self._next += 1
+        if self._next < len(self._signals):
+            signal = self._signals[self._next]
+            if not signal.done():
+                signal.set_result(None)
+
+    def _abort_all(self, error: BaseException) -> None:
+        if self._abort is not None:
+            return
+        self._abort = _SettlementAbort.from_error(error)
+        for signal in self._signals:
+            if not signal.done():
+                signal.set_result(self._abort)
+
+
+class ToolSettlementTurn:
+    """Single ordinal token handed to one ``execute_prepared`` invocation."""
+
+    def __init__(self, order: ToolSettlementOrder, ordinal: int) -> None:
+        self._order = order
+        self._ordinal = ordinal
+        self._acquired = False
+        self._finished = False
+
+    async def acquire(self) -> None:
+        if self._finished:
+            raise RuntimeError("tool settlement turn is already finished")
+        if not self._acquired:
+            await self._order._wait(self._ordinal)
+            self._acquired = True
+
+    def complete(self) -> None:
+        if self._finished:
+            return
+        if not self._acquired:
+            raise RuntimeError("tool settlement turn completed before acquire")
+        self._order._complete(self._ordinal)
+        self._finished = True
+
+    def abort(self, error: BaseException) -> None:
+        if self._finished:
+            return
+        self._finished = True
+        self._order._abort_all(error)
 
 
 class ToolBroker:
@@ -80,6 +230,7 @@ class ToolBroker:
         manifest: ToolManifest,
         executor: ToolExecutor,
         *,
+        result_adapter: ToolResultAdapter = plain_json_output,
         reconcile: ReconcileHook | None = None,
     ) -> None:
         if manifest.effect_class is ToolEffectClass.IDEMPOTENT_EFFECT and not manifest.supports_idempotency:
@@ -88,7 +239,275 @@ class ToolBroker:
             raise ValueError(f"{manifest.name}: supports_reconcile requires a hook")
         if manifest.name in self._tools:
             raise ValueError(f"duplicate tool manifest: {manifest.name}")
-        self._tools[manifest.name] = _RegisteredTool(manifest, executor, reconcile)
+        self._tools[manifest.name] = _RegisteredTool(
+            manifest, executor, result_adapter, reconcile,
+        )
+
+    async def prepare_batch(
+        self,
+        *,
+        run_id: str,
+        parent_activity_id: str,
+        fencing_token: int,
+        calls: Sequence[ToolBatchCall],
+    ) -> tuple[PreparedToolExecution, ...]:
+        """Atomically freeze every stable ToolCall slot before dispatch."""
+
+        preparations: list[ToolExecutionPreparation] = []
+        resolved: list[tuple[ToolBatchCall, ToolManifest, str]] = []
+        for call in calls:
+            manifest = call.manifest_override
+            if manifest is None:
+                manifest = self._resolve_tool(call.tool_name).manifest
+            elif manifest.name != call.tool_name:
+                raise ValueError("manifest_override name disagrees with tool_name")
+            request_digest = sha256_json(call.arguments)
+            preparations.append(ToolExecutionPreparation(
+                logical_key=call.logical_key,
+                tool_name=call.tool_name,
+                release_digest=manifest.release_digest,
+                effect_class=manifest.effect_class.value,
+                request_digest=request_digest,
+                request=call.arguments,
+                supports_reconcile=manifest.supports_reconcile,
+                framework_call_id=call.framework_call_id,
+            ))
+            resolved.append((call, manifest, request_digest))
+        rows = await self.store.prepare_tool_execution_batch(
+            run_id=run_id,
+            parent_activity_id=parent_activity_id,
+            fencing_token=fencing_token,
+            preparations=preparations,
+            now_ms=self.clock.now_ms(),
+        )
+        return tuple(
+            PreparedToolExecution(
+                tool_execution_id=str(row["tool_execution_id"]),
+                logical_key=call.logical_key,
+                tool_name=call.tool_name,
+                request_digest=request_digest,
+                arguments=dict(call.arguments),
+            )
+            for (call, _manifest, request_digest), row in zip(resolved, rows, strict=True)
+        )
+
+    async def execute_prepared(
+        self,
+        *,
+        prepared: PreparedToolExecution,
+        parent_activity_id: str,
+        fencing_token: int,
+        deadline_at_ms: int,
+        executor_override: ToolExecutor | None = None,
+        result_adapter_override: ToolResultAdapter | None = None,
+        manifest_override: ToolManifest | None = None,
+        reconcile_override: ReconcileHook | None = None,
+        settlement_turn: ToolSettlementTurn | None = None,
+    ) -> ToolResultEnvelope:
+        """Execute one already-prepared slot, optionally settling by batch ordinal."""
+
+        try:
+            tool = self._resolve_tool(
+                prepared.tool_name,
+                manifest_override=manifest_override,
+                executor_override=executor_override,
+                result_adapter_override=result_adapter_override,
+                reconcile_override=reconcile_override,
+            )
+            execution = await self.store.get_tool_execution(prepared.tool_execution_id)
+            if (
+                execution["logical_key"] != prepared.logical_key
+                or execution["tool_name"] != prepared.tool_name
+                or execution["request_digest"] != prepared.request_digest
+                or execution["release_digest"] != tool.manifest.release_digest
+            ):
+                raise RuntimeFault(
+                    "TOOL_REPLAY_MISMATCH",
+                    "prepared ToolExecution no longer matches its frozen request",
+                    409,
+                    {"tool_execution_id": prepared.tool_execution_id},
+                )
+            result = await self._execute_ledger(
+                tool=tool,
+                execution=execution,
+                arguments=prepared.arguments,
+                parent_activity_id=parent_activity_id,
+                fencing_token=fencing_token,
+                deadline_at_ms=deadline_at_ms,
+                settlement_turn=settlement_turn,
+            )
+            if settlement_turn is not None:
+                await settlement_turn.acquire()
+                settlement_turn.complete()
+            return result
+        except BaseException as exc:
+            if settlement_turn is not None:
+                settlement_turn.abort(exc)
+            raise
+
+    async def materialize_committed_result(
+        self,
+        *,
+        tool_execution_id: str,
+        parent_activity_id: str,
+        deadline_at_ms: int,
+        manifest_override: ToolManifest | None = None,
+        executor_override: ToolExecutor | None = None,
+        result_adapter_override: ToolResultAdapter | None = None,
+    ) -> ToolResultEnvelope:
+        """Project a committed ledger result from its authoritative payload.
+
+        ``read_artifact`` is intentionally re-executed as a bounded read.  For
+        every other tool, a Broker-created large-result Artifact stores the
+        complete ToolResult envelope and is re-materialized directly from CAS;
+        the ledger preview is only a projection and must never become recovery
+        input.
+        """
+
+        execution = await self.store.get_tool_execution(tool_execution_id)
+        if execution["effect_status"] != "COMMITTED":
+            raise RuntimeFault(
+                "TOOL_RESULT_NOT_COMMITTED",
+                "ToolExecution has no committed result to materialize",
+                409,
+                {"tool_execution_id": tool_execution_id},
+            )
+        tool_name = str(execution["tool_name"])
+        if tool_name != "read_artifact":
+            ledger_result = _tool_result_from_ledger(execution)
+            document = _tool_result_document(execution)
+            full_result_ref = document.get("full_result_ref")
+            if full_result_ref is None:
+                return ledger_result
+            if (
+                not isinstance(full_result_ref, str)
+                or full_result_ref != ledger_result.result_ref
+                or full_result_ref != execution.get("result_ref")
+            ):
+                raise RuntimeFault(
+                    "TOOL_RESULT_LEDGER_MISMATCH",
+                    "full ToolResult Artifact reference disagrees with its ledger",
+                    500,
+                    {"tool_execution_id": tool_execution_id},
+                )
+            return await self._materialize_result_artifact(
+                execution=execution,
+                ledger_result=ledger_result,
+                artifact_id=full_result_ref,
+                deadline_at_ms=deadline_at_ms,
+            )
+        tool = self._resolve_tool(
+            tool_name,
+            manifest_override=manifest_override,
+            executor_override=executor_override,
+            result_adapter_override=result_adapter_override,
+        )
+        arguments = json.loads(execution["request_json"])
+        if tool.manifest.result_policy == "ARTIFACT_BOUNDED_READ":
+            return await self._materialize_committed(
+                tool, execution, arguments, parent_activity_id, deadline_at_ms,
+            )
+        return _tool_result_from_ledger(execution)
+
+    async def _materialize_result_artifact(
+        self,
+        *,
+        execution: dict[str, Any],
+        ledger_result: ToolResultEnvelope,
+        artifact_id: str,
+        deadline_at_ms: int,
+    ) -> ToolResultEnvelope:
+        metadata = await self.store.get_artifact_metadata(artifact_id)
+        if metadata.get("media_type") != "application/json":
+            raise RuntimeFault(
+                "TOOL_RESULT_CONTRACT_INVALID",
+                "full ToolResult Artifact must use application/json",
+                500,
+                {"tool_execution_id": execution["tool_execution_id"]},
+            )
+        try:
+            total_size = int(metadata["size_bytes"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeFault(
+                "TOOL_RESULT_CONTRACT_INVALID",
+                "full ToolResult Artifact metadata has an invalid size",
+                500,
+                {"tool_execution_id": execution["tool_execution_id"]},
+            ) from exc
+        if total_size <= 0:
+            raise RuntimeFault(
+                "TOOL_RESULT_CONTRACT_INVALID",
+                "full ToolResult Artifact cannot be empty",
+                500,
+                {"tool_execution_id": execution["tool_execution_id"]},
+            )
+
+        chunks: list[bytes] = []
+        offset = 0
+        while offset < total_size:
+            if self.clock.now_ms() >= deadline_at_ms:
+                raise RuntimeFault(
+                    "TOOL_MATERIALIZATION_DEADLINE_EXPIRED",
+                    "Run deadline elapsed while materializing ToolResult Artifact",
+                    409,
+                    {"tool_execution_id": execution["tool_execution_id"]},
+                )
+            end = min(total_size, offset + MAX_HTTP_RANGE_BYTES)
+            part = await self.artifact_store.read_range(
+                artifact_id,
+                start=offset,
+                end_exclusive=end,
+            )
+            if (
+                part.total_size != total_size
+                or part.start != offset
+                or part.end_exclusive != end
+            ):
+                raise RuntimeFault(
+                    "TOOL_RESULT_CONTRACT_INVALID",
+                    "full ToolResult Artifact range disagrees with metadata",
+                    500,
+                    {"tool_execution_id": execution["tool_execution_id"]},
+                )
+            chunks.append(part.data)
+            offset = end
+
+        try:
+            raw = b"".join(chunks).decode("utf-8")
+            value = json.loads(raw, parse_constant=_reject_json_constant)
+            if not isinstance(value, dict):
+                raise ValueError("ToolResult Artifact root must be an object")
+            materialized = ToolResultEnvelope.model_validate(value)
+        except (UnicodeDecodeError, ValueError, ValidationError) as exc:
+            raise RuntimeFault(
+                "TOOL_RESULT_CONTRACT_INVALID",
+                "full ToolResult Artifact does not contain a valid current envelope",
+                500,
+                {"tool_execution_id": execution["tool_execution_id"]},
+            ) from exc
+
+        if materialized.result_ref is not None:
+            raise RuntimeFault(
+                "TOOL_RESULT_CONTRACT_INVALID",
+                "full ToolResult Artifact must not recursively reference itself",
+                500,
+                {"tool_execution_id": execution["tool_execution_id"]},
+            )
+        for field_name in (
+            "status",
+            "error_code",
+            "error_message",
+            "external_object_id",
+            "pending_input",
+        ):
+            if getattr(materialized, field_name) != getattr(ledger_result, field_name):
+                raise RuntimeFault(
+                    "TOOL_RESULT_LEDGER_MISMATCH",
+                    f"full ToolResult Artifact {field_name} disagrees with its ledger",
+                    500,
+                    {"tool_execution_id": execution["tool_execution_id"]},
+                )
+        return materialized.model_copy(update={"result_ref": artifact_id})
 
     async def reconcile_only(
         self,
@@ -226,30 +645,87 @@ class ToolBroker:
         deadline_at_ms: int,
         manifest_override: ToolManifest | None = None,
         executor_override: ToolExecutor | None = None,
+        result_adapter_override: ToolResultAdapter | None = None,
         reconcile_override: ReconcileHook | None = None,
+        settlement_turn: ToolSettlementTurn | None = None,
     ) -> ToolResultEnvelope:
-        if manifest_override is not None and executor_override is not None:
-            tool = _RegisteredTool(manifest_override, executor_override, reconcile_override)
-        else:
-            try:
-                tool = self._tools[tool_name]
-            except KeyError as exc:
-                raise RuntimeFault("TOOL_NOT_REGISTERED", f"tool is not registered: {tool_name}") from exc
-        manifest = tool.manifest
-        request_digest = sha256_json(arguments)
-        execution = await self.store.prepare_tool_execution(
+        """ADK single-call wrapper over prepare+execute_prepared."""
+
+        tool = self._resolve_tool(
+            tool_name,
+            manifest_override=manifest_override,
+            executor_override=executor_override,
+            result_adapter_override=result_adapter_override,
+            reconcile_override=reconcile_override,
+        )
+        prepared = await self.prepare_batch(
             run_id=run_id,
             parent_activity_id=parent_activity_id,
             fencing_token=fencing_token,
-            logical_key=logical_key,
-            tool_name=tool_name,
-            release_digest=manifest.release_digest,
-            effect_class=manifest.effect_class,
-            request_digest=request_digest,
-            request=arguments,
-            supports_reconcile=manifest.supports_reconcile,
-            now_ms=self.clock.now_ms(),
+            calls=(ToolBatchCall(
+                logical_key=logical_key,
+                tool_name=tool_name,
+                arguments=arguments,
+                manifest_override=tool.manifest,
+            ),),
         )
+        return await self.execute_prepared(
+            prepared=prepared[0],
+            parent_activity_id=parent_activity_id,
+            fencing_token=fencing_token,
+            deadline_at_ms=deadline_at_ms,
+            manifest_override=tool.manifest,
+            executor_override=tool.executor,
+            result_adapter_override=tool.result_adapter,
+            reconcile_override=tool.reconcile,
+            settlement_turn=settlement_turn,
+        )
+
+    def _resolve_tool(
+        self,
+        tool_name: str,
+        *,
+        manifest_override: ToolManifest | None = None,
+        executor_override: ToolExecutor | None = None,
+        result_adapter_override: ToolResultAdapter | None = None,
+        reconcile_override: ReconcileHook | None = None,
+    ) -> _RegisteredTool:
+        if manifest_override is not None or executor_override is not None:
+            if manifest_override is None or executor_override is None:
+                raise ValueError("manifest_override and executor_override must be supplied together")
+            if manifest_override.name != tool_name:
+                raise ValueError("manifest_override name disagrees with tool_name")
+            return _RegisteredTool(
+                manifest_override,
+                executor_override,
+                result_adapter_override or plain_json_output,
+                reconcile_override,
+            )
+        try:
+            return self._tools[tool_name]
+        except KeyError as exc:
+            raise RuntimeFault(
+                "TOOL_NOT_REGISTERED", f"tool is not registered: {tool_name}",
+            ) from exc
+
+    async def _execute_ledger(
+        self,
+        *,
+        tool: _RegisteredTool,
+        execution: dict[str, Any],
+        arguments: dict[str, Any],
+        parent_activity_id: str,
+        fencing_token: int,
+        deadline_at_ms: int,
+        settlement_turn: ToolSettlementTurn | None,
+    ) -> ToolResultEnvelope:
+        manifest = tool.manifest
+        run_id = str(execution["run_id"])
+
+        async def settlement_boundary() -> None:
+            if settlement_turn is not None:
+                await settlement_turn.acquire()
+
         frozen_effect_class = ToolEffectClass(execution["effect_class"])
         safe_replay = (
             frozen_effect_class is ToolEffectClass.READ_ONLY
@@ -263,11 +739,15 @@ class ToolBroker:
             status = str(execution["effect_status"])
             if status == "COMMITTED":
                 if manifest.result_policy == "ARTIFACT_BOUNDED_READ":
-                    return await self._materialize_committed(
+                    result = await self._materialize_committed(
                         tool, execution, arguments, parent_activity_id, deadline_at_ms,
                     )
+                    await settlement_boundary()
+                    return result
+                await settlement_boundary()
                 return _tool_result_from_ledger(execution)
             if status == "MANUAL_REQUIRED":
+                await settlement_boundary()
                 if execution.get("result_json"):
                     return _tool_result_from_ledger(execution)
                 return ToolResultEnvelope(
@@ -280,6 +760,7 @@ class ToolBroker:
                 or not safe_replay
                 or int(execution["attempt"]) >= manifest.max_attempts
             ):
+                await settlement_boundary()
                 return _tool_result_from_ledger(execution)
 
             if status in {"DISPATCHED", "UNKNOWN", "RECONCILING"}:
@@ -294,6 +775,7 @@ class ToolBroker:
                     execution["tool_execution_id"]
                 )
                 if recovered is not None and recovered.status is ToolResultStatus.FAILURE:
+                    await settlement_boundary()
                     await self.store.settle_tool_execution(
                         tool_execution_id=execution["tool_execution_id"],
                         parent_activity_id=parent_activity_id,
@@ -314,11 +796,13 @@ class ToolBroker:
                     ToolResultStatus.SUCCESS,
                     ToolResultStatus.NO_OUTPUT,
                 }:
+                    await settlement_boundary()
                     return await self._commit_result(
                         execution, parent_activity_id, fencing_token, recovered,
                         return_full=manifest.result_policy == "ARTIFACT_BOUNDED_READ",
                     )
                 if recovered is not None and recovered.status is ToolResultStatus.UNKNOWN:
+                    await settlement_boundary()
                     execution = await self.store.settle_tool_execution(
                         tool_execution_id=execution["tool_execution_id"],
                         parent_activity_id=parent_activity_id,
@@ -334,11 +818,13 @@ class ToolBroker:
                         now_ms=self.clock.now_ms(),
                     )
                 if not safe_replay or int(execution["attempt"]) >= manifest.max_attempts:
+                    await settlement_boundary()
                     return await self._require_manual(
                         execution, parent_activity_id, fencing_token,
                     )
 
             if int(execution["attempt"]) >= manifest.max_attempts:
+                await settlement_boundary()
                 if execution.get("result_json"):
                     return _tool_result_from_ledger(execution)
                 return await self._require_manual(
@@ -380,30 +866,97 @@ class ToolBroker:
                     if inspect.isawaitable(value):
                         value = await value
             except TimeoutError as exc:
+                await settlement_boundary()
                 result, execution = await self._settle_dispatch_failure(
                     tool, execution, parent_activity_id, fencing_token,
                     code="TOOL_TIMEOUT", message=str(exc) or "tool timed out",
                 )
+            except RuntimeFault as exc:
+                # Contract/replay/ownership faults are Runtime control signals,
+                # never model-visible tool failures.
+                if exc.code in {
+                    "TOOL_RESULT_CONTRACT_INVALID",
+                    "EVIDENCE_CONTRACT_INVALID",
+                }:
+                    await settlement_boundary()
+                    await self._settle_dispatch_failure(
+                        tool,
+                        execution,
+                        parent_activity_id,
+                        fencing_token,
+                        code=exc.code,
+                        message=exc.message,
+                    )
+                raise
+            except ValidationError as exc:
+                if not _is_tool_output_validation_error(exc):
+                    await settlement_boundary()
+                    result, execution = await self._settle_dispatch_failure(
+                        tool,
+                        execution,
+                        parent_activity_id,
+                        fencing_token,
+                        code=type(exc).__name__,
+                        message=str(exc),
+                    )
+                else:
+                    fault = RuntimeFault(
+                        "TOOL_RESULT_CONTRACT_INVALID",
+                        "tool returned a non-JSON-safe typed result",
+                        500,
+                        {"tool_name": tool.manifest.name},
+                    )
+                    await settlement_boundary()
+                    await self._settle_dispatch_failure(
+                        tool,
+                        execution,
+                        parent_activity_id,
+                        fencing_token,
+                        code=fault.code,
+                        message=fault.message,
+                    )
+                    raise fault from exc
             except Exception as exc:  # after dispatch, side-effect failures are conservative
+                await settlement_boundary()
                 result, execution = await self._settle_dispatch_failure(
                     tool, execution, parent_activity_id, fencing_token,
                     code=type(exc).__name__, message=str(exc),
                 )
             else:
-                result = _normalize_tool_result(value)
+                try:
+                    output = self._adapt_execution_output(tool, value, execution)
+                except RuntimeFault as exc:
+                    if exc.code in {
+                        "TOOL_RESULT_CONTRACT_INVALID",
+                        "EVIDENCE_CONTRACT_INVALID",
+                    }:
+                        await settlement_boundary()
+                        await self._settle_dispatch_failure(
+                            tool,
+                            execution,
+                            parent_activity_id,
+                            fencing_token,
+                            code=exc.code,
+                            message=exc.message,
+                        )
+                    raise
+                result = output.result
                 if result.status not in {
                     ToolResultStatus.FAILURE,
                     ToolResultStatus.UNKNOWN,
                 }:
                     # Keep Store/Artifact commit failures outside the executor exception
                     # classifier: a stale fence or SQLite failure is not a Tool failure.
+                    await settlement_boundary()
                     return await self._commit_result(
                         execution,
                         parent_activity_id,
                         fencing_token,
                         result,
+                        evidence=output.evidence,
                         return_full=manifest.result_policy == "ARTIFACT_BOUNDED_READ",
                     )
+                await settlement_boundary()
                 result, execution = await self._settle_dispatch_failure(
                     tool,
                     execution,
@@ -417,9 +970,11 @@ class ToolBroker:
             if safe_replay and int(execution["attempt"]) < manifest.max_attempts:
                 continue
             if result.status is ToolResultStatus.UNKNOWN:
+                await settlement_boundary()
                 return await self._require_manual(
                     execution, parent_activity_id, fencing_token,
                 )
+            await settlement_boundary()
             return result
 
     async def _materialize_committed(
@@ -450,7 +1005,89 @@ class ToolBroker:
             value = tool.executor(arguments, context)
             if inspect.isawaitable(value):
                 value = await value
-        return _normalize_tool_result(value)
+        output = self._adapt_execution_output(tool, value, execution)
+        if output.evidence is not None:
+            raise RuntimeFault(
+                "EVIDENCE_CONTRACT_INVALID",
+                "bounded Artifact materialization cannot produce EvidenceSet",
+                500,
+            )
+        return output.result
+
+    def _adapt_execution_output(
+        self,
+        tool: _RegisteredTool,
+        value: Any,
+        execution: dict[str, Any],
+    ) -> ToolExecutionOutput:
+        try:
+            output = tool.result_adapter(value)
+        except RuntimeFault:
+            raise
+        except Exception as exc:
+            raise RuntimeFault(
+                "TOOL_RESULT_CONTRACT_INVALID",
+                "tool result adapter rejected its protocol value",
+                500,
+                {"tool_name": tool.manifest.name, "reason": str(exc)},
+            ) from exc
+        if not isinstance(output, ToolExecutionOutput):
+            raise RuntimeFault(
+                "TOOL_RESULT_CONTRACT_INVALID",
+                "tool result adapter must return ToolExecutionOutput",
+                500,
+                {"tool_name": tool.manifest.name},
+            )
+        try:
+            output = ToolExecutionOutput.model_validate(output.model_dump(mode="python"))
+        except Exception as exc:
+            raise RuntimeFault(
+                "TOOL_RESULT_CONTRACT_INVALID",
+                "tool result is not strict JSON-safe ToolExecutionOutput",
+                500,
+                {"tool_name": tool.manifest.name},
+            ) from exc
+        self._validate_evidence_identity(output, execution)
+        return output
+
+    @staticmethod
+    def _validate_evidence_identity(
+        output: ToolExecutionOutput,
+        execution: dict[str, Any],
+    ) -> None:
+        evidence = output.evidence
+        if evidence is None and execution["tool_name"] == "knowledge_search":
+            raise RuntimeFault(
+                "EVIDENCE_CONTRACT_INVALID",
+                "knowledge_search SUCCESS requires a current EvidenceSet",
+                500,
+                {"tool_execution_id": execution["tool_execution_id"]},
+            )
+        if evidence is None:
+            return
+        if execution["tool_name"] != "knowledge_search":
+            raise RuntimeFault(
+                "EVIDENCE_CONTRACT_INVALID",
+                "only knowledge_search may produce EvidenceSet",
+                500,
+            )
+        expected = {
+            "run_id": str(execution["run_id"]),
+            "activity_id": str(execution["activity_id"]),
+            "tool_execution_id": str(execution["tool_execution_id"]),
+        }
+        actual = {
+            "run_id": evidence.run_id,
+            "activity_id": evidence.activity_id,
+            "tool_execution_id": evidence.tool_execution_id,
+        }
+        if actual != expected:
+            raise RuntimeFault(
+                "EVIDENCE_CONTRACT_INVALID",
+                "EvidenceSet identity disagrees with ToolExecution authority",
+                500,
+                {"expected": expected, "actual": actual},
+            )
 
     async def _require_manual(
         self,
@@ -554,6 +1191,8 @@ class ToolBroker:
                 if inspect.isawaitable(value):
                     value = await value
                 return value
+        except (RuntimeFault, AttemptOwnershipLost):
+            raise
         except Exception:
             return None
 
@@ -621,60 +1260,58 @@ class ToolBroker:
         fencing_token: int,
         result: ToolResultEnvelope,
         *,
+        evidence: EvidenceSet | None = None,
         return_full: bool = False,
     ) -> ToolResultEnvelope:
         original_payload = result.model_dump(mode="json")
-        evidence_set: dict[str, Any] | None = None
         evidence_index: list[dict[str, Any]] = []
-        if (
-            execution["tool_name"] == "knowledge_search"
-            and result.status is ToolResultStatus.SUCCESS
-            and isinstance(result.preview, dict)
-        ):
-            raw_preview = dict(result.preview)
-            raw_evidence = raw_preview.pop("__evidence_set__", None)
-            if isinstance(raw_evidence, dict):
-                evidence_set = _normalize_evidence_set(
-                    raw_evidence,
-                    execution,
-                    retrieved_at_ms=self.clock.now_ms(),
+        if execution["tool_name"] == "knowledge_search":
+            if evidence is None:
+                raise RuntimeFault(
+                    "EVIDENCE_CONTRACT_INVALID",
+                    "knowledge_search SUCCESS requires a current EvidenceSet",
+                    500,
+                    {"tool_execution_id": execution["tool_execution_id"]},
                 )
-            else:
-                evidence_set = _evidence_set_from_legacy_hits(
-                    raw_preview,
-                    execution,
-                    retrieved_at_ms=self.clock.now_ms(),
+            if not isinstance(result.preview, dict):
+                raise RuntimeFault(
+                    "EVIDENCE_CONTRACT_INVALID",
+                    "knowledge_search preview must be an object",
+                    500,
                 )
-            evidence_index = _compact_evidence_index(evidence_set)
+            evidence_index = _compact_evidence_index(evidence)
             result = result.model_copy(
-                update={"preview": _bounded_knowledge_preview(raw_preview, self.inline_result_max_bytes)}
+                update={"preview": _bounded_knowledge_preview(result.preview, self.inline_result_max_bytes)}
             )
             original_payload = result.model_dump(mode="json")
 
         serialized = canonical_json(
-            evidence_set if evidence_set is not None else original_payload
+            evidence.model_dump(mode="json") if evidence is not None else original_payload
         ).encode("utf-8")
         result_ref: str | None = result.result_ref
         artifact_metadata: dict[str, Any] | None = None
+        full_result_ref: str | None = None
         stored = result
         artifact_relation = (
             "ARTIFACT_READ" if execution["tool_name"] == "read_artifact" else "TOOL_RESULT"
         )
-        if evidence_set is not None or len(serialized) > self.inline_result_max_bytes:
+        if evidence is not None or len(serialized) > self.inline_result_max_bytes:
             ref = None
-            if result_ref is None or evidence_set is not None:
+            if result_ref is None or evidence is not None:
                 ref = await self.artifact_store.put_bytes(
                     serialized,
                     purpose=ArtifactPurpose.INTERNAL,
                     media_type=(
                         "application/vnd.sxw.evidence-set+json"
-                        if evidence_set is not None
+                        if evidence is not None
                         else "application/json"
                     ),
                     filename=f"{execution['tool_execution_id']}.json",
                 )
                 result_ref = ref.artifact_id
-            if evidence_set is None:
+                if evidence is None:
+                    full_result_ref = result_ref
+            if evidence is None:
                 preview: Any = serialized[: self.inline_result_max_bytes].decode(
                     "utf-8", errors="replace"
                 )
@@ -692,7 +1329,12 @@ class ToolBroker:
                     "created_at": int(ref.created_at.timestamp() * 1000),
                 }
         persisted_result = stored.model_dump(mode="json")
-        if evidence_set is not None:
+        if full_result_ref is not None:
+            # Internal current-codec marker: ``result_ref`` alone can also be a
+            # Tool-owned output Artifact, so recovery must not guess that every
+            # reference contains a serialized ToolResult envelope.
+            persisted_result["full_result_ref"] = full_result_ref
+        if evidence is not None:
             # The complete content lives only in Artifact.  This compact index is sufficient
             # for deterministic citation generation inside the finalize transaction.
             persisted_result["evidence_set_ref"] = result_ref
@@ -716,126 +1358,18 @@ class ToolBroker:
         return durable_result
 
 
-def _normalize_evidence_set(
-    raw: dict[str, Any],
-    execution: dict[str, Any],
-    *,
-    retrieved_at_ms: int,
-) -> dict[str, Any]:
-    query = str(raw.get("query") or "")
-    query_id = str(raw.get("query_id") or (
-        "qry_" + hashlib.sha256(
-            f"{execution['tool_execution_id']}:{query}".encode("utf-8")
-        ).hexdigest()
-    ))
-    raw_dataset_scope = raw.get("dataset_scope")
-    if not isinstance(raw_dataset_scope, list):
-        raw_dataset_scope = raw.get("datasets")
-    dataset_scope = [
-        str(item) for item in (raw_dataset_scope or []) if str(item).strip()
-    ]
-    evidence: list[dict[str, Any]] = []
-    for ordinal, item in enumerate(raw.get("evidence") or [], start=1):
-        if not isinstance(item, dict):
-            continue
-        n = int(item.get("n") or ordinal)
-        content = str(item.get("content") or "")
-        content_hash = str(item.get("content_hash") or "")
-        if len(content_hash) != 64 or any(char not in "0123456789abcdef" for char in content_hash):
-            content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        evidence_id = str(item.get("evidence_id") or (
-            "ev_" + hashlib.sha256(
-                f"{execution['tool_execution_id']}:{n}:{content_hash}".encode("utf-8")
-            ).hexdigest()
-        ))
-        doc_id = str(item.get("doc_id") or item.get("document_id") or "unknown")
-        document_id = str(item.get("document_id") or doc_id)
-        document_version_id = str(
-            item.get("document_version_id")
-            or item.get("index_version")
-            or f"unversioned:{content_hash}"
-        )
-        index_version = str(item.get("index_version") or document_version_id)
-        dataset_id = str(item.get("dataset_id") or "default")
-        if dataset_id not in dataset_scope:
-            dataset_scope.append(dataset_id)
-        span_start = max(0, int(item.get("span_start") or 0))
-        span_end = max(span_start, int(item.get("span_end") or len(content)))
-        entry = {
-            "n": n,
-            "evidence_id": evidence_id,
-            "chunk_id": str(item.get("chunk_id") or f"chunk_{content_hash}"),
-            "doc_id": doc_id,
-            "title": str(item.get("title") or ""),
-            "document_id": document_id,
-            "document_version_id": document_version_id,
-            "index_version": index_version,
-            "content_hash": content_hash,
-            "dataset_id": dataset_id,
-            "scope": str(item.get("scope") or raw.get("scope") or "public"),
-            "query_id": str(item.get("query_id") or query_id),
-            "page": item.get("page") if isinstance(item.get("page"), int) else None,
-            "span_start": span_start,
-            "span_end": span_end,
-            "content": content,
-            "score": float(item.get("score") or 0.0),
-            "source": str(item.get("source") or "other"),
-        }
-        evidence.append(entry)
-    if not dataset_scope:
-        dataset_scope = ["default"]
-    return {
-        "schema_version": str(raw.get("schema_version") or "1"),
-        "query": query,
-        "query_id": query_id,
-        "run_id": str(raw.get("run_id") or execution["run_id"]),
-        "activity_id": str(raw.get("activity_id") or execution["activity_id"]),
-        "principal_id": str(raw.get("principal_id") or "unknown"),
-        "dataset_scope": dataset_scope,
-        "scope": str(raw.get("scope") or "public"),
-        "retrieval_status": str(raw.get("retrieval_status") or ("HIT" if evidence else "MISS")),
-        "rewrites": list(raw.get("rewrites") or []),
-        "cost_ms": raw.get("cost_ms"),
-        "degraded_reasons": [str(item) for item in (raw.get("degraded_reasons") or [])],
-        "tool_execution_id": execution["tool_execution_id"],
-        "evidence": evidence,
-        "retrieved_at": str(raw.get("retrieved_at") or ms_to_rfc3339(retrieved_at_ms)),
-    }
-
-
-def _evidence_set_from_legacy_hits(
-    preview: dict[str, Any],
-    execution: dict[str, Any],
-    *,
-    retrieved_at_ms: int,
-) -> dict[str, Any]:
-    return _normalize_evidence_set(
-        {
-            "schema_version": "1",
-            "retrieval_status": "HIT" if preview.get("hits") else "MISS",
-            "evidence": list(preview.get("hits") or []),
-        },
-        execution,
-        retrieved_at_ms=retrieved_at_ms,
-    )
-
-
-def _compact_evidence_index(evidence_set: dict[str, Any]) -> list[dict[str, Any]]:
+def _compact_evidence_index(evidence_set: EvidenceSet) -> list[dict[str, Any]]:
     keep = (
         "n", "evidence_id", "title", "doc_id", "document_id",
         "document_version_id", "index_version", "content_hash", "dataset_id", "scope",
         "query_id", "page", "span_start", "span_end",
     )
-    query_id = evidence_set.get("query_id")
     compact: list[dict[str, Any]] = []
-    for item in evidence_set.get("evidence") or []:
-        if not isinstance(item, dict):
-            continue
+    for evidence_item in evidence_set.evidence:
+        item = evidence_item.model_dump(mode="json")
         entry: dict[str, Any] = {}
         for key in keep:
             value = item.get(key)
-            if key == "query_id" and value is None:
-                value = query_id
             entry[key] = _truncate_utf8(value, 2048) if isinstance(value, str) else value
         compact.append(entry)
     return compact
@@ -890,14 +1424,7 @@ def _truncate_utf8(value: str, max_bytes: int) -> str:
     return encoded[:max_bytes].decode("utf-8", errors="ignore")
 
 
-def _tool_result_from_ledger(execution: dict[str, Any]) -> ToolResultEnvelope:
-    """Project the internal ToolExecution ledger row back to public v1.
-
-    Knowledge retrieval appends a compact citation index beside the envelope in
-    ``result_json``.  That internal enrichment is intentionally not part of the
-    frozen public ToolResult schema, so committed replay extracts only envelope
-    fields while citation finalization continues to read the full ledger JSON.
-    """
+def _tool_result_document(execution: dict[str, Any]) -> dict[str, Any]:
     raw_result = execution.get("result_json")
     try:
         value = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
@@ -915,6 +1442,17 @@ def _tool_result_from_ledger(execution: dict[str, Any]) -> ToolResultEnvelope:
             500,
             {"tool_execution_id": execution.get("tool_execution_id")},
         )
+    return value
+
+
+def _tool_result_from_ledger(execution: dict[str, Any]) -> ToolResultEnvelope:
+    """Project the internal ToolExecution ledger row back to public v1.
+
+    Knowledge retrieval and large-result recovery append internal references
+    beside the envelope.  Those enrichments are not part of the frozen public
+    schema, so replay extracts only ToolResultEnvelope fields.
+    """
+    value = _tool_result_document(execution)
 
     public = {
         key: value[key]
@@ -939,6 +1477,14 @@ def _tool_result_from_ledger(execution: dict[str, Any]) -> ToolResultEnvelope:
     return ToolResultEnvelope.model_validate(public)
 
 
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON number {value} is forbidden")
+
+
+def _is_tool_output_validation_error(error: ValidationError) -> bool:
+    return error.title in {"ToolExecutionOutput", "ToolResultEnvelope"}
+
+
 def _prior_context(execution: dict[str, Any]) -> dict[str, Any]:
     if not execution.get("result_json"):
         return {
@@ -953,58 +1499,6 @@ def _prior_context(execution: dict[str, Any]) -> dict[str, Any]:
         "prior_error_code": prior.error_code,
         "prior_error_message": prior.error_message,
     }
-
-
-def _normalize_tool_result(value: Any) -> ToolResultEnvelope:
-    """Normalize legacy tool responses into the fixed v1 result vocabulary."""
-    if isinstance(value, ToolResultEnvelope):
-        return value
-    if value is None:
-        return ToolResultEnvelope(status=ToolResultStatus.NO_OUTPUT)
-    if isinstance(value, dict):
-        if value.get("interrupt") is True:
-            return ToolResultEnvelope(
-                status=ToolResultStatus.INTERRUPT,
-                preview=value,
-                pending_input=(
-                    value.get("pending_input")
-                    if isinstance(value.get("pending_input"), dict)
-                    else None
-                ),
-            )
-        raw_status = str(value.get("status") or "").upper()
-        explicitly_failed = bool(value.get("isError") or value.get("is_error"))
-        if explicitly_failed or raw_status == ToolResultStatus.FAILURE:
-            message = value.get("content") or value.get("error") or value.get("message")
-            return ToolResultEnvelope(
-                status=ToolResultStatus.FAILURE,
-                preview=value,
-                result_ref=value.get("result_ref") or value.get("artifact_ref"),
-                external_object_id=value.get("external_object_id"),
-                error_code=_bounded_error_code(
-                    value.get("errorCode") or value.get("error_code"),
-                    "TOOL_REPORTED_FAILURE",
-                ),
-                error_message=_bounded_error_message(message, "tool reported a failure"),
-            )
-        if raw_status == ToolResultStatus.UNKNOWN:
-            return ToolResultEnvelope(
-                status=ToolResultStatus.UNKNOWN,
-                preview=value,
-                result_ref=value.get("result_ref") or value.get("artifact_ref"),
-                external_object_id=value.get("external_object_id"),
-                error_code=_bounded_error_code(
-                    value.get("errorCode") or value.get("error_code"),
-                    "TOOL_EFFECT_UNKNOWN",
-                ),
-                error_message=_bounded_error_message(
-                    value.get("content") or value.get("message"),
-                    "tool effect is unknown",
-                ),
-            )
-        if raw_status == ToolResultStatus.NO_OUTPUT:
-            return ToolResultEnvelope(status=ToolResultStatus.NO_OUTPUT)
-    return ToolResultEnvelope(status=ToolResultStatus.SUCCESS, preview=value)
 
 
 def _bounded_error_code(value: Any, fallback: str) -> str:
