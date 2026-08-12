@@ -41,6 +41,8 @@ Provider chunks
 - 它不创建 ToolExecution，不执行工具，不提交事件。
 - `finish_reason` 与最终 batch 是否矛盾，由 `NativeLoop._validate_finish_reason` 在完整 turn 上判定。
 
+生产 Adapter 以 `NativeLoop.run(initial_state=state)` 驱动 kernel；普通子 Runner 则传 `messages=...`。`run()` 要求恰好一个输入源，不会再用 `initial_state or LoopState(messages)` 静默决定哪份历史有效。这与 accumulator 一样遵守“临时 fragment 不得覆盖持久恢复状态”的边界。
+
 ## 3. 数据结构
 
 ### 3.1 `_PartialCall`：单个 index 的累积状态
@@ -206,6 +208,10 @@ TOOL_REPLAY_MISMATCH
 - cancel、EOF、GeneratorExit、Runtime 故障时取消并 await 所有 worker/future。
 
 流结束后，完整 batch 仍要经过 finish 语义校验和整批校验。后续 full-batch PREPARE 对 stable slot 做幂等核对；任何 name/request digest 漂移都以 `TOOL_REPLAY_MISMATCH` 终止，不允许用 provider call id 或 args hash 猜测另一个 identity。
+
+正常工具的 `TOOL_CALL_COMMITTED` 现在只由 Broker PREPARE 产生。kernel 中无生产调用点的 `_call_events` 已删除，不再存在一条可被误解为工具权威的并行投影路径。只有默认 `off` 下整批零 dispatch 的模型可修正错误，才由 `_synthetic_events` 在 checkpoint 事务中提交成对 call/result。
+
+工具执行层只会把普通工具业务异常投影为模型可见错误。`RuntimeFault` 和 `AttemptOwnershipLost`（如 stable-slot 漂移、契约失败、lease/fencing/CAS 丢失）原样透传，不会被 accumulator 或 Native executor 伪装成 ToolResult。
 
 ## 10. 默认 `off` 模式的完整示例
 

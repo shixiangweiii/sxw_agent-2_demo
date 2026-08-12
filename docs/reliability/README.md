@@ -19,6 +19,7 @@
 - Runtime/ARAG 各只接受一份 current `schema.sql` 的完整 SHA-256 digest；无 migration、upgrader 或旧 checkpoint codec。
 - 三份 immutable release 原子激活，Worker 只能精确 claim `(engine, release_fingerprint)`；活跃旧 Run 会阻止新 fingerprint 激活。
 - `NativeLoopAdapter` 直接 `RuntimeIO` 和强制 Tool Broker；工具提前派发默认关闭，但模型正文与工具/Skill 进度仍流式提交。
+- `TIMED_OUT` 是唯一可携带 unresolved ToolEffect 的 terminal；普通失败先保存 sticky pending terminal 并进入严格 reconciliation，effect 最终确定后提交原失败且不重跑 Engine。
 
 ## Delivery v1 的准确承诺
 

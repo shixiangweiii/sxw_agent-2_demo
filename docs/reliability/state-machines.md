@@ -40,7 +40,7 @@ REJECTED
 | `RUNNING` | `WAITING_INPUT` | Outcome 为 `WAITING_INPUT`/`INTERRUPT`；pending input 已 checkpoint，Activity 不占 lease |
 | `RUNNING` | `CANCEL_REQUESTED` | cancel CAS 先提交，且存在正在执行或 `DISPATCHED/UNKNOWN/RECONCILING/MANUAL_REQUIRED` effect，必须等待安全边界/reconcile |
 | `RUNNING` | `SUCCEEDED` | 仅 Finalize Transaction；final assistant、citation、terminal 同事务 |
-| `RUNNING` | `FAILED` | Coordinator 判定 terminal failure，且不存在应继续 reconcile 的 unknown effect |
+| `RUNNING` | `FAILED` | Coordinator 判定 terminal failure，且不存在应继续 reconcile 的 unknown effect；若存在则先走 `RUNNING → WAITING_INPUT` 并保存 sticky pending terminal |
 | `RUNNING` | `CANCELLED` | cancel 已生效，且确认无 unresolved effect；late result 不得覆盖 |
 | `RUNNING` | `TIMED_OUT` | deadline 到；terminal payload 列出所有 unresolved tool execution IDs |
 | `WAITING_RETRY` | `DISPATCH_PENDING` | 唯一 retry timer CAS `SCHEDULED → FIRED` 后重新排队 |
@@ -50,6 +50,7 @@ REJECTED
 | `WAITING_INPUT` | `DISPATCH_PENDING` | 唯一 signal 首次消费并提交 resume Activity；重复 signal 不重复唤醒 |
 | `WAITING_INPUT` | `CANCELLED` | cancel CAS 先于 signal 消费，且无 unresolved effect |
 | `WAITING_INPUT` | `CANCEL_REQUESTED` | cancel CAS 先提交，但已有 unresolved effect；原人工输入不能绕过 Tool reconcile 语义 |
+| `WAITING_INPUT` | `FAILED` | 仅严格 Tool reconciliation boundary 携带 `pending_terminal={status:FAILED,code,message}`，且最后一个 unresolved effect 已被确定；同一 signal/query settlement 事务提交原失败，不恢复 Engine |
 | `WAITING_INPUT` | `TIMED_OUT` | deadline 或 wait timeout 到；迟到 signal 写审计后拒绝 |
 | `CANCEL_REQUESTED` | `CANCELLED` | 执行到安全边界，或 reconcile 已证明 effect 状态，且不再有 unresolved execution |
 | `CANCEL_REQUESTED` | `TIMED_OUT` | 到 deadline 仍存在 unresolved effect；terminal payload 必须列出 IDs |
@@ -64,6 +65,7 @@ REJECTED
 - terminal 事务先提交时，后续 cancel 返回 `409 RUN_ALREADY_TERMINAL`。
 - cancel CAS 先提交时，后续执行结果仅记为 late result，不能提交 `SUCCEEDED`。
 - 存在 `DISPATCHED/UNKNOWN/RECONCILING/MANUAL_REQUIRED` ToolEffect 的 cancel 不能直接宣称 `CANCELLED`。
+- 除 `TIMED_OUT` 外，任一 terminal 事务都必须再次查询 ToolEffect authority；存在 unresolved execution 时 fail closed。普通 planned `FAILED` 把精确 `{status,code,message}` 持久化到 strict reconciliation `pending_input.pending_terminal`，不得丢失原错误、改成成功或重跑模型。
 
 ## 2. ActivityState
 
@@ -188,6 +190,8 @@ result / result_ref / external_object_id（按 action 受约束）
 - evidence 最多 4KiB、inline result 最多 8KiB；更大内容必须先 Artifact 化。`result_ref` 必须已存在，并在同一事务建立指向 `TOOL_RESULT_COMMITTED` 的来源 Link。
 
 Store 在同一短事务中校验 deadline、Run 当前 wait boundary、`wait_activity_id`、pending unresolved IDs、ToolExecution/Run 所有权以及 `MANUAL_REQUIRED + MANUAL` 组合。`mark_committed/mark_failed` 同步 CAS ToolEffect/Tool Activity，写有界 `TOOL_RESULT_COMMITTED + ACTIVITY_STATUS_CHANGED + SIGNAL_RECORDED`；有 `result_ref` 时同事务建立 Artifact Link。若还有其他 unresolved effect，父 Run 保持原人工边界；普通 Run 仅在最后一个解决后恢复 `PENDING/DISPATCH_PENDING`，cancel-owned Run 仅在最后一个解决后以唯一 terminal 事务变为 `CANCELLED`。
+
+若 strict boundary 携带 `pending_terminal={status:"FAILED",code,message}`，它表示 Coordinator 已产生不可重试的失败、只是 terminal commit 被 ToolEffect uncertainty 阻挡。该对象是 sticky authority：每次人工 signal、query-only 调度和 lease recovery 都必须原样保留。最后一个 effect 无论被 `mark_committed`、`mark_failed` 还是 query hook 确定，Store 都在同一事务提交原 `FAILED` 与原 code/message，绝不恢复普通 Engine。deadline 若先到仍以 `TIMED_OUT + unresolved_tool_execution_ids` 收口；cancel 若先获得所有权则改走既有 `CANCEL_REQUESTED` 语义。
 
 这里的 pending list 只列 operator-actionable 的 `MANUAL_REQUIRED` IDs。普通 Run 的其余 uncertainty 若全部满足冻结 replay guard，则在最后一个人工 ID 解决后重排 Engine，由 Broker 复用或受控 replay；若还存在不可 replay 且未进入 manual 的 effect，事务必须 fail closed。cancel 一旦获得所有权，idle/safe boundary 上剩余的 `DISPATCHED/UNKNOWN/RECONCILING`（包括原本 replay-safe 的 effect）也会原子转为 `MANUAL_REQUIRED/MANUAL`，绝不能再恢复原 executor。generic `WAITING_INPUT`/普通 signal 同样不能覆盖这一边界。
 

@@ -132,7 +132,15 @@ class RuntimeStore(Protocol):
     async def finalize_failure(
         self, *, run_id: str, activity_id: str, fencing_token: int, code: str,
         message: str, now_ms: int, terminal_status: RunStatus = RunStatus.FAILED,
-    ) -> RunRecord: ...
+    ) -> RunRecord:
+        """Commit a failure or return its durable Tool-reconciliation boundary.
+
+        ``FAILED`` is a planned terminal, not permission to cross unresolved
+        external effects.  Implementations persist that intent and return a
+        nonterminal Run until strict reconciliation resolves every effect.
+        ``TIMED_OUT`` is the sole terminal allowed to retain unresolved IDs.
+        """
+        ...
     async def schedule_retry(
         self, *, run_id: str, activity_id: str, fencing_token: int, fire_at: int,
         error: dict[str, Any], now_ms: int,

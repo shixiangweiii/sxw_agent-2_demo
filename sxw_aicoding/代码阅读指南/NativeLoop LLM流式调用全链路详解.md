@@ -12,7 +12,7 @@ RunCoordinator
        ├─ 编译 canonical history / current input / 附件
        ├─ 解码唯一 current checkpoint，重物化大 ToolResult
        ├─ 绑定强制 Tool Broker 和 RuntimeIO 回调
-       └─ NativeLoop.run(...)
+       └─ NativeLoop.run(initial_state=state)
             └─ NativeLlmClient.stream(...)
                  └─ OpenAI-compatible provider stream
 ```
@@ -22,6 +22,8 @@ RunCoordinator
 - `NativeLoopAdapter` 是生产级 EngineAdapter，直接接收 `RuntimeIO`。它负责持久化、fencing、绝对 deadline、cancel、Broker、Artifact 和最终消息指定。
 - `NativeLoop` 是 Runtime-independent kernel，持有扁平 `messages` 和 `LoopState`，负责模型—工具循环的语义顺序。它通过窄回调接入 checkpoint、Broker 和控制探针，因而仍可供 Claude Skill 子 Runner 复用。
 - `NativeLlmClient` 是唯一直面 provider 线协议的组件，它将 chunk 解析为 `TextDelta | ToolCallReady | TurnEnd`，不决定 Runtime 终态。
+
+kernel 的入口也已收紧为“恰好一个状态来源”：普通可复用调用传 `messages=...`，生产 Adapter/恢复路径传 `initial_state=...`；两者都不传或同时传都立即 `ValueError`。这避免“messages 与 checkpoint state 到底谁覆盖谁”的隐式选择。
 
 Native 不经过 ADK 的 `ReasoningEngine`、后台无界队列或事件 merge 路径。`plan_execute` 和 `agent_loop` 仍走 ADK Adapter，两条路径是隔离的。
 
@@ -77,7 +79,7 @@ Adapter 将以下窄能力交给 kernel：
 - `control_probe` → 检查 Runtime cancel 与绝对 deadline。
 - `message_id_factory` → 基于 Run 和 model ordinal 生成稳定 model message slot。
 
-Skill UI 也使用 Native 专用 awaited sink：每个 frame 先等待 `RuntimeIO.emit` 提交，再继续下游流。
+Skill UI 也使用 Native 专用 awaited sink：每个 frame 先等待 `RuntimeIO.emit`。`skill_event` 是非 text 事件，Sink 会先 flush 旧 text，再将该 frame 提交后返回。
 
 ## 4. 每个 model turn 的提交顺序
 
@@ -133,22 +135,32 @@ UI 收到 `text_start` 时只清空当前回答正文，不清除工具、Skill 
 
 `message_id` 表示语义上的 model slot，`generation_id` 表示该 slot 的一次实际生成尝试。恢复 `MODEL_REQUEST` 时 message slot 不变，但 generation 必须换新。
 
-## 6. 为什么 `await RuntimeIO.emit` 是正确性机制
+## 6. `await RuntimeIO.emit` 保证什么，又不保证什么
 
-Adapter 消费 kernel 的每个 `StreamEvent` 时都直接 await RuntimeIO：
+Adapter 不再为每个事件创建一个 pull task，而是为整个 attempt 建立一个 `native-stream-pump`。pump 与主消费协程之间只有一个 `_StreamEnvelope` slot，并用 acknowledge event 交接：
 
 ```text
 provider 吐出 delta
   → kernel yield text
-  → Adapter await io.emit
-  → Runtime 聚合/提交 OUTPUT_DELTA_COMMITTED
-  → await 返回
-  → 才能继续拉下一个 provider item
+  → pump 放入单 slot，等待 acknowledged
+  → Adapter 主协程 await io.emit
+  → emit 返回后才 acknowledge
+  → pump 才能继续 anext(kernel/provider)
 ```
 
-这是自然反压，不是性能细节。如果 Runtime 被阻塞，kernel 不能继续拉流、PREPARE、dispatch 或完成。因此“用户已看到”和“Runtime 已提交”之间不存在无界的进程内缓冲缺口。
+这是有界反压和因果顺序机制。如果 `io.emit` 被阻塞，kernel 不能再拉 provider item，因而也不能越过它进入后续 checkpoint、PREPARE、dispatch 或完成。单 slot 还保证不存在随 delta 数量增长的进程内 queue。
 
-Runtime 会按时间/字节阈值聚合 delta，切换 generation、提交 checkpoint 或非 text 事件前先 flush。Adapter 还在每个 text event 后 `force_flush`，以确保下一次 kernel 推进之前本 delta 已进入权威存储。
+但要精确区分 **awaited admission** 和 **durable commit**：对一个未达阈值的 text delta，`io.emit` 可以只是在 Sink 锁内收入有界 buffer 并安排 timer，不意味着这一帧已单独写入 SQLite。真正的 durable flush 条件是：
+
+- buffer 达到 2 KiB；
+- 100 ms timer 到期；
+- message/generation identity 切换；
+- 任何非 text 事件；
+- checkpoint（其内部先 `force_flush`）；
+- attempt `close()`；
+- 其他明确需要顺序屏障的调用方主动 `force_flush()`。
+
+Native Adapter 现在**不再对每个 text delta 调用 `force_flush()`**。这保留了冻结协议的 100 ms / 2 KiB 聚合语义，同时 checkpoint/非 text/close 保证不会跨语义边界滞留。测试会用大量小 delta 验证 `force_flush` 和 cancel 查询次数不随 delta 线性增长。
 
 ## 7. Provider 流协议：只接受显式完成
 
@@ -250,12 +262,16 @@ provider 流必须满足：
 
 这些是 Runtime 控制决策，必须原样冒泡给 Worker/Coordinator，否则模型可能“绕过”权威边界后错误完成 Run。
 
+Native 工具执行层因此只将普通工具异常转成模型可见失败；`RuntimeFault` 和 `AttemptOwnershipLost` 都直接透传。正常 ToolCall 事实由 Broker PREPARE 提交，kernel 不再保留生产无调用点的 `_call_events`；只有整批零 dispatch 的模型可修正错误由 `_synthetic_events` 生成成对 call/result，普通结果投影则经 `_result_events`。
+
 ## 10. cancel、deadline 与资源清理
 
 Native 同时在两个粒度检查控制信号：
 
 1. kernel 在恢复工具、预留 model request 等安全边界调用 `control_probe`。
-2. Adapter 拉取每个 kernel event 时以短周期等待，持续检查 `remaining_ms()` 和 `is_cancelled()`。
+2. Adapter 为整个 attempt 建立一个 `native-cancel-watch`，以固定短周期查 `is_cancelled()`；它与 delta 数量无关。绝对 deadline 由包住整个消费循环的 `asyncio.timeout(remaining_ms)` 监督。
+
+cancel watcher 观察到取消时会设置 control error、停止后续 pull，取消 pump 并唤醒主消费协程。pump 错误、watcher 错误和正常 EOF 都通过同一个单 slot 边界交给主协程，不需要每个 event 新建 task 或查一次 SQLite。
 
 所有下游 timeout 使用同一个 Run 绝对 deadline 的剩余预算，不在每层重新起钟。任何 cancel、deadline、GeneratorExit、Adapter 异常或 ownership loss 都必须：
 
@@ -303,7 +319,7 @@ sequenceDiagram
 
     C->>A: execute(request, io)
     A->>A: compile input / decode checkpoint
-    A->>K: run(initial_state)
+    A->>K: run(initial_state=state)
     K->>R: checkpoint MODEL_REQUEST + generation-start event
     R-->>K: committed revision
     K->>L: stream(messages, tools)
@@ -311,9 +327,10 @@ sequenceDiagram
     loop each text delta
         P-->>L: chunk
         L-->>K: TextDelta
-        K-->>A: text(message_id, generation_id)
-        A->>R: await emit + flush
-        R-->>A: committed
+        K-->>A: single-slot text envelope
+        A->>R: await emit (admission/order barrier)
+        R-->>A: admitted; threshold/timer may commit batch
+        A-->>K: acknowledge; allow next pull
     end
     P-->>L: explicit finish=tool_calls
     L-->>K: complete ToolCalls + TurnEnd
@@ -332,7 +349,7 @@ sequenceDiagram
 1. 没有显式 finish marker，就没有完整 turn。
 2. `stop` 只能对应非空最终正文；`tool_calls` 只能对应完整调用批次。
 3. 默认 `off` 下，模型 finish 前零工具执行。
-4. 每个 delta 必须经过 awaited RuntimeIO 提交边界，才能继续拉流。
+4. 每个 delta 必须经过 awaited RuntimeIO admission/顺序边界，才能继续拉流；durable text 由 100 ms / 2 KiB 与语义 flush 边界决定。
 5. model request 先预留 checkpoint，工具先建 stable slot 并提交 batch，再执行。
 6. 外部执行可并发，权威结算和模型可见顺序必须稳定。
 7. generation 允许审计旧 partial，final assistant 只能指向最后一个完整、非空、无 ToolCall 的 assistant turn。

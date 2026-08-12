@@ -44,6 +44,7 @@ from agent.runtime.application.tool_broker import (
     ToolSettlementOrder,
 )
 from agent.runtime.domain.errors import RuntimeFault
+from agent.runtime.domain.errors import AttemptOwnershipLost
 from agent.runtime.domain.models import (
     EventType,
     ReleaseManifest,
@@ -181,6 +182,58 @@ def _adk_response(*calls: tuple[str, str, dict]) -> SimpleNamespace:
         partial=False,
         content=types.Content(role="model", parts=parts),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error,expected_type,expected_code",
+    [
+        (
+            RuntimeFault("EVIDENCE_CONTRACT_INVALID", "bad evidence", 500),
+            RuntimeFault,
+            "EVIDENCE_CONTRACT_INVALID",
+        ),
+        (
+            RuntimeFault("CHECKPOINT_REVISION_CONFLICT", "stale checkpoint", 409),
+            AttemptOwnershipLost,
+            "CHECKPOINT_REVISION_CONFLICT",
+        ),
+        (
+            AttemptOwnershipLost("ACTIVITY_LEASE_EXPIRED", "lease expired"),
+            AttemptOwnershipLost,
+            "ACTIVITY_LEASE_EXPIRED",
+        ),
+    ],
+)
+async def test_adk_plugin_never_projects_runtime_control_faults_to_model(
+    error, expected_type, expected_code,
+) -> None:
+    from agent.plugins.agent_invocation_plugin import AgentInvocationPlugin
+
+    plugin = AgentInvocationPlugin()
+    with pytest.raises(expected_type) as raised:
+        await plugin.on_tool_error_callback(
+            tool=SimpleNamespace(name="controlled_tool"),
+            tool_args={},
+            tool_context=SimpleNamespace(function_call_id="controlled-call"),
+            error=error,
+        )
+    assert raised.value.code == expected_code
+
+
+@pytest.mark.asyncio
+async def test_adk_plugin_still_projects_ordinary_tool_exception_to_model() -> None:
+    from agent.plugins.agent_invocation_plugin import AgentInvocationPlugin
+
+    response = await AgentInvocationPlugin().on_tool_error_callback(
+        tool=SimpleNamespace(name="ordinary_tool"),
+        tool_args={},
+        tool_context=SimpleNamespace(function_call_id="ordinary-call"),
+        error=ValueError("bad user arguments"),
+    )
+
+    assert response["error"] == "ValueError: bad user arguments"
+    assert "不要中断对话" in response["hint"]
 
 
 @pytest.mark.asyncio
@@ -847,7 +900,7 @@ async def test_native_wrapper_fails_closed_when_stable_slot_changes(tmp_path):
 async def test_adk_function_tool_wrapper_reuses_prepared_turn_call_slot(tmp_path):
     store, rc = await _runtime_context(tmp_path, engine="agent_loop")
     calls = 0
-    observed_contexts: list[tuple[str, str]] = []
+    observed_contexts: list[tuple[str, str, str]] = []
 
     async def calculator(value: int) -> dict[str, int]:
         """Return a deterministic calculation."""
@@ -856,7 +909,11 @@ async def test_adk_function_tool_wrapper_reuses_prepared_turn_call_slot(tmp_path
         calls += 1
         request_context = get_request_context()
         observed_contexts.append(
-            (request_context.idempotency_key, request_context.activity_id)
+            (
+                request_context.idempotency_key,
+                request_context.activity_id,
+                request_context.tool_execution_id,
+            )
         )
         return {"tripled": value * 3}
 
@@ -921,6 +978,8 @@ async def test_adk_function_tool_wrapper_reuses_prepared_turn_call_slot(tmp_path
     assert tool_call.payload["framework_call_id"] == "adk-framework-call-42"
     assert tool_call.payload["name"] == "calculator"
     execution = await store.get_tool_execution(tool_call.tool_execution_id)
+    assert observed_contexts[0][2] == execution["tool_execution_id"]
+    assert observed_contexts[0][0] == execution["idempotency_key"]
     assert execution["effect_status"] == "COMMITTED"
     assert execution["attempt"] == 1
 

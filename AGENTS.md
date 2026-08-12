@@ -75,6 +75,7 @@ API 和 Worker 当前共享本机 `runtime.db` 与 Artifact CAS。可选下游�
 - Event append-only，`runs.next_seq` 更新与 event batch 同事务；回滚不留 seq 洞。
 - output delta 按 100ms/2KiB 聚合，切换 message/Tool/checkpoint/terminal 前 flush；先 commit，后 SSE 可见。
 - final assistant + citation + success terminal 同一事务。
+- `TIMED_OUT` 是唯一可保留 unresolved ToolEffect IDs 的 terminal。普通失败遇到未决 effect 时，Store 保存 sticky `pending_input.pending_terminal={status:FAILED,code,message}` 并进入严格 reconciliation；最后一个 effect 确定后提交原 `FAILED`，不重跑 Engine。除 timeout 外的任意 terminal 入口在 Store 最后一层仍必须对 unresolved effect fail closed。
 - cancel/complete 由提交顺序决定；cancel-first 的 late success 不能覆盖。dispatched/unknown effect 存在时进入 `CANCEL_REQUESTED`。
 - deadline 是绝对 UTC，向下只传剩余预算，不在每层重新开始 timeout。
 - Worker 领取使用 lease/revision/fencing；旧 fencing 结果拒绝，Worker 丢失不直接失败 Run。
@@ -99,6 +100,8 @@ EngineAdapter.execute(EngineRunRequest, RuntimeIO) -> EngineOutcome
 - `agent_loop`：循环位于 ADK `BaseLlmFlow`；Plugin/LiteLlm 承担参数 guard、异常反馈、预算/收口。
 - `native_loop`：`NativeLoopAdapter` 直接实现公开端口，负责 canonical history/附件、strict checkpoint、RuntimeIO 提交、Broker 调度和 final assistant；Runtime-independent kernel 仍可供 Claude Skill 子 Runner 使用。工具提前派发默认 `off`，仍保留模型正文流式、Skill 进度流式以及完整 batch 后的受控 READ_ONLY 并发。
 
+Native 对每个 text frame 都先 `await RuntimeIO.emit` 才允许 attempt 级 stream pump 拉下一帧；这是顺序与背压，不是逐帧落盘。持久化仍遵守 100ms/2KiB 聚合及非 text/checkpoint/close/terminal flush 边界。cancel watcher 按 attempt 存活，不得按 delta 频率新建 task 或查 SQLite。
+
 Native 默认硬限：工具并发 10，ToolCall 每轮 64/每 Run 256，单调用/单 batch 参数 64/256KiB，每 generation 模型输出 1MiB，checkpoint 2MiB，ToolCatalog 1MiB，Skill event 单条 64KiB/每 Run 2000 条且总计 8MiB。尺寸一律按 UTF-8 bytes 计算；模型调用硬上限为 `max_loop_iters + 2`（默认 10）。修改任一语义开关或限制都必须改变 release fingerprint。
 
 三引擎共享系统指令和 loop 工具面，修改 `agent/engine/loop_tools/` 必须同时验证 `agent_loop` 与 `native_loop`。`SUB_AGENT_ENGINE` 取 `auto` 时跟随当前 Run；`plan_execute` 的子 Runner 映射为 ADK。A2A 是远端自身 ADK，不受此配置影响。
@@ -114,6 +117,10 @@ ToolManifest 至少包含 release digest、effect class、timeout/attempt、idem
 Worker 必须按“加载工具源 → 构造最终 ToolCatalog → strict 校验 → 计算 release → 创建 Adapter → 原子激活”启动。重名、空 schema fallback、声明/适配异常、缺 manifest、非法 Draft 2020-12 object schema 或目录部分跳过一律 fail-fast。可选远程下游连不上可返回空目录；一旦成功返回目录，任何畸形条目都必须阻止启动。`agent_loop`/`native_loop` 的公开工具面必须逐项同名、同描述、同 normalized schema 和 effect policy。
 
 Broker 内部只接受 `ToolExecutionOutput(result: ToolResultEnvelope, evidence: EvidenceSet | None)`。builtin、Skill、Claude Skill、A2A 在各自协议边界把普通 JSON/`None`/协议错误适配成该类型；Broker 不识别别名或任意 dict。Evidence DTO 使用 strict + extra=forbid；producer 必须给出完整 query/hash/document/index version/scope，Broker 只校验 run/activity/tool_execution 身份，不从 legacy hits/隐藏字段补造，也不填 `unknown/default/unversioned`。违反时 `EVIDENCE_CONTRACT_INVALID`。
+
+Tool executor 进入 durable `DISPATCHED` 后，`AttemptOwnershipLost` 及 ownership-coded RuntimeFault 必须原样冒泡给 Worker，不结算、不转模型 ToolResult。其他 RuntimeFault 先按 effect class 结算：READ_ONLY 为 `FAILED`，可能有副作用的 class 为 `UNKNOWN`，再保留原错误码向上抛。ADK Plugin/Adapter 也必须穿透这些控制错误；只有普通工具业务异常可以回灌模型续推。`ToolResultEnvelope → model` 只能使用共享 pure projection，保证 fresh/recovery 等价。
+
+Evidence 的账本身份必须显式取 `tool_execution_id`；不得借用 `idempotency_key`。query/idempotency identity 可以独立演进，Broker 仍使用前者校验 Evidence authority。
 
 - `READ_ONLY` 可安全受控重试；
 - `IDEMPOTENT_EFFECT` 必须向下游透传稳定 Runtime idempotency key；

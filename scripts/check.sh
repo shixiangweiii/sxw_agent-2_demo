@@ -189,6 +189,15 @@ production_patterns = {
         re.IGNORECASE,
     ),
 }
+migration_code_roots = [
+    Path("agent"), Path("arag"), Path("common"), Path("skillcenter"),
+    Path("a2a_service"), Path("scripts"),
+]
+migration_code_pattern = re.compile(
+    r"\b(?:migrate_schema|schema_migrations?|CheckpointUpgrader|MigrationContext)\b"
+    r"|\b(?:from|import)\s+alembic\b|\balembic\s+(?:upgrade|revision)\b",
+    re.IGNORECASE,
+)
 failures = []
 for root in roots:
     files = [root] if root.is_file() else root.rglob("*")
@@ -210,6 +219,22 @@ for path in Path("agent").rglob("*"):
         for match in pattern.finditer(source):
             line = source.count("\n", 0, match.start()) + 1
             failures.append(f"{path}:{line}: {label}: {match.group(0)}")
+for root in migration_code_roots:
+    for path in root.rglob("*"):
+        if (
+            not path.is_file()
+            or path == Path("scripts/check.sh")
+            or path.suffix not in {".py", ".sql", ".sh"}
+        ):
+            continue
+        if any(part.lower() in {"migration", "migrations"} for part in path.parts):
+            failures.append(f"{path}: incremental schema migration path")
+        source = path.read_text(encoding="utf-8", errors="replace")
+        for match in migration_code_pattern.finditer(source):
+            line = source.count("\n", 0, match.start()) + 1
+            failures.append(
+                f"{path}:{line}: incremental schema migration symbol: {match.group(0)}"
+            )
 if failures:
     raise SystemExit("\n".join(failures))
 PY

@@ -75,6 +75,8 @@ Worker 执行 Activity 时持有有限期 lease。如果进程崩溃、事件循
 ```text
 lease 过期
   ├─ deadline 已到 -> TIMED_OUT
+  ├─ sticky pending_terminal 且 effect 已全解决 -> 原 FAILED
+  ├─ sticky pending_terminal 且仍 unresolved -> RECONCILE/MANUAL
   ├─ cancel-owned 且无未决 effect -> CANCELLED
   ├─ 无未决 effect -> Activity PENDING，可重新 claim
   ├─ 所有 effect 均可安全重放 -> Activity PENDING
@@ -82,6 +84,13 @@ lease 过期
 ```
 
 可安全自动重放的 effect 只有 READ_ONLY，或已经具备稳定 Runtime idempotency key 的 IDEMPOTENT_EFFECT。NON_IDEMPOTENT/UNKNOWN 已派发后不会因租约过期而盲目再调一次。
+
+sticky `pending_terminal` 是一个更强的边界：它表示 Engine 已经不可逆地得出普通
+`FAILED`，只是 terminal 被 ToolEffect 账本挡住。此时即便剩余 effect 原本属于
+READ_ONLY，恢复也不能清掉 marker 再跑 Engine；未决项继续保持严格人工协调，全部
+解决后直接提交已保存的 code/message。若 reconcile query 已提交结果、Worker 随即
+丢 lease，`recover_expired()` 会识别“marker 仍在但 unresolved 已为空”，补交原
+`FAILED`，不产生一次新的模型调用。
 
 ### 4.3 恢复后仍要 exact claim
 
@@ -98,6 +107,12 @@ CreateRun 将 deadline 以 UTC epoch ms 的绝对时间写入 Run。向下游传
 - 长期没有 matching-release Worker 的 `DISPATCH_PENDING` Run。
 - `WAITING_RETRY` / `WAITING_INPUT` 超时。
 - 需要根据 ToolEffect 不确定性收口的 cancel/reconcile 状态。
+
+deadline 是这些非终态边界之上的最高时间裁决：即使 Run 正处于 cancel-owned 或
+sticky-failure reconciliation，过期后也提交 `TIMED_OUT`，并把仍未决的
+`tool_execution_id` 写进 terminal payload。它不会错误恢复成原 `FAILED` 或
+`CANCELLED`。这是唯一允许带 unresolved ToolEffect 的 terminal；Store 的通用
+terminal helper 会拒绝 `SUCCEEDED/FAILED/CANCELLED/REJECTED` 跨过未决效应。
 
 注意实现使用 `getattr(self.store, "expire_deadlines", None)`。这是为了让精简的测试 fake 可以不实现扩展方法；生产 SQLite Store 提供了该能力，不能把 deadline 解释为进程内最佳努力。
 
@@ -161,6 +176,13 @@ schema 身份在 API/Worker 启动时由 `store.initialize()` 校验。非空 DB
 
 续租是 `_execute()` 为每个 Claim 单独创建的 `_renew_lease()` task，不在 `_maintenance` 内。续租失败会 cancel 对应 attempt；如果 Store 写入后续发现 stale fence/lease/checkpoint CAS 冲突，则以 `AttemptOwnershipLost` 冒泡到 Worker，不会把 Run 收成业务失败。
 
+### 8.4 不负责重新运行 deferred-failure Engine
+
+`pending_terminal=FAILED` 已经冻结原计划终态。maintenance 只能恢复 ToolEffect
+协调边界，或在账本已无 unresolved 时原子补交该失败；它不能把 Activity 作为普通
+Engine 工作重新领取。需要下游查询时，claim 也只接受 exact reconcile-only marker，
+Coordinator 在加载 Adapter、checkpoint 和 history 之前就进入 query hook。
+
 ## 9. 错误处理分类
 
 | 任务 | 异常时的原则 |
@@ -169,6 +191,8 @@ schema 身份在 API/Worker 启动时由 `store.initialize()` 校验。非空 DB
 | Artifact GC | best-effort，记 warning，不停 dispatch |
 | heartbeat | 是 readiness/运维事实，写入失败不应伪装 Worker 健康 |
 | attempt ownership loss | 终止当地 attempt，交给 durable recovery，不 terminalize Run |
+| sticky failure recovery | 保留原 code/message；只协调 ToolEffect，解决后提交原 FAILED |
+| deadline 与 unresolved | 允许 TIMED_OUT 并审计 unresolved IDs；其他 terminal fail-closed |
 
 ## 10. 调度与扩展边界
 

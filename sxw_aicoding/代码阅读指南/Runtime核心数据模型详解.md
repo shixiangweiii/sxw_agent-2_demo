@@ -80,6 +80,18 @@ SQLite 的 `runs`、`run_events`、`checkpoints`、`release_manifests` 不再存
 - `input_text`、`updated_at`
 - `trace_id`：只用于 API 进程与 Worker 进程的诊断关联，不参与业务裁决
 
+ToolEffect 协调使用的 `pending_input` 是持久化控制事实，不是随意的 UI JSON。普通
+终端失败被 unresolved effect 阻挡时，它包含严格的：
+
+```text
+type = TOOL_RECONCILIATION_REQUIRED
+unresolved_tool_execution_ids = [...]
+pending_terminal = {status: FAILED, code: ..., message: ...}
+```
+
+`pending_terminal` 是原 Engine failure 的 sticky authority。后续不能从 Event 或
+Activity error 重新推断，也不能清空它后重跑 Engine。
+
 ### 3.3 ActivityRecord 与 Claim
 
 Activity 是可领取的持久工作单元。关键字段是：
@@ -165,6 +177,38 @@ activate_current_releases(plan_execute, agent_loop, native_loop)
 
 三份 manifest 的写入/核对、活跃旧 Run 检查和三个 active pointer 切换全部在一个 `BEGIN IMMEDIATE` 内，不会暴露“一半新 release”。
 
+### 3.8 ToolResult 的模型投影只有一份
+
+严格 DTO 与模型可读 tool message 是两个边界。唯一投影函数位于
+`agent/runtime/application/tool_outputs.py`：
+
+```python
+project_tool_result_for_model(result: ToolResultEnvelope) -> JSON value
+```
+
+它同时服务于 ADK、Native fresh execution 和 Native checkpoint recovery，覆盖
+`SUCCESS/NO_OUTPUT/FAILURE/INTERRUPT/UNKNOWN`，并保留 Artifact ref 与 provider
+external object identity。这样 crash 恢复不会因为调用另一份转换函数而给模型看到
+不同语义。
+
+Runtime 控制故障不进入这个投影：所有 `RuntimeFault` 和
+`AttemptOwnershipLost` 都必须越过模型回灌边界进入 Runtime 控制层；只有已经严格
+结算出的 `ToolResultEnvelope` 才能投影给模型。非 ownership `RuntimeFault` 由
+Coordinator 保留 code/message 转成 terminal failure，`AttemptOwnershipLost` 则继续
+到 Worker，二者不能混为同一种终态策略。
+
+### 3.9 Evidence identity 与请求幂等 identity 分离
+
+`SkillRequestContext` 同时携带两个显式字段：
+
+- `tool_execution_id`：Evidence 与 Tool ledger 的权威关联；
+- `idempotency_key`：稳定下游请求/安全 retry identity。
+
+`knowledge_search` 的 `EvidenceSet.tool_execution_id` 必须使用前者；检索 `query_id`
+则由后者与 query 文本确定性生成。当前 SQLite stable slot 初始化时两字段恰好同值，
+但它们仍是独立契约，producer 不能再借用 idempotency key 填 Evidence execution
+identity；边界测试也会用不同值验证这种解耦。
+
 ## 4. 状态机
 
 ### 4.1 RunStatus
@@ -188,6 +232,20 @@ RUNNING -> RECONCILE | MANUAL
 ```
 
 租约过期恢复不是简单无条件回到 `PENDING`：Store 先检查 deadline、cancel 和未决 ToolEffect。只有可安全重放的边界才重派，不确定副作用会进入 reconcile/manual。
+
+普通 terminal failure 遇到 unresolved ToolEffect 时还有一条显式路径：
+
+```text
+RUNNING
+-> WAITING_INPUT + sticky pending_terminal(FAILED, code, message)
+-> strict mark_committed / mark_failed / reconcile
+-> 最后一个 effect 已确定
+-> FAILED（仍是原 code/message，不重跑 Engine）
+```
+
+deadline 优先于这个等待边界，可提交 `TIMED_OUT` 并记录 unresolved IDs；cancel 赢得
+状态 CAS 后则保持 `CANCEL_REQUESTED`，全部协调完成才 `CANCELLED`。Store 最底层
+terminal transaction 还会拒绝任何非 `TIMED_OUT` 终态跨过 unresolved effect。
 
 ## 5. SQLite 表与权威职责
 
@@ -243,6 +301,12 @@ RUNNING -> RECONCILE | MANUAL
 - Event batch 与 `runs.next_seq` 同事务，回滚不留 seq 洞。
 - Checkpoint CAS 和引擎事件可同事务提交。
 - 成功时 final assistant、由 committed Evidence 派生的 citations 和 `RUN_TERMINATED` 同事务。
+- 普通 `FAILED` 若遇 unresolved effect，不写 terminal；同事务保存 sticky
+  `pending_terminal`、manualize ToolEffect，并推进父 Activity/Run 到协调边界。
+- strict signal/query 解决最后一个 effect 时，ToolExecution、Event、父 Activity 与原
+  `FAILED` 在权威写事务中推进，不再次运行 Engine。
+- `_finalize_terminal_in_tx()` 对所有入口执行最终防线：只有 `TIMED_OUT` 可以在
+  payload 中保留 unresolved ToolEffect。
 - Store 自有事件不允许 Engine 伪造。
 
 ## 7. AttemptOwnershipLost：所有权不是业务失败
@@ -256,6 +320,13 @@ RUNNING -> RECONCILE | MANUAL
 
 它必须穿过 Engine 和 Coordinator 到 Worker，不能被包装成 ToolResult，也不能使 Run 终态化。Worker 停止当地 attempt，让持久化 lease recovery 决定下一个所有者。
 
+边界不只保护 ownership 子类：非 ownership `RuntimeFault` 同样不能回灌模型。Tool
+已 durable `DISPATCHED` 后发生该异常时，Broker 先按 effect class 结算 ledger
+（READ_ONLY 为确定失败，effectful 为 UNKNOWN/MANUAL_REQUIRED），再保留原错误码
+上抛。Native executor 直接透传；ADK Plugin 透传后，Adapter 只从 ADK 2.6.2 的
+异常 causal chain 精确解包已知 Runtime 控制类型。普通工具异常仍可按既有模型反馈
+协议处理。
+
 ## 8. 建议阅读顺序
 
 1. `agent/runtime/domain/models.py`：领域词汇和状态机。
@@ -264,6 +335,8 @@ RUNNING -> RECONCILE | MANUAL
 4. `common/sqlite_schema.py` 与 `agent/runtime/adapters/sqlite/database.py`：schema digest 启动边界。
 5. `agent/runtime/adapters/sqlite/store.py`：admission、claim、checkpoint、terminal 事务。
 6. `agent/runtime/application/events.py` 与 `agent/runtime/application/coordinator.py`：RuntimeIO 和终态所有权。
-7. `agent/runtime/worker/main.py` 与 `agent/runtime/worker/dispatcher.py`：release 装配、领取和 lease 续租。
+7. `agent/runtime/application/tool_outputs.py`、`agent/runtime/application/tool_broker.py` 与
+   `agent/runtime/adapters/brokered_tools.py`：ToolResult/Evidence/control-fault 边界。
+8. `agent/runtime/worker/main.py` 与 `agent/runtime/worker/dispatcher.py`：release 装配、领取和 lease 续租。
 
 > 本项目当前的 authority 是单机多进程共享 SQLite + Artifact CAS。租约/fencing 解决的是本机进程级故障恢复，不等于跨主机 HA。

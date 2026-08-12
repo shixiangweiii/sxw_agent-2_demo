@@ -92,6 +92,10 @@ input_text, pending_input, updated_at, trace_id
 ```
 
 `trace_id` 是跨 API/Worker 进程的诊断关联键，不参与幂等 digest 或终态裁决。
+`pending_input` 不只承载普通 HITL；ToolEffect 协调边界还会保存严格的
+`unresolved_tool_execution_ids`。若 Engine 已经得到终端失败结论，其中还会携带唯一
+current 形态的 sticky `pending_terminal={status: FAILED, code, message}`。这份原失败
+是后续最终裁决的权威，不能从 Activity error 或 Event 反推。
 
 ### 3.3 Run 状态机
 
@@ -100,11 +104,24 @@ ACCEPTED -> DISPATCH_PENDING -> RUNNING
 RUNNING  -> WAITING_RETRY -> DISPATCH_PENDING
 RUNNING  -> WAITING_INPUT -> DISPATCH_PENDING
 RUNNING  -> CANCEL_REQUESTED
+RUNNING  -> WAITING_INPUT(pending_terminal=FAILED) -> FAILED
 
 终态：SUCCEEDED | FAILED | CANCELLED | TIMED_OUT | REJECTED
 ```
 
 Run terminal 最多一个，由 `RUN_TERMINATED` 的 unique index 和 Store 状态 CAS 双重防护。Engine 只返回 `EngineOutcome`，不能直接写 Run；正常 EngineOutcome 由 RunCoordinator 裁决，而 cancel、deadline、lease recovery/reconciliation 等命令路径可以由 Store 在权威事务中直接终态化。
+
+普通 `FAILED` 还有一条 ToolEffect 屏障：如果 `DISPATCHED`、`UNKNOWN`、
+`RECONCILING`、`MANUAL_REQUIRED` 等 unresolved fact 仍存在，Store 不写 terminal，而是在同一事务中把
+这些 effect 变成 operator-actionable `MANUAL_REQUIRED`、保存 sticky
+`pending_terminal`，并推进 Run 到 `WAITING_INPUT`、父 Activity 到 `RECONCILE`。
+最后一个 strict `tool_reconciliation` signal 或授权的 query-only reconcile 解决账本后，
+Store 原子提交原来的 `FAILED`，不重新执行 Engine，也不请求模型重答。
+
+优先级必须分清：deadline 可以提交 `TIMED_OUT` 并在 payload 保留 unresolved IDs；
+cancel 已获得裁决权时先保持 `CANCEL_REQUESTED` 做协调，全部解决后才 `CANCELLED`；
+普通 sticky failure 则最终回到原 `FAILED`。底层 terminal helper 禁止所有非 timeout
+终态跨过 unresolved effect，防止其他入口绕过上述规则。
 
 ### 3.4 Release 不匹配不是 Run 终态
 
@@ -152,6 +169,10 @@ RUNNING -> RECONCILE | MANUAL
 CLAIMED/RUNNING -> PENDING       # 仅在可安全重放时
 CLAIMED/RUNNING -> RECONCILE    # 存在不确定 effect
 ```
+
+当计划 `FAILED` 被 ToolEffect 屏障推迟时，父 `ENGINE_RUN` Activity 会从 `RUNNING`
+进入 `RECONCILE`，并释放 lease。它不再是一个允许重新跑 Engine 的普通 pending
+Activity；只有严格人工 signal 或字段完全匹配的 reconcile-only marker 能推进它。
 
 ### 4.4 Claim、lease 和 fencing
 
@@ -254,6 +275,27 @@ Activity RUNNING + lease 过期
 
 stale fence、lease loss 或 checkpoint CAS 冲突被转为 `AttemptOwnershipLost`。它只终止当地 attempt，不改写 Run terminal。这保持了聚合所有权：无权 Worker 不能对 Run 做业务裁决。
 
+Native 和两个 ADK Engine 都遵守同一边界：`AttemptOwnershipLost` 与所有
+`RuntimeFault` 都不能成为模型可见 ToolResult。普通 Python 工具异常仍可由 ADK
+反馈模型；Runtime 控制故障必须保留原类型/错误码穿过 Adapter。ADK 框架包装只会按
+明确 causal chain 精确解包，不能把任意框架错误猜成所有权异常。
+
+### 8.5 Engine 失败时还有未决副作用
+
+```text
+EngineOutcome = TERMINAL_FAILURE(code=X)
++ ToolExecution 仍 unresolved
+-> Store effect-aware manualize
+-> Run WAITING_INPUT + sticky pending_terminal(FAILED, X)
+-> 父 Activity RECONCILE，释放 Worker lease
+-> 每次 strict signal/query 只解决账本，不跑 Engine
+-> 最后一个 effect 解决：同事务提交原 FAILED(code=X)
+```
+
+如果 Worker 在 reconcile-only query 已落账、但父状态提交前失联，maintenance 发现
+`pending_terminal` 且 unresolved 已清空，会直接补交原 `FAILED`。因此 crash/no-crash
+不会把失败任务重新送回模型。
+
 ## 9. 关键约束总结
 
 | 约束 | 持久化保障 |
@@ -266,6 +308,8 @@ stale fence、lease loss 或 checkpoint CAS 冲突被转为 `AttemptOwnershipLos
 | 过期 Worker 不写入 | lease + monotonically increasing fence |
 | 历史不吸收失败 partial | committed USER + successful ASSISTANT events |
 | Native 最终回答不是 delta 拼接猜测 | explicit final assistant override |
+| 普通失败不遗留未决副作用 | sticky pending terminal + strict reconciliation |
+| 非 timeout 终态不能越过 unresolved | Store terminal transaction 防线 |
 
 ## 10. 源码阅读索引
 
@@ -274,6 +318,8 @@ stale fence、lease loss 或 checkpoint CAS 冲突被转为 `AttemptOwnershipLos
 - `agent/runtime/application/admission.py`：CreateRun 命令构造。
 - `agent/runtime/adapters/sqlite/store.py`：Conversation/Run/Activity 的 admission、claim、recovery、history 和 terminal 事务。
 - `agent/runtime/application/coordinator.py`：Activity 所有权、EngineOutcome 到 Run terminal 的裁决。
+- `agent/runtime/application/tool_broker.py` 与 `agent/runtime/application/tool_outputs.py`：
+  effect 账本和唯一模型投影。
 - `agent/runtime/application/events.py`：generation 事件和 final assistant。
 - `agent/runtime/adapters/adk_engines.py`：两个 ADK Engine 的 per-attempt session。
 - `agent/engine/native_loop/engine.py`：Native 直接 RuntimeIO 的恢复与 final 语义。

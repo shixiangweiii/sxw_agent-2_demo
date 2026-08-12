@@ -26,6 +26,8 @@ Engine 只能把事件草稿交给 Runtime EventSink。EventSink 成功提交 `r
 
 崩溃只允许丢失尚未达到提交边界的内存 buffer；已经通过 SSE 可见的 delta 必然可重放。
 
+Native 的 `await RuntimeIO.emit(text)` 是 pull-order/backpressure 边界：返回前 Adapter 不得拉取下一个 provider event。它不意味着该 delta 已单独 durable commit；`emit_text` 可将它留在有界 buffer，由 100ms/2KiB、非 text 事件、checkpoint、close 或 terminal 边界 flush。禁止在每个 provider chunk 后调用 `force_flush()`，否则会退化成 chunk 级 SQLite `synchronous=FULL` 写放大。
+
 ### 3. 三类事实严格分离
 
 1. `OUTPUT_DELTA_COMMITTED`：可展示 partial，不进入后续语义历史；
@@ -56,4 +58,3 @@ Skill UI frame 必须先作为 `SKILL_UI_FRAME_COMMITTED` 进入 Event Store，�
 - 客户端重连可以从任意已见 seq 继续。
 - 首版只能声明 committed/AVAILABLE，不能声明 DELIVERED/ACKED。
 - SQLite 写放大受聚合控制，代价是最多约 100ms/2KiB 的持久化粒度。
-

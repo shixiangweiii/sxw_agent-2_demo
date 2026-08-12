@@ -190,6 +190,8 @@ curl -X POST "http://127.0.0.1:8000/api/v1/runs/$RUN_ID/signals" \
 
 同一 Run 有多个 unresolved effect 时一次 signal 只解决一个，最后一个才恢复普通执行。cancel 已先提交时仍可发送相同的严格处置信号：Run 始终保持 `CANCEL_REQUESTED`，最后一个 effect 确定后才 `CANCELLED`；hook 中断/无结论会回到人工边界，绝不会借恢复重发原副作用。具体操作与排障见 [RUNBOOK](RUNBOOK.md)。
 
+若这个 strict boundary 还带有 `pending_terminal={"status":"FAILED","code":...,"message":...}`，说明引擎已产生不可重试失败，只是外部 effect 未确定而不能立即终态化。最后一个 effect 被 `mark_committed` / `mark_failed` / query hook 确定后，Store 直接提交原 `FAILED` 和原错误码，不恢复 Engine。期间 GET Run 仍是非终态；deadline 先到则仍以 `TIMED_OUT` 收口。
+
 通用 `native_loop` 会在 model request/response、完整 ToolCall batch、每个 ToolResult、next-turn/completed 边界写 strict checkpoint；大 ToolResult 不复制进 checkpoint，而保存 `LedgerToolResultRef`，恢复时在所有历史位置通过 Tool Broker/Artifact 重新物化。确定性 WAITING_INPUT 与幂等外部副作用纵切只保留为 reliability test fixture，生产 Worker 没有特殊 prompt 路由。
 
 ## ARAG：durable index job

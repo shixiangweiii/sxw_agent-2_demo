@@ -7,6 +7,7 @@ from agent.runtime.application.tool_outputs import (
     a2a_output,
     claude_skill_output,
     plain_json_output,
+    project_tool_result_for_model,
     skill_center_output,
 )
 from agent.runtime.domain.errors import RuntimeFault
@@ -123,3 +124,75 @@ def test_typed_output_bypass_is_revalidated_by_protocol_adapter() -> None:
         plain_json_output(unsafe_output)
 
     assert malformed.value.code == "TOOL_RESULT_CONTRACT_INVALID"
+
+
+@pytest.mark.parametrize(
+    "result,expected",
+    [
+        (
+            ToolResultEnvelope(
+                status=ToolResultStatus.SUCCESS,
+                preview={"answer": 42},
+            ),
+            {"answer": 42},
+        ),
+        (
+            ToolResultEnvelope(
+                status=ToolResultStatus.SUCCESS,
+                preview={"bounded": True},
+                result_ref="a" * 64,
+            ),
+            {"content": {"bounded": True}, "artifact_ref": "a" * 64},
+        ),
+        (
+            ToolResultEnvelope(
+                status=ToolResultStatus.SUCCESS,
+                preview="created",
+                external_object_id="provider-object-7",
+            ),
+            {"content": "created", "external_object_id": "provider-object-7"},
+        ),
+        (
+            ToolResultEnvelope(status=ToolResultStatus.NO_OUTPUT),
+            {"status": "NO_OUTPUT"},
+        ),
+        (
+            ToolResultEnvelope(
+                status=ToolResultStatus.INTERRUPT,
+                pending_input={"type": "APPROVAL"},
+            ),
+            {"interrupt": True, "pending_input": {"type": "APPROVAL"}},
+        ),
+        (
+            ToolResultEnvelope(
+                status=ToolResultStatus.FAILURE,
+                error_code="TOOL_FAILED",
+                error_message="failed",
+            ),
+            {
+                "isError": True,
+                "errorCode": "TOOL_FAILED",
+                "content": "failed",
+                "unknownEffect": False,
+            },
+        ),
+        (
+            ToolResultEnvelope(
+                status=ToolResultStatus.UNKNOWN,
+                error_code="TOOL_EFFECT_UNKNOWN",
+                error_message="dispatch outcome unknown",
+            ),
+            {
+                "isError": True,
+                "errorCode": "TOOL_EFFECT_UNKNOWN",
+                "content": "dispatch outcome unknown",
+                "unknownEffect": True,
+            },
+        ),
+    ],
+)
+def test_model_projection_is_single_and_total_for_current_statuses(
+    result: ToolResultEnvelope,
+    expected,
+) -> None:
+    assert project_tool_result_for_model(result) == expected

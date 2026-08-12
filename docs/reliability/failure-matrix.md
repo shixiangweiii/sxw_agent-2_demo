@@ -43,6 +43,7 @@
 | Prepare committed、dispatch 前 kill | `PREPARED` | 明确未 dispatch | recovery 按策略 dispatch 一次，或 cancel 时 `FAILED/not_dispatched` | 标 UNKNOWN；生成新 slot |
 | `DISPATCHED` commit 后、真正 I/O 前 kill | `DISPATCHED` | 保守视为可能已发出 | READ_ONLY 可按规则重试；side-effect 先 reconcile/manual | 对 side-effect 当普通失败重试 |
 | Tool 执行中进程 kill/timeout | `DISPATCHED` | 无证据则 `UNKNOWN` | supports_reconcile 则查询，否则 manual | 猜测失败 |
+| Tool executor 在 durable dispatch 后抛 Runtime control/contract fault | ownership fault 保持 `DISPATCHED`；其余按 class 先结算 | `AttemptOwnershipLost` 原样冒泡且不写 ToolResult；其余 RuntimeFault 为 READ_ONLY=`FAILED`、effectful=`UNKNOWN`，并保留原 code | 新 owner lease recovery，或 Coordinator 按计划失败进入下述 strict boundary | 用 `except Exception` 把 ownership loss 变成模型结果；未结算 effect 就直接失败 Run |
 | Tool 成功但 ACK/Runtime result commit 丢失 | `DISPATCHED → UNKNOWN` | 可能已经发生 | 使用稳定 idempotency/external ref reconcile | 再发 NON_IDEMPOTENT/UNKNOWN tool |
 | 父 lease 丢失，账本含不安全 `DISPATCHED/UNKNOWN` | child=`RUNNING/RECONCILE` | 同一 recovery 事务保留有界 UNKNOWN/correlation 并转 `MANUAL_REQUIRED/MANUAL` | strict pending 只列 operator-actionable IDs；READ_ONLY/稳定幂等 remainder 仍按冻结 guard 重排 | 把不安全 ID 留在不可领取状态；把 replay-safe ID伪装成人工项；重发 UNKNOWN/NON_IDEMPOTENT |
 | 自动 reconcile 无结论，进入人工处置 | `MANUAL_REQUIRED` + Tool Activity=`MANUAL` | 只接受匹配当前 pending IDs 的 `tool_reconciliation` | `mark_committed` 用成功证据/result/ref 收口；`mark_failed` 用未提交证据形成 sticky failure；`reconcile` 仅在持久化 capability 存在时授权再次查询 | 普通 signal 只唤醒父 Activity；未改 effect 就重跑；复制大 result/evidence 到 DB/Event |
@@ -54,6 +55,9 @@
 | 人工 `result_ref` 不存在或 ID/Run/pending 不匹配 | `MANUAL_REQUIRED` 不变 | 整个 signal 事务回滚，无 signal/event/link/父唤醒 | 修正 Artifact/ID 后使用新 signal_id | 部分消费 signal；孤立 Artifact Link；猜测目标 ToolExecution |
 | ToolResult status、ref 或外部 identity 与账本矛盾 | 原 effect 不变 | effect/result matrix、nested/column/Event/Link 和已知 `external_object_id` 必须一致；整笔 fail closed | 使用 canonical ToolResultEnvelope 与正确 Artifact metadata 重试 | COMMITTED+FAILURE；UNKNOWN 无 error；metadata link 指向另一个 ref；稳定 slot 更换外部对象 |
 | Tool 明确失败且未产生 effect | `FAILED` | 可按 manifest 判断 retry | READ_ONLY 或受支持的幂等 effect 可同 execution/key 增 attempt | 给非幂等 tool 透明 retry |
+| Engine/Adapter 已判普通 terminal failure，但仍有 unresolved ToolEffect | uncertainty 原子转 `MANUAL_REQUIRED/MANUAL`，父=`RECONCILE`，Run=`WAITING_INPUT` | `pending_input.pending_terminal={status:FAILED,code,message}` sticky 保存原计划终态 | 只接受 strict tool_reconciliation；最后一个 effect 确定后原子提交原 FAILED | 直接 FAILED 留下无主账本；丢失原错误；重新请求模型 |
+| pending FAILED boundary 的最后一个 `mark_committed/mark_failed` | effect=`COMMITTED/FAILED` | ToolResult/Signal/Activity 与原 `FAILED + RUN_TERMINATED` 同一事务 | 返回 terminal Run；Engine 不再领取 | 解决 effect 后改成成功；先重排 Engine 再失败 |
+| pending FAILED 的 query hook 已 settle、父 Worker 在 query settlement 前 kill | effect 已确定，pending terminal 仍 durable | lease recovery 直接提交原 FAILED；若 deadline 已先到则 TIMED_OUT | 清理 parent lease/marker 与 terminal 在同一恢复事务完成 | 清 pending terminal 后普通 claim；重查/重发原 effect |
 | 已 `COMMITTED` 的 Tool slot 重放 | `COMMITTED` | 返回已保存完整结果/ref | 不调用外部系统 | 重复副作用 |
 | 同 slot tool name/digest/release/effect 语义改变 | 任意已有状态 | Store 与 Broker 都从冻结账本 fail closed `TOOL_REPLAY_MISMATCH` | Run terminal failure/人工分析 | 用当前更“安全”的 manifest 解释旧 UNKNOWN；按 args hash 猜测匹配 |
 | terminal 先 commit，随后 cancel | terminal | 409 `RUN_ALREADY_TERMINAL` | 返回现有 terminal | 覆盖成 CANCELLED |
@@ -66,6 +70,7 @@
 | claim 后、Coordinator 调 Engine 前 cancel | Activity 有有效 fence，Run=`CANCEL_REQUESTED` | Coordinator 在 registry/checkpoint/history/adapter 前直接 cancel settlement | 无 unresolved 则唯一 `CANCELLED`；有 unresolved 则严格 reconcile | 先调用 LLM/EngineAdapter 再把 outcome 改 CANCELLED |
 | Tool complete 与 cancel 并发 | 由 DB commit 顺序决定 | terminal 先：cancel 409；cancel 先：结果 late、不得 success terminal | 两种顺序分别测试 | 按线程到达时间/内存 flag 决定 |
 | unresolved effect 到 deadline | `DISPATCHED/UNKNOWN/RECONCILING/MANUAL_REQUIRED` | Run=`TIMED_OUT` | terminal payload 列出 `unresolved_tool_execution_ids`；账本原状态可留作 terminal 审计且不可再领取 | 改为 FAILED/CANCELLED 或清空 ToolEffect |
+| 任意非 timeout terminal 入口发现 unresolved effect | 原 Run/ToolEffect 不变 | Store 最后一层 `UNRESOLVED_TOOL_EFFECTS` fail closed；普通 planned FAILED 使用专用 deferred boundary | 修复调用路径或进入 strict reconciliation | 只在 Coordinator success 分支检查；让旁路 terminal 穿透 |
 
 ## 4. Timer、Signal 与 HITL
 

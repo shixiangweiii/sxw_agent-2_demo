@@ -151,6 +151,8 @@ def _assert_loop_tool_parity(
                 "agent_loop/native_loop ToolCatalog declaration differs: "
                 f"{native_spec.name}"
             )
+
+
 async def _run() -> None:
     worker = await build_worker()
     loop = asyncio.get_running_loop()

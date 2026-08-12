@@ -48,7 +48,9 @@ text 不走通用“每事件立即 append”路径，而是进入 `emit_text()`
 
 `emit_text()` 还会在首个非空 delta 记录 TTFT，并把 delta 追加到 attempt-local `_full_text`。
 
-Native 生产 Adapter 在 `await io.emit("text", ...)` 后紧接着 `await io.force_flush()`，因此 Native 默认路径的每个已交给 Adapter 的 text 帧都是提交屏障；提交被阻塞时不会继续拉 provider。ADK 两引擎仍可利用 Sink 的 100 ms / 2 KiB 聚合。
+Native 生产 Adapter 对每个 text 会 `await io.emit(...)`，但**不再紧接着 `force_flush()`**。这个 await 保证的是当前 delta 已按顺序被 Sink 接纳，而且 Adapter 还未允许 pump 拉下一个 provider item；它不保证未达阈值的小 delta 已单独写入 SQLite。
+
+text 的 durable 时机仍由 Sink 决定：2 KiB 阈值、100 ms timer、message/generation 切换、非 text 事件、checkpoint、显式 `force_flush()` 或 `close()`。因此 Native 和 ADK 现在都遵守同一份 100 ms / 2 KiB 冻结聚合语义；Native 另外通过单 slot acknowledge 提供无界 queue 不存在的反压。
 
 ## 4. 非 text 分支：先拿锁，再 flush
 
@@ -129,13 +131,15 @@ Native 在 `MODEL_REQUEST` checkpoint 中一并提交 `OUTPUT_GENERATION_STARTED
 
 ```text
 NativeLoop kernel yield StreamEvent
-  → NativeLoopAdapter 逐个获取
+  → attempt-level native-stream-pump 放入单个 envelope slot
   → await io.emit(event, data)
-  → text 额外 await io.force_flush()
-  → 提交完成后才获取下一个 kernel/provider 事件
+  → emit 返回后 acknowledge slot
+  → pump 才获取下一个 kernel/provider 事件
 ```
 
-Skill UI 的 awaited sink 也直接 `await io.emit()`。Native 没有 ADK merge queue，没有后台无界 Queue，也没有“无 RuntimeIO”生产 fallback。
+单 slot 与 acknowledge 是 pull/顺序屏障，不是每 delta 的 durable 屏障。如果当前 `emit` 因达到字节阈值而正在写库，或是一个必须直接提交的非 text 事件，写库阻塞会自然阻止下一次 pull；如果 text 只进入 buffer，则等后续 timer/阈值/语义边界批量提交。
+
+Adapter 同时维持一个 attempt-level `native-cancel-watch`，定期查取消而不是每个 delta 查 SQLite；整个消费循环受绝对 deadline timeout 监督。退出时 pump/watcher 都被取消并 await，然后 `aclose()` kernel/provider stream。Skill UI 的 awaited sink 也直接 `await io.emit()`。Native 没有 ADK merge queue，没有后台无界 Queue，也没有“无 RuntimeIO”生产 fallback。
 
 ### 7.2 ADK：只保留给两个引擎
 

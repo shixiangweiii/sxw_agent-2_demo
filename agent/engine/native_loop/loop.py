@@ -276,12 +276,18 @@ class NativeLoop:
 
     async def run(
         self,
-        messages: list[Msg],
+        messages: list[Msg] | None = None,
         *,
         initial_state: LoopState | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """驱动循环，产出统一 StreamEvent 序列。结束时 ``final_messages`` 可取回完整历史。"""
-        state = initial_state or LoopState(messages=messages)
+        if (messages is None) == (initial_state is None):
+            raise ValueError("exactly one of messages or initial_state is required")
+        state = (
+            initial_state
+            if initial_state is not None
+            else LoopState(messages=messages or [])
+        )
         cfg = self._config
         log_kv(logger, logging.INFO, "NativeLoop", "start",
                max_iters=cfg.max_iters, hard_cap=cfg.hard_cap,
@@ -568,7 +574,7 @@ class NativeLoop:
                            iter=state.iters, finish_reason=finish_reason,
                            transition=T_COMPLETED)
                     turn_span.set(transition=T_COMPLETED)
-                    for ev in self._complete(state, finish_reason):
+                    for ev in self._complete(state):
                         yield ev
                     return
 
@@ -643,7 +649,7 @@ class NativeLoop:
             "code": self.error_code,
         })]
 
-    def _complete(self, state: LoopState, finish_reason: Optional[str]) -> list[StreamEvent]:
+    def _complete(self, state: LoopState) -> list[StreamEvent]:
         self._finish(state, T_COMPLETED)
         return []
 
@@ -990,20 +996,6 @@ class NativeLoop:
         )
 
     # ── 事件翻译 ───────────────────────────────────────────────────────────
-
-    def _call_events(self, call: ToolCall) -> list[StreamEvent]:
-        """tool_call → Engine projection; durable Broker facts remain authoritative."""
-        if call.name == PLAN_TOOL:
-            # The post-result native checkpoint atomically persists WorkingState
-            # and MODEL_PLAN_UPDATED.  Do not publish request-local plan state.
-            return []
-        args, parse_error = executor.parse_arguments(call)
-        broker_owned = self._registry.get(call.name) is not None and parse_error is None
-        return [StreamEvent("tool_call", {
-            "id": call.id,
-            "name": call.name,
-            "args": args or {},
-        }, authority="broker" if broker_owned else "engine")]
 
     def _result_events(self, outcome: executor.ToolOutcome) -> list[StreamEvent]:
         # 计划工具的返回不给用户看：它的信息已经由 plan_step 表达过了。

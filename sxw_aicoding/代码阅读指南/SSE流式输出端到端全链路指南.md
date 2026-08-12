@@ -1,242 +1,88 @@
 # SSE 流式输出端到端全链路指南
 
-本文从 CreateRun 一直跟到 Web UI/eval 收到终态，重点说明当前 Native direct RuntimeIO、ADK-only queue、Tool Broker 事件权威、generation 替换与 committed replay。
-
-## 1. 一句话架构
+## 1. 一句话模型
 
 ```text
-Client CreateRun
-  → Runtime durable admission
-  → Worker exact-release claim
-  → EngineAdapter + RuntimeIO / Tool Broker
-  → SQLite committed Canonical Events
-  → API replay/tail SSE
-  → Web UI / eval 按 seq 投影
+CreateRun durable admission -> exact-release Worker -> Adapter/RuntimeIO/Broker
+-> committed Canonical Events -> API replay/tail SSE -> Web 或 eval 投影
 ```
 
-SSE 不是 Worker 向浏览器的直连推送队列。API 和 Worker 通过 `runtime.db` 解耦；事件必须先 commit，然后才能被 SSE 查询看到。
+SSE 不是 Worker 到浏览器的内存推送。Worker 先提交 `run_events`，API 再查询；断线、API 重启和 Worker 重启都不依赖进程内推送状态。
 
-## 2. 端到端时序
+## 2. CreateRun、执行和订阅相互独立
 
-```text
-Web/Eval          Runtime API        Runtime DB          Worker/Adapter       Provider/Tool
-  │ POST /runs      │                  │                    │                  │
-  ├─────────────▶│ admission tx     │                    │                  │
-  │                 ├─────────────────▶│ Run/Activity/events│                  │
-  │ 202 + run_id    │                  │                    │                  │
-  │◀──────────────────│                  │                    │                  │
-  │ GET events      │                  │ exact claim tx     │                  │
-  ├─────────────▶│ list_events      │◀──────────────────┤                  │
-  │◀─ committed SSE ─┤◀─────────────────┤                    │                  │
-  │                 │                  │                    ├─ request/stream ─▶│
-  │                 │                  │◀─ events/checkpoint ┤◀─ chunks ────────┤
-  │◀─ text_start/text─┤◀─ polling sees commit                 │                  │
-  │                 │                  │◀─ Broker ledger/events ─┤─ tool execution ───▶│
-  │◀─ tool/process ──┤◀─ polling sees commit                 │                  │
-  │◀─ assistant_message + citation + terminal (committed order)                  │
-```
-
-## 3. CreateRun 与订阅是两条独立命令
-
-`POST /api/v1/runs` 完成 durable accepted 后返回 Run，不等待模型。请求使用 `Idempotency-Key`，相同范围与请求 digest 可重放；digest 不同则冲突。
-
-之后客户端订阅：
+`POST /api/v1/runs` 以 `Idempotency-Key` 做 durable admission，返回 `202` 不等待执行。该事务读取 active release 并冻结 fingerprint；Worker 只会凭完全相同的 `(engine, release_fingerprint)` claim。随后客户端可订阅：
 
 ```http
 GET /api/v1/runs/{run_id}/events?after_seq=0
 Accept: text/event-stream
 ```
 
-SSE 断开不会取消 Run。取消是独立 `POST /runs/{run_id}/cancel` 命令。
+取消是独立命令，SSE 断开不会取消 Run。
 
-## 4. Worker 内部的两种 Adapter
+## 3. 两条引擎事件路径
 
-### 4.1 ADK 两引擎
+`plan_execute` 和 `agent_loop` 使用 `AdkEngineAdapter`。每个 attempt 创建独立的 ADK session/artifact service，canonical history 由 committed events 重放；ADK 内部 transport 只属于这两个引擎。Broker 已拥有的工具投影只会先清空 text buffer，不会重复写 ToolCall/ToolResult；stream EOF 也必须有显式 `EngineOutcome` 才能成功。
 
-`plan_execute` 和 `agent_loop` 使用 `AdkEngineAdapter`。这条路径保留 ADK 内部 queue/merge，但每个 attempt 使用独立的临时 ADK session/artifact service。跨 attempt history 只从 Canonical Events + Checkpoint 编译。
-
-Adapter 消费合并后的事件：
+`NativeLoopAdapter` 不使用 ADK 内部事件传输，直接调用 RuntimeIO。它的 pump 一次交付一项：
 
 ```text
-普通 engine event → await RuntimeIO.emit
-Broker 已提交的 tool projection → force_flush 后跳过
+pull provider/kernel event
+-> await io.emit(event)
+-> 才允许 pull 下一项
 ```
 
-不允许根据 generator EOF 猜成功；必须有显式 EngineOutcome。
+这保证 Runtime admission 的顺序和背压，但对 text 不等同每帧 DB commit。`CommittedEventSink` 按 100ms 或 2KiB 合并相同 message/generation 的 text；在身份切换、Tool、checkpoint、close 或终态边界前才清空缓冲并提交。Skill UI event 也走 awaited RuntimeIO，因此没有 Native 私有无界队列。
 
-### 4.2 Native 引擎
+## 4. Native generation 与 final assistant
 
-`NativeLoopAdapter` 直接实现 `execute(request, RuntimeIO)`，不使用 ADK queue/merge。每个 kernel event 都逐个 await 提交；text 后又立即 `force_flush()`。
+每个 model slot 开始时，Native 把 `MODEL_REQUEST` checkpoint 和 `OUTPUT_GENERATION_STARTED` 原子提交；SSE 名称为 `text_start`。payload 带 stable `message_id`、attempt `generation_id`、可选 supersedes generation 和 reason。
+
+后续 `OUTPUT_DELTA_COMMITTED` 映射为 `text`，每个 payload 也带 message/generation identity。新 generation 不删除旧 event，而由客户端用 `text_start` 仅清空回答正文。最终一个完整、非空、没有 ToolCall 的 assistant turn 由 Native 的 `set_final_assistant()` 显式指定。
+
+Coordinator 的成功事务原子写入：
 
 ```text
-provider/kernel event
-  → await io.emit
-  → text: await io.force_flush
-  → cancel/deadline probe
-  → 才拉下一个 event
+ASSISTANT_MESSAGE_COMMITTED
++ CITATION_SET_COMMITTED
++ success Run/Activity state
++ RUN_TERMINATED
 ```
 
-这是 Native 的背压与提交屏障。Skill UI 帧也使用直接 awaited sink，所以进度可实时提交，却不会在 Runtime 慢时无界堆积。
+`assistant_message` 以完整文本覆盖累积 delta，是最终语义权威；`RUN_TERMINATED` 是终态权威。
 
-## 5. Native generation 的完整流程
+## 5. 工具事实和控制故障
 
-默认 `native_early_tool_dispatch=off`，一轮模型的 durable 顺序是：
+Tool Broker 在 PREPARE transaction 中创建 ToolExecution/Tool Activity 和 `TOOL_CALL_COMMITTED`，在 settlement transaction 中提交 effect/result/ref、Activity 和 `TOOL_RESULT_COMMITTED`。Adapter 不得为同一 Broker 事实再写一次。
 
-```text
-MODEL_REQUEST checkpoint + OUTPUT_GENERATION_STARTED
-  → provider stream + committed OUTPUT_DELTA
-  → explicit finish marker
-  → MODEL_RESPONSE_COMMITTED checkpoint
-  → 无工具：COMPLETED checkpoint + final override
-  → 有工具：Broker PREPARE batch
-  → TOOL_BATCH_COMMITTED checkpoint
-  → dispatch / ordered Broker settlement
-  → TOOL_RESULT_COMMITTED checkpoint(s)
-  → NEXT_TURN checkpoint
-```
+已 durable `DISPATCHED` 后，`AttemptOwnershipLost` 以及 ownership-coded `RuntimeFault` 必须原样向上穿透：它们不是模型可见 ToolResult，也不由旧 Worker 结算。其他 executor `RuntimeFault` 先按 effect class 结算（READ_ONLY `FAILED`，effectful `UNKNOWN`），再保留原错误码抛回 Coordinator。
 
-Provider 必须给出单 choice 且显式 `stop` 或 `tool_calls`。零 chunk、usage-only、silent EOF、finish 矛盾等不能合成一个成功 TurnEnd。
+普通失败若留下 unresolved effect，Store 固定 `pending_input.pending_terminal` 并进入严格 tool reconciliation；最后一个 effect 被 signal 处置后才提交原 `FAILED`，不重跑 Engine。只有 `TIMED_OUT` 可成为仍带 unresolved ToolEffect 的终态。
 
-### 5.1 `OUTPUT_GENERATION_STARTED` / `text_start`
+## 6. SSE 编码与消费
 
-Native 在发起 provider 请求前，把 generation 开始事件和 `MODEL_REQUEST` checkpoint 原子提交。payload 包含：
+`agent/runtime/api/runs.py` 的主要映射：
 
-```json
-{
-  "message_id": "stable-model-slot",
-  "generation_id": "attempt-generation",
-  "supersedes_generation_id": null,
-  "reason": "initial|next_turn|retry|recovery|reactive_compact"
-}
-```
-
-current checkpoint codec 接受上表五个值；当前生产 producer 实际产生 `initial`、`next_turn`、`recovery`、`reactive_compact`。Coordinator 重试恢复 `MODEL_REQUEST` 时使用 `recovery`，目前没有单独发出 `retry` 的分支。
-
-API 把它映射为 `text_start`。新 generation 不删除旧 events，而是在投影端替换当前回答正文。
-
-### 5.2 `OUTPUT_DELTA_COMMITTED` / `text`
-
-Native text payload 带 `delta + message_id + generation_id`。`CommittedEventSink` 确保 buffer 不跨身份聚合；Native Adapter 的显式 flush 使当前帧先 commit，然后 provider 才能继续。
-
-### 5.3 `ASSISTANT_MESSAGE_COMMITTED` / `assistant_message`
-
-Native 只有最后一个完整、非空、无 ToolCall 的 Assistant turn 通过 `set_final_assistant()` 成为 final override。Coordinator 成功收口时，Store 在一个事务中提交：
-
-- `ASSISTANT_MESSAGE_COMMITTED`；
-- 从 committed Evidence 派生的 `CITATION_SET_COMMITTED`；
-- success terminal 状态及 `RUN_TERMINATED`。
-
-`assistant_message` 是最终语义权威，客户端应用其完整 text 覆盖已拼接 delta，不是追加。
-
-## 6. ToolCall/ToolResult 为什么不由 Adapter 重复 emit
-
-正常工具事实由 Tool Broker/Store 拥有：
-
-```text
-prepare_batch transaction
-  → ToolExecution(PREPARED)
-  → Tool Activity(PENDING)
-  → TOOL_CALL_COMMITTED
-
-settlement transaction
-  → ToolExecution effect/result/ref
-  → Tool Activity state
-  → Artifact metadata/link (如需)
-  → TOOL_RESULT_COMMITTED
-```
-
-Adapter 只需确保工具事实前的 text 已 flush。Native 的 MODEL_RESPONSE checkpoint 和逐帧 flush 提供该屏障；ADK Broker wrapper 在批次 PREPARE 前显式 flush。
-
-只有没有外部 dispatch/ToolExecution 的模型可修正错误，才由 Engine 提交 synthetic call/result 对。
-
-## 7. API SSE 编码
-
-`agent/runtime/api/runs.py` 将 Canonical EventType 映射为客户端 event name：
-
-| Canonical EventType | SSE event |
+| Canonical Event | SSE event |
 |---|---|
-| `USER_MESSAGE_COMMITTED` | `user_message` |
 | `OUTPUT_GENERATION_STARTED` | `text_start` |
 | `OUTPUT_DELTA_COMMITTED` | `text` |
-| `TOOL_CALL_COMMITTED` | `tool_call` |
-| `TOOL_RESULT_COMMITTED` | `tool_result` |
-| `MODEL_PLAN_UPDATED` | `plan_step` |
+| `TOOL_CALL_COMMITTED` / `TOOL_RESULT_COMMITTED` | `tool_call` / `tool_result` |
 | `SKILL_UI_FRAME_COMMITTED` | `skill_event` |
 | `CITATION_SET_COMMITTED` | `citation` |
 | `ASSISTANT_MESSAGE_COMMITTED` | `assistant_message` |
-| `RUN_STATUS_CHANGED` | `run_status` |
-| `ACTIVITY_STATUS_CHANGED` | `activity_status` |
 | `RUN_TERMINATED` | `terminal` |
 
-每个业务 event block 包含：
+每块包含 `id: <seq>`、event 名和 Canonical Event envelope。query `after_seq` 优先于 `Last-Event-ID`；visibility 过滤可以造成 seq 跳号。API 从 committed events 按 cursor 短查询，读到 `RUN_TERMINATED` 后结束；终态但 cursor 后无事件也结束。
 
-```text
-id: <run seq>
-event: <projection name>
-data: <Canonical Event envelope JSON>
-```
+`web/app.js` 和 `eval/harness/sse_client.py` 都按同一规则：`text_start` 清回答正文、`text` 追加、`assistant_message` 覆盖、`terminal` 才结束。fresh replay 与断线续传因此不会把多个 generation 的 partial 文本拼成最终回答。
 
-envelope 保留 event_id/run_id/activity/tool_execution/seq/payload/terminal/release 等字段。
+## 7. 阅读索引
 
-## 8. replay、tail 与 heartbeat
-
-SSE generator 以 cursor 循环：
-
-```text
-list_events(after_seq=cursor, limit=500)
-  → 按 seq yield
-  → 看到 RUN_TERMINATED 则 return
-  → Run 已终态且无新事件则 return
-  → 无事件超过 heartbeat 间隔则 yield comment
-  → 等待 poll interval 后重复
-```
-
-cursor 选择规则：query `after_seq` 优先，否则使用 `Last-Event-ID`，都没有则从 0 开始。
-
-heartbeat 是 `: heartbeat\n\n` SSE comment，无 id、无 seq、不入库，不改变 Run 状态。
-
-## 9. Web UI 如何消费
-
-`web/app.js` 使用 `fetch()` + `ReadableStream` 手工解析 SSE，以便精确控制 cursor 和重连。
-
-`handleSseEvent()` 的重要规则：
-
-- 先用 event `id` 单调更新 `lastSeq`；
-- `text_start`：只清空 assistant body，保留过程卡片；
-- `text`：追加 delta；
-- `assistant_message`：用完整 text 覆盖 body；
-- tool/result/plan/skill/status：追加 process item；
-- `terminal`：停止 watch loop，显示权威 terminal status。
-
-同一页面内断线使用 `lastSeq` 续传。但刷新后 DOM 不是 durable projection，所以 `resumeStoredRun()` 会把投影 cursor 设为 0，从所有 committed public events 重建。
-
-## 10. Eval harness 的对等语义
-
-`eval/harness/sse_client.py` 在连接失败后以 `after_seq=last_seq` 和 `Last-Event-ID=last_seq` 重连。它与 Web UI 保持同样的 generation 规则：
-
-- `text_start` 清空 `run.text`，不清 tool/skill/plan 集合；
-- `text` 记录 TTFT 并追加；
-- `assistant_message` 权威覆盖 `run.text`；
-- `terminal` 才标记完成并读 terminal status。
-
-因此 fresh replay、断线续传和实时 tail 的最终回答语义一致。
-
-## 11. 关键不变量
-
-1. 未 commit 的事件不得对 SSE 可见。
-2. text 不得跨 message/generation 聚合。
-3. Native 的前一个 RuntimeIO 提交未完成时，不得拉取下一 provider 事件。
-4. Broker-owned tool facts 不得由 Adapter 再写一次。
-5. `assistant_message` 是最终文本权威；`RUN_TERMINATED` 是终态权威。
-6. heartbeat 不是 Canonical Event，不进度 cursor。
-7. SSE 断开不得取消 Run。
-
-## 12. 建议的源码阅读顺序
-
-1. `agent/runtime/api/runs.py`：SSE 名称投影、cursor、tail、heartbeat。
-2. `agent/runtime/application/events.py`：RuntimeIO 事件提交和 text 缓冲。
-3. `agent/runtime/adapters/adk_engines.py`：ADK-only 事件消费。
-4. `agent/engine/native_loop/engine.py`：Native direct awaited sink。
-5. `agent/runtime/application/tool_broker.py` 与 `agent/runtime/adapters/sqlite/store.py`：Tool Broker 权威事务。
-6. `web/app.js`：浏览器投影与 fresh replay。
-7. `eval/harness/sse_client.py`：评测客户端的对等语义。
+1. `agent/runtime/api/runs.py`
+2. `agent/runtime/application/events.py`
+3. `agent/runtime/adapters/adk_engines.py`
+4. `agent/engine/native_loop/engine.py`
+5. `agent/runtime/application/tool_broker.py`
+6. `agent/runtime/application/coordinator.py`
+7. `web/app.js`、`eval/harness/sse_client.py`

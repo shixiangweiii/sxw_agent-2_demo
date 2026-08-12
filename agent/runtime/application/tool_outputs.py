@@ -19,6 +19,37 @@ from agent.runtime.domain.models import (
 ToolResultAdapter = Callable[[Any], ToolExecutionOutput]
 
 
+def project_tool_result_for_model(result: ToolResultEnvelope) -> Any:
+    """Project one durable Tool result into the model-facing vocabulary.
+
+    This is intentionally the only projection used by ADK, fresh Native
+    execution, and Native checkpoint recovery. Keeping the projection beside
+    the strict protocol adapters prevents recovery from silently presenting a
+    different Tool result to the model than first execution did.
+    """
+
+    if result.status in {ToolResultStatus.SUCCESS, ToolResultStatus.NO_OUTPUT}:
+        # Provider object identity is part of the result. Keep the user preview
+        # under ``content`` so a user-owned key cannot be overwritten by
+        # envelope metadata.
+        if result.result_ref or result.external_object_id:
+            projected = {"content": result.preview}
+            if result.result_ref:
+                projected["artifact_ref"] = result.result_ref
+            if result.external_object_id:
+                projected["external_object_id"] = result.external_object_id
+            return projected
+        return result.preview if result.preview is not None else {"status": "NO_OUTPUT"}
+    if result.status is ToolResultStatus.INTERRUPT:
+        return {"interrupt": True, "pending_input": result.pending_input}
+    return {
+        "isError": True,
+        "errorCode": result.error_code or result.status.value,
+        "content": result.error_message or "tool execution failed",
+        "unknownEffect": result.status is ToolResultStatus.UNKNOWN,
+    }
+
+
 def plain_json_output(value: Any) -> ToolExecutionOutput:
     """Adapt builtin/plain Python results without recognizing protocol aliases."""
 
@@ -215,5 +246,6 @@ __all__ = [
     "adapter_for_tool",
     "claude_skill_output",
     "plain_json_output",
+    "project_tool_result_for_model",
     "skill_center_output",
 ]

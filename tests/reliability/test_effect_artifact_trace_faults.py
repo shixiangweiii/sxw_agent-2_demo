@@ -28,7 +28,7 @@ from agent.runtime.api.artifacts import router as artifact_router
 from agent.runtime.application.admission import AdmissionService, CreateRunInput
 from agent.runtime.application.tool_broker import ToolBroker
 from agent.runtime.domain.artifact import ArtifactIntegrityError
-from agent.runtime.domain.errors import RuntimeFault
+from agent.runtime.domain.errors import AttemptOwnershipLost, RuntimeFault
 from agent.runtime.domain.models import (
     ReleaseManifest,
     ToolEffectClass,
@@ -90,6 +90,128 @@ async def _running_parent(tmp_path: Path):
     )
     artifacts = FilesystemArtifactStore(tmp_path / "artifacts")
     return store, clock, run, parent, artifacts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("executor_fault", "expected_code"),
+    [
+        (
+            AttemptOwnershipLost(
+                "ACTIVITY_FENCING_STALE", "replacement Worker owns this attempt",
+            ),
+            "ACTIVITY_FENCING_STALE",
+        ),
+        (
+            RuntimeFault(
+                "CHECKPOINT_REVISION_CONFLICT",
+                "replacement Worker owns this checkpoint",
+                409,
+            ),
+            "CHECKPOINT_REVISION_CONFLICT",
+        ),
+    ],
+)
+async def test_broker_propagates_attempt_ownership_loss_without_settling_dispatched_effect(
+    tmp_path: Path,
+    executor_fault: BaseException,
+    expected_code: str,
+) -> None:
+    store, clock, run, parent, artifacts = await _running_parent(tmp_path)
+    broker = ToolBroker(store, artifacts, clock=clock)
+
+    async def lose_attempt(_arguments, _context):
+        raise executor_fault
+
+    broker.register(
+        ToolManifest(
+            name="ownership_loss_effect",
+            release_digest="ownership-loss-v1",
+            effect_class=ToolEffectClass.UNKNOWN_EFFECT,
+            timeout_seconds=1,
+            max_attempts=1,
+        ),
+        lose_attempt,
+    )
+
+    with pytest.raises(AttemptOwnershipLost) as lost:
+        await broker.execute(
+            run_id=run.envelope.run_id,
+            parent_activity_id=parent.activity_id,
+            fencing_token=parent.fencing_token,
+            logical_key="ownership-loss:0",
+            tool_name="ownership_loss_effect",
+            arguments={"value": 1},
+            deadline_at_ms=run.envelope.deadline_at,
+        )
+
+    assert lost.value.code == expected_code
+    async with store.db.read() as conn:
+        execution = await (await conn.execute(
+            "SELECT * FROM tool_executions WHERE run_id=?",
+            (run.envelope.run_id,),
+        )).fetchone()
+    assert execution["effect_status"] == "DISPATCHED"
+    assert execution["result_json"] is None
+    events = await store.list_events(run.envelope.run_id, visibility=None)
+    assert not any(
+        event.event_type.value == "TOOL_RESULT_COMMITTED" for event in events
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("effect_class", "expected_effect", "expected_result"),
+    [
+        (ToolEffectClass.READ_ONLY, "FAILED", ToolResultStatus.FAILURE),
+        (ToolEffectClass.UNKNOWN_EFFECT, "UNKNOWN", ToolResultStatus.UNKNOWN),
+    ],
+)
+async def test_broker_settles_runtime_fault_effect_aware_before_preserving_code(
+    tmp_path: Path,
+    effect_class: ToolEffectClass,
+    expected_effect: str,
+    expected_result: ToolResultStatus,
+) -> None:
+    store, clock, run, parent, artifacts = await _running_parent(tmp_path)
+    broker = ToolBroker(store, artifacts, clock=clock)
+
+    async def contract_fault(_arguments, _context):
+        raise RuntimeFault(
+            "EVIDENCE_CONTRACT_INVALID", "producer evidence contradicts authority", 500,
+        )
+
+    broker.register(
+        ToolManifest(
+            name="runtime_fault_effect",
+            release_digest=f"runtime-fault-{effect_class.value}",
+            effect_class=effect_class,
+            timeout_seconds=1,
+            max_attempts=1,
+        ),
+        contract_fault,
+    )
+
+    with pytest.raises(RuntimeFault) as fault:
+        await broker.execute(
+            run_id=run.envelope.run_id,
+            parent_activity_id=parent.activity_id,
+            fencing_token=parent.fencing_token,
+            logical_key="runtime-fault:0",
+            tool_name="runtime_fault_effect",
+            arguments={"value": 1},
+            deadline_at_ms=run.envelope.deadline_at,
+        )
+    assert fault.value.code == "EVIDENCE_CONTRACT_INVALID"
+    async with store.db.read() as conn:
+        execution = await (await conn.execute(
+            "SELECT * FROM tool_executions WHERE run_id=?",
+            (run.envelope.run_id,),
+        )).fetchone()
+    assert execution["effect_status"] == expected_effect
+    result = ToolResultEnvelope.model_validate(json.loads(execution["result_json"]))
+    assert result.status is expected_result
+    assert result.error_code == "EVIDENCE_CONTRACT_INVALID"
 
 
 def _artifact_app(

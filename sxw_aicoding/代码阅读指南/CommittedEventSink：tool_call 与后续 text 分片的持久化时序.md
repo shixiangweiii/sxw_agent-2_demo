@@ -33,6 +33,8 @@ ToolCall 后的 text
 
 这些事件不进入 Sink 重复写入。text 与 ToolCall 的顺序由 Tool Broker 之前的 flush/checkpoint 屏障保证。
 
+Native kernel 中曾经可用来生成普通 ToolCall 投影的 `_call_events` 已删除。生产主路不再留一个与 Broker 并行的 call 写入口。
+
 ### 2.2 engine-owned 合成工具事件
 
 默认 `native_early_tool_dispatch=off` 时，如果模型给出不合法参数或不存在的工具，整批必须零 dispatch。此时不创建真实 ToolExecution，但仍需要向模型和 UI 提交成对 call/result。Native 把这组合成事件作为 `NEXT_TURN` checkpoint 的 `events` 一起原子提交。实验模式可能在完整 batch 校验前已逐 slot 执行安全 READ_ONLY 前缀；随后会停止派发并 fail-closed，已完成执行只会被浪费。
@@ -48,13 +50,15 @@ Native 现在直接实现 `EngineAdapter.execute(request, RuntimeIO)`，不经�
    + 同事务提交 OUTPUT_GENERATION_STARTED
 
 2. provider 输出 text delta
+   → attempt-level pump 放入单 slot
    → NativeLoopAdapter await io.emit(text)
-   → await io.force_flush()
-   → 前一帧提交完才能拉下一帧
+   → emit 返回后 acknowledge，才能拉下一帧
+   → text 按 100 ms / 2 KiB 或语义边界聚合持久化
 
 3. provider 显式 finish=tool_calls
    → 验证完整 batch
    → save MODEL_RESPONSE_COMMITTED checkpoint
+   → checkpoint 内部先 flush 所有仍缓冲的 text
 
 4. Broker 单事务 PREPARE 全部 slots
    → ToolExecution / Tool Activity / TOOL_CALL_COMMITTED 一起提交
@@ -71,6 +75,8 @@ Native 现在直接实现 `EngineAdapter.execute(request, RuntimeIO)`，不经�
 ```
 
 因此，当前 Native 默认路径中，ToolCall 不会在 provider 还在产生可变 fragment 时偷跑到 text 前面。
+
+注意：`await io.emit(text)` 是 admission/顺序与 no-next-pull 屏障，不是“每帧单独已 durable”。对未达阈值的小帧，Sink 可先放入有界 buffer；但 kernel 要进入 `MODEL_RESPONSE_COMMITTED` 必须调用 checkpoint，而 checkpoint 会先 `force_flush()`。所以 Broker PREPARE 看到的序列仍一定是“所有模型 text 已持久 → ToolCall 事实提交”，同时又不牺牲 delta 聚合。
 
 ## 4. “后续 text”其实属于哪个 generation
 

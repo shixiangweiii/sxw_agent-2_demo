@@ -67,7 +67,8 @@ async def _invoke_knowledge(tool, query: str):
         run_id=run_id,
         activity_id=stable_id("act", run_id, "tool:knowledge:0"),
         deadline_at_ms=1_900_000_000_000,
-        idempotency_key=tool_execution_id,
+        idempotency_key="idem_" + tool_execution_id,
+        tool_execution_id=tool_execution_id,
     ))
     try:
         return await tool(query)

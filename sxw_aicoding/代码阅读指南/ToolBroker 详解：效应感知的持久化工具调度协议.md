@@ -146,7 +146,9 @@ Broker 核心不再猜测任意 dict 的别名。即使 executor 返回已经构
 - 循环引用；
 - 与当前 DTO 不匹配的额外字段。
 
-违反结果契约统一为 `TOOL_RESULT_CONTRACT_INVALID`，不能被包装成普通的、可继续推理的工具错误。
+违反结果契约统一为 `TOOL_RESULT_CONTRACT_INVALID`。Broker 会先按 effect class 结算
+已经 durable `DISPATCHED` 的账本，再保留原 `RuntimeFault` 向上抛；它不能被包装成
+普通的、可继续推理的工具错误。
 
 ### 3.2 ToolResultEnvelope
 
@@ -162,7 +164,26 @@ Broker 核心不再猜测任意 dict 的别名。即使 executor 返回已经构
 
 `result_ref` 是小写 SHA-256 Artifact ID。`NO_OUTPUT` 不允许携带 preview/ref；`FAILURE` 和 `UNKNOWN` 必须说明稳定错误码与消息。
 
-### 3.3 Evidence 不允许补造
+### 3.3 模型投影也只有一个 current 实现
+
+严格 `ToolResultEnvelope` 结算完成后，Engine 通过
+`agent/runtime/application/tool_outputs.py::project_tool_result_for_model()` 转成模型可读
+JSON。该函数是 ADK、Native fresh execution 和 Native checkpoint recovery 共用的
+唯一投影：
+
+| envelope | 模型投影 |
+|---|---|
+| `SUCCESS` | preview；若有 ref/external id，则放入不覆盖用户键的 envelope |
+| `NO_OUTPUT` | 明确 `{status: NO_OUTPUT}` |
+| `FAILURE` | `isError/errorCode/content` |
+| `INTERRUPT` | `interrupt + pending_input` |
+| `UNKNOWN` | error 对象并带 `unknownEffect=true` |
+
+Artifact ref 和 provider object identity 属于结果语义，不只是 ledger metadata。统一投影
+保证恢复前后给模型的 tool message 完全同构。`RuntimeFault` 与
+`AttemptOwnershipLost` 不属于 `ToolResultEnvelope`，绝不进入该函数。
+
+### 3.4 Evidence 不允许补造
 
 `EvidenceSet`/`EvidenceItem` 使用 `strict=True + extra="forbid"`。producer 必须给出完整：
 
@@ -174,6 +195,12 @@ Broker 核心不再猜测任意 dict 的别名。即使 executor 返回已经构
 - retrieval status、rewrites、degraded reasons、retrieved time。
 
 Broker 只核对身份和内部一致性，不从普通 hits 猜 provenance，不识别任何隐藏 Evidence 载体，也不会填合成的默认版本或 scope。缺失或矛盾统一报 `EVIDENCE_CONTRACT_INVALID`。
+
+`tool_execution_id` 与 `idempotency_key/query_id` 是不同概念：Broker 在
+`SkillRequestContext` 中显式传入两者；`EvidenceSet.tool_execution_id` 必须来自真正的
+ToolExecution ledger identity，`knowledge_search.query_id` 则由稳定 idempotency key
+与 query 文本生成。current SQLite Store 创建 stable slot 时两字段恰好同值，但
+producer 也不能借用其中一个冒充另一个；两者不同的契约测试仍必须成立。
 
 ## 4. stable slot：恢复身份不是 provider call id
 
@@ -259,6 +286,52 @@ PREPARED
 - 不能透明重试非幂等动作。
 
 人工处置只接受严格 `tool_reconciliation` signal：`mark_committed`、`mark_failed`、`reconcile`。它与 Tool Activity、ToolExecution Event、父 Run 推进在短事务内完成；人工确认失败是 sticky 的。
+
+### 6.3 RuntimeFault 先结算 effect，再保持控制语义
+
+异常边界必须区分三类：
+
+| executor 结果 | Broker 行为 | 是否回模型 |
+|---|---|---|
+| 普通异常 | effect-aware 转 `FAILURE` 或 `UNKNOWN/MANUAL_REQUIRED` | 可以返回严格 ToolResult |
+| 非 ownership `RuntimeFault` | 已 DISPATCHED 时先按 effect class 结算，再原样上抛 | 不可以 |
+| `AttemptOwnershipLost`/ownership-coded fault | 不用旧 fence 改写账本，立即上抛 | 不可以 |
+
+其中非 ownership `RuntimeFault` 的结算规则仍然保守：READ_ONLY 可确定为 `FAILED`；
+任何 effectful class 在外部派发后都只能视为 `UNKNOWN`，必要时进入
+`MANUAL_REQUIRED`。结算账本不是“把控制异常变成模型 ToolResult”，上层仍收到原
+Runtime code。
+
+Native `execute_one` 直接透传两类 Runtime 控制异常。两个 ADK Engine 的
+`AgentInvocationPlugin` 也只反馈普通工具异常；Runtime 控制异常上抛。由于 ADK 2.6.2
+PluginManager 会再包一层 `RuntimeError`，`AdkEngineAdapter` 仅沿
+`__cause__/__context__` 精确找回明确的 `RuntimeFault`/`AttemptOwnershipLost`，任意
+框架 `RuntimeError` 不会被猜测转换。
+
+### 6.4 Run 失败不能把 unresolved effect 留在终态外
+
+Engine 最终计划为普通 `FAILED`、但 Tool ledger 仍有 unresolved effect 时，Store
+不会提交 terminal：
+
+```text
+Engine terminal failure(code/message)
+-> effect-aware manualize 全部 unresolved slot
+-> Run WAITING_INPUT
+-> parent Activity RECONCILE
+-> pending_input 保存 unresolved IDs
+   + sticky pending_terminal={status: FAILED, code, message}
+```
+
+此后每个 strict `tool_reconciliation` signal 只解决指定 ToolExecution。选择
+`reconcile` 时只调已注册 query hook，Coordinator 在 Adapter/checkpoint/history 之前
+识别 exact marker，绝不重新派原工具或 Engine。最后一个 effect 解决后，同一 Store
+写事务提交原 `FAILED`；Worker/query 中途崩溃时，lease recovery 也保留 marker，账本
+已清空则直接补交原 failure。
+
+裁决优先级为：绝对 deadline 可直接 `TIMED_OUT` 并审计 unresolved IDs；cancel 已
+获权时保持 `CANCEL_REQUESTED`，解决后 `CANCELLED`；其余 sticky failure 最终仍是
+原 `FAILED`。Store 通用 terminal helper 再禁止所有非 timeout terminal 跨过
+unresolved ToolEffect，防止旁路入口留下悬空账本。
 
 ## 7. 并发执行与有序结算是两件事
 
@@ -354,7 +427,8 @@ Native 不经过 ADK `RunContext`、旧的 runner merge queue 或 authority 路�
 
 所有 deadline 都是 Run 的绝对 UTC 时间；`ToolCallContext.remaining_ms` 只是对同一绝对 deadline 的计算，不会在每层重开一个完整 timeout。
 
-以下控制故障必须向 Worker 冒泡，不能变成可喂回模型的普通 ToolResult：
+以下控制故障必须越过模型回灌边界进入 Runtime 控制层，不能变成可喂回模型的普通
+ToolResult：
 
 - stale fencing；
 - lease loss；
@@ -362,6 +436,11 @@ Native 不经过 ADK `RunContext`、旧的 runner merge queue 或 authority 路�
 - `AttemptOwnershipLost`；
 - `TOOL_REPLAY_MISMATCH`；
 - ToolResult/Evidence contract fault。
+
+这里的“必须冒泡”包括所有 `RuntimeFault`，而不只 ownership code。区别只在
+Broker 是否已经越过 `DISPATCHED`：越过后必须先 effect-aware 结算；非 ownership
+fault 由 Coordinator 保留 code/message 收成 terminal failure，真正的 ownership loss
+则不能再使用旧 attempt 修改 ledger，并继续到 Worker 交给 lease recovery。
 
 cancel、deadline、GeneratorExit、Adapter 异常或 ownership loss 时，Native 会关闭 provider stream，取消并 await 工具 task、HTTP 调用与 Skill 子进程。旧 Worker 的迟到结算会被 fencing 拒绝。
 

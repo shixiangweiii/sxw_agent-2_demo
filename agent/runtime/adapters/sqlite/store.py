@@ -191,6 +191,46 @@ def _loads(value: str | None, default: Any = None) -> Any:
     return default if value is None else json.loads(value)
 
 
+def _pending_terminal_from_input(value: Any) -> dict[str, str] | None:
+    """Read the only deferred-terminal shape accepted by current Runtime.
+
+    A terminal failure may have to wait until uncertain ToolEffects are
+    explicitly resolved.  The original failure remains sticky inside the
+    active reconciliation boundary; it is never inferred from Activity errors
+    or reconstructed from events.
+    """
+    if not isinstance(value, dict) or "pending_terminal" not in value:
+        return None
+    pending = value["pending_terminal"]
+    if (
+        not isinstance(pending, dict)
+        or set(pending) != {"status", "code", "message"}
+        or pending.get("status") != RunStatus.FAILED
+        or not isinstance(pending.get("code"), str)
+        or not pending["code"]
+        or not isinstance(pending.get("message"), str)
+        or not pending["message"]
+    ):
+        raise conflict(
+            "TOOL_RECONCILIATION_INVARIANT",
+            "deferred ToolEffect boundary carries an invalid pending terminal",
+        )
+    return {
+        "status": str(pending["status"]),
+        "code": pending["code"],
+        "message": pending["message"],
+    }
+
+
+def _with_pending_terminal(
+    pending: dict[str, Any], source: Any,
+) -> dict[str, Any]:
+    deferred = _pending_terminal_from_input(source)
+    if deferred is not None:
+        pending["pending_terminal"] = deferred
+    return pending
+
+
 async def _register_artifact_metadata_in_tx(
     conn: aiosqlite.Connection,
     *,
@@ -764,7 +804,20 @@ class SqliteRuntimeStore:
                        SELECT a.activity_id FROM activities a JOIN runs r ON r.run_id=a.run_id
                        WHERE a.type='ENGINE_RUN' AND a.state='PENDING' AND a.available_at<=?
                          AND (
-                           r.state='DISPATCH_PENDING'
+                           (
+                             r.state='DISPATCH_PENDING'
+                             AND (
+                               r.pending_input_json IS NULL
+                               OR (
+                                 json_extract(r.pending_input_json,'$.pending_terminal.status')='FAILED'
+                                 AND json_extract(a.resume_payload_json,'$.kind')=?
+                                 AND json_type(a.resume_payload_json,'$.tool_execution_id')='text'
+                                 AND json_type(a.resume_payload_json,'$.signal_id')='text'
+                                 AND json_type(a.resume_payload_json,'$.expected_effect_revision')='integer'
+                                 AND (SELECT COUNT(*) FROM json_each(a.resume_payload_json))=4
+                               )
+                             )
+                           )
                            OR (
                              r.state='CANCEL_REQUESTED'
                              AND json_extract(a.resume_payload_json,'$.kind')=?
@@ -781,7 +834,8 @@ class SqliteRuntimeStore:
                      RETURNING *""",
                 (
                     worker_id, now_ms + lease_ms, now_ms, now_ms,
-                    RECONCILIATION_MARKER_KIND, now_ms, *release_params,
+                    RECONCILIATION_MARKER_KIND, RECONCILIATION_MARKER_KIND,
+                    now_ms, *release_params,
                 ),
             )
             activity_row = await cursor.fetchone()
@@ -1173,6 +1227,10 @@ class SqliteRuntimeStore:
             if state in TERMINAL_RUN_STATUSES:
                 raise conflict("RUN_ALREADY_TERMINAL", "Run already has a terminal outcome")
             unresolved = await self._unresolved_effect_ids(conn, run_id)
+            if int(run["deadline_at"]) <= now_ms:
+                terminal_status = RunStatus.TIMED_OUT
+                code = "DEADLINE_EXCEEDED"
+                message = "Run deadline elapsed before failure settlement"
             if (
                 state is RunStatus.CANCEL_REQUESTED
                 and unresolved
@@ -1192,6 +1250,18 @@ class SqliteRuntimeStore:
                 if not unresolved:
                     terminal_status = RunStatus.CANCELLED
                     code = "CANCELLED"
+            if terminal_status is RunStatus.FAILED and unresolved:
+                return await self._defer_failure_for_unresolved_in_tx(
+                    conn,
+                    run_id=run_id,
+                    activity_id=activity_id,
+                    fencing_token=fencing_token,
+                    unresolved=unresolved,
+                    code=code,
+                    message=message,
+                    now_ms=now_ms,
+                    prior_state=state,
+                )
             payload: dict[str, Any] = {"code": code, "message": message}
             if terminal_status is RunStatus.TIMED_OUT and unresolved:
                 payload["unresolved_tool_execution_ids"] = unresolved
@@ -1200,6 +1270,144 @@ class SqliteRuntimeStore:
                 terminal_status=terminal_status, payload=payload, now_ms=now_ms,
                 prior_state=state,
             )
+
+    async def _defer_failure_for_unresolved_in_tx(
+        self,
+        conn: aiosqlite.Connection,
+        *,
+        run_id: str,
+        activity_id: str,
+        fencing_token: int,
+        unresolved: list[str],
+        code: str,
+        message: str,
+        now_ms: int,
+        prior_state: RunStatus,
+    ) -> RunRecord:
+        """Persist a sticky FAILED outcome behind strict Tool reconciliation.
+
+        Once an Engine attempt has a terminal failure there is no legal model
+        replay left to perform.  Every still-uncertain execution therefore
+        becomes operator-owned, including effects that would normally be safe
+        to replay.  The final signal commits the original failure; it never
+        reschedules the Engine.
+        """
+        if prior_state is not RunStatus.RUNNING:
+            raise conflict(
+                "INVALID_RUN_STATE_TRANSITION",
+                "only a running attempt may defer terminal failure for ToolEffect reconciliation",
+                source=prior_state,
+                target=RunStatus.WAITING_INPUT,
+            )
+        if RunStatus.WAITING_INPUT not in RUN_TRANSITIONS[prior_state]:
+            raise conflict(
+                "INVALID_RUN_STATE_TRANSITION",
+                "terminal failure reconciliation is absent from the Run adjacency table",
+                source=prior_state,
+                target=RunStatus.WAITING_INPUT,
+            )
+        await self._recover_uncertain_effects_to_manual_in_tx(
+            conn,
+            run_id=run_id,
+            cancel_owned=True,
+            now_ms=now_ms,
+            recovery_reason="TERMINAL_FAILURE_UNCERTAIN_EFFECT",
+            manual_error_code="TOOL_TERMINAL_FAILURE_UNCERTAIN",
+            manual_message=(
+                "terminal failure cannot be committed until the external effect "
+                "is explicitly resolved"
+            ),
+        )
+        unresolved_rows = await self._unresolved_effect_rows(conn, run_id)
+        actionable = [
+            str(row["tool_execution_id"])
+            for row in unresolved_rows
+            if row["effect_status"] == "MANUAL_REQUIRED"
+        ]
+        invalid = [
+            str(row["tool_execution_id"])
+            for row in unresolved_rows
+            if row["effect_status"] != "MANUAL_REQUIRED"
+        ]
+        if invalid or not actionable:
+            raise conflict(
+                "TOOL_RECONCILIATION_INVARIANT",
+                "terminal failure could not establish a strict manual ToolEffect boundary",
+                initial_unresolved_tool_execution_ids=unresolved,
+                operator_actionable_tool_execution_ids=actionable,
+                invalid_tool_execution_ids=invalid,
+            )
+        pending = {
+            "type": "TOOL_RECONCILIATION_REQUIRED",
+            "unresolved_tool_execution_ids": actionable,
+            "pending_terminal": {
+                "status": RunStatus.FAILED,
+                "code": code,
+                "message": message,
+            },
+        }
+        parent = await (await conn.execute(
+            "SELECT state,revision FROM activities WHERE activity_id=? AND run_id=?",
+            (activity_id, run_id),
+        )).fetchone()
+        if parent is None:
+            raise not_found("activity", activity_id)
+        parent_state = ActivityStatus(parent["state"])
+        if ActivityStatus.RECONCILE not in ACTIVITY_TRANSITIONS[parent_state]:
+            raise conflict(
+                "INVALID_ACTIVITY_STATE_TRANSITION",
+                "terminal failure cannot enter ToolEffect reconciliation from this Activity state",
+                source=parent_state,
+                target=ActivityStatus.RECONCILE,
+            )
+        error = {"code": code, "message": message, "pending_terminal": True}
+        parent_update = await conn.execute(
+            """UPDATE activities SET state='RECONCILE',error_json=?,pending_input_json=?,
+               resume_payload_json=NULL,lease_owner=NULL,lease_expires_at=NULL,
+               revision=revision+1,updated_at=? WHERE activity_id=? AND run_id=?
+               AND state=? AND revision=? AND fencing_token=?""",
+            (
+                canonical_json(error), canonical_json(pending), now_ms,
+                activity_id, run_id, parent_state, parent["revision"], fencing_token,
+            ),
+        )
+        run_update = await conn.execute(
+            """UPDATE runs SET state='WAITING_INPUT',pending_input_json=?,
+               revision=revision+1,updated_at=? WHERE run_id=? AND state='RUNNING'
+               AND terminal_status IS NULL""",
+            (canonical_json(pending), now_ms, run_id),
+        )
+        if parent_update.rowcount != 1 or run_update.rowcount != 1:
+            raise conflict(
+                "TOOL_RECONCILIATION_CAS_CONFLICT",
+                "terminal failure lost its parent/Run reconciliation CAS",
+            )
+        await self._append_in_tx(conn, run_id, [
+            EventDraft(
+                EventType.ACTIVITY_STATUS_CHANGED,
+                {
+                    "from": parent_state,
+                    "to": ActivityStatus.RECONCILE,
+                    "reason": "TERMINAL_FAILURE_AWAITS_TOOL_RECONCILIATION",
+                    "unresolved_tool_execution_ids": actionable,
+                    "pending_terminal": pending["pending_terminal"],
+                },
+                activity_id=activity_id,
+                occurred_at=now_ms,
+            ),
+            EventDraft(
+                EventType.RUN_STATUS_CHANGED,
+                {
+                    "from": prior_state,
+                    "to": RunStatus.WAITING_INPUT,
+                    "reason": "TERMINAL_FAILURE_AWAITS_TOOL_RECONCILIATION",
+                    "pending_input": pending,
+                },
+                activity_id=activity_id,
+                occurred_at=now_ms,
+            ),
+        ])
+        return _run_from_row(await self._require_run_row(conn, run_id))
 
     async def _defer_cancel_for_unresolved_in_tx(
         self,
@@ -1445,14 +1653,6 @@ class SqliteRuntimeStore:
                 source=actual_run_state,
                 target=terminal_status,
             )
-        if terminal_status is RunStatus.CANCELLED:
-            unresolved = await self._unresolved_effect_ids(conn, run_id)
-            if unresolved:
-                raise conflict(
-                    "UNRESOLVED_TOOL_EFFECTS",
-                    "Run with uncertain external effects cannot be declared CANCELLED",
-                    unresolved_tool_execution_ids=unresolved,
-                )
         activity_before = await (await conn.execute(
             "SELECT state FROM activities WHERE activity_id=?", (activity_id,),
         )).fetchone()
@@ -1470,6 +1670,14 @@ class SqliteRuntimeStore:
             conn, run_id=run_id, now_ms=now_ms,
             reason=f"Run terminated as {terminal_status} before tool dispatch",
         )
+        unresolved = await self._unresolved_effect_ids(conn, run_id)
+        if terminal_status is not RunStatus.TIMED_OUT and unresolved:
+            raise conflict(
+                "UNRESOLVED_TOOL_EFFECTS",
+                "a non-timeout terminal cannot cross unresolved external ToolEffects",
+                terminal_status=terminal_status,
+                unresolved_tool_execution_ids=unresolved,
+            )
         cursor = await conn.execute(
             """UPDATE runs SET state=?,terminal_status=?,terminal_payload_json=?,
                pending_input_json=NULL,revision=revision+1,updated_at=?
@@ -2137,6 +2345,7 @@ class SqliteRuntimeStore:
             if isinstance(pending, dict)
             else []
         )
+        pending_terminal = _pending_terminal_from_input(pending)
         run_state = RunStatus(run["state"])
         cancel_owned = run_state is RunStatus.CANCEL_REQUESTED
         if int(run["deadline_at"]) <= now_ms:
@@ -2449,11 +2658,14 @@ class SqliteRuntimeStore:
                 )
                 mode = "CANCEL_RECONCILE_ONLY"
             else:
+                persisted_pending = (
+                    canonical_json(pending) if pending_terminal is not None else None
+                )
                 run_update = await conn.execute(
-                    """UPDATE runs SET state='DISPATCH_PENDING',pending_input_json=NULL,
+                    """UPDATE runs SET state='DISPATCH_PENDING',pending_input_json=?,
                        revision=revision+1,updated_at=? WHERE run_id=?
                        AND state='WAITING_INPUT' AND revision=?""",
-                    (now_ms, run_id, run["revision"]),
+                    (persisted_pending, now_ms, run_id, run["revision"]),
                 )
                 mode = "RECONCILE_ONLY"
             if parent.rowcount != 1 or run_update.rowcount != 1:
@@ -2502,7 +2714,9 @@ class SqliteRuntimeStore:
             and row["effect_status"] != "MANUAL_REQUIRED"
             for row in unresolved_rows
         )
-        if unresolved and (cancel_owned or not remaining_replay_safe):
+        if unresolved and (
+            pending_terminal is not None or cancel_owned or not remaining_replay_safe
+        ):
             # Resolve exactly one effect per signal.  Neither a normal Run nor
             # a cancel-owned Run may leave the wait boundary until the last
             # operator-owned uncertainty is gone.  Replay-safe remainder is
@@ -2524,10 +2738,10 @@ class SqliteRuntimeStore:
                     operator_actionable_tool_execution_ids=actionable,
                     invalid_tool_execution_ids=invalid,
                 )
-            remaining_pending = {
+            remaining_pending = _with_pending_terminal({
                 "type": pending_type,
                 "unresolved_tool_execution_ids": actionable,
-            }
+            }, pending)
             parent = await conn.execute(
                 """UPDATE activities SET pending_input_json=?,resume_payload_json=NULL,
                    revision=revision+1,updated_at=?
@@ -2584,6 +2798,37 @@ class SqliteRuntimeStore:
                 },
                 now_ms=now_ms,
                 prior_state=RunStatus.CANCEL_REQUESTED,
+            )
+            return SignalResult(signal_id=signal_id, status="CONSUMED", run=current)
+
+        if pending_terminal is not None:
+            resolved_rows = await (await conn.execute(
+                """SELECT result_json FROM signals WHERE run_id=?
+                   AND type='tool_reconciliation' AND status='CONSUMED'
+                   ORDER BY created_at,signal_id""",
+                (run_id,),
+            )).fetchall()
+            resolved_ids = sorted({
+                str(value["tool_execution_id"])
+                for row in resolved_rows
+                for value in [_loads(row["result_json"], {})]
+                if isinstance(value, dict) and value.get("tool_execution_id")
+            })
+            await self._append_in_tx(conn, run_id, drafts)
+            current = await self._finalize_terminal_in_tx(
+                conn,
+                run_id=run_id,
+                activity_id=parent_activity_id,
+                terminal_status=RunStatus.FAILED,
+                payload={
+                    "code": pending_terminal["code"],
+                    "message": pending_terminal["message"],
+                    "reconciliation_signal_id": signal_id,
+                    "resolved_tool_execution_ids": resolved_ids,
+                    "remaining_unresolved_tool_execution_ids": [],
+                },
+                now_ms=now_ms,
+                prior_state=RunStatus.WAITING_INPUT,
             )
             return SignalResult(signal_id=signal_id, status="CONSUMED", run=current)
 
@@ -2656,6 +2901,8 @@ class SqliteRuntimeStore:
             )
             run = await self._require_run_row(conn, run_id)
             run_state = RunStatus(run["state"])
+            pending_boundary = _loads(run["pending_input_json"], {})
+            pending_terminal = _pending_terminal_from_input(pending_boundary)
             if run_state not in {RunStatus.RUNNING, RunStatus.CANCEL_REQUESTED}:
                 raise conflict(
                     "INVALID_RUN_STATE_TRANSITION",
@@ -2759,7 +3006,9 @@ class SqliteRuntimeStore:
                     prior_state=run_state,
                 )
             if unresolved and not (
-                run_state is RunStatus.RUNNING and remaining_replay_safe
+                pending_terminal is None
+                and run_state is RunStatus.RUNNING
+                and remaining_replay_safe
             ):
                 actionable = [
                     row["tool_execution_id"] for row in unresolved_rows
@@ -2789,10 +3038,10 @@ class SqliteRuntimeStore:
                         reason="cancel reconcile-only query remained unresolved",
                         error={"code": "TOOL_RECONCILIATION_PENDING", **audit},
                     )
-                pending = {
+                pending = _with_pending_terminal({
                     "type": "TOOL_RECONCILIATION",
                     "unresolved_tool_execution_ids": actionable,
-                }
+                }, pending_boundary)
                 parent = await conn.execute(
                     """UPDATE activities SET state='RECONCILE',pending_input_json=?,
                        resume_payload_json=NULL,lease_owner=NULL,lease_expires_at=NULL,
@@ -2853,6 +3102,21 @@ class SqliteRuntimeStore:
                     prior_state=RunStatus.CANCEL_REQUESTED,
                 )
 
+            if pending_terminal is not None:
+                return await self._finalize_terminal_in_tx(
+                    conn,
+                    run_id=run_id,
+                    activity_id=activity_id,
+                    terminal_status=RunStatus.FAILED,
+                    payload={
+                        "code": pending_terminal["code"],
+                        "message": pending_terminal["message"],
+                        **audit,
+                    },
+                    now_ms=now_ms,
+                    prior_state=RunStatus.RUNNING,
+                )
+
             parent = await conn.execute(
                 """UPDATE activities SET state='PENDING',available_at=?,
                    pending_input_json=NULL,resume_payload_json=NULL,lease_owner=NULL,
@@ -2910,6 +3174,8 @@ class SqliteRuntimeStore:
         cancel_owned: bool,
         now_ms: int,
         recovery_reason: str = "PARENT_LEASE_EXPIRED_UNCERTAIN_EFFECT",
+        manual_error_code: str = "TOOL_LEASE_RECOVERY_UNCERTAIN",
+        manual_message: str | None = None,
     ) -> list[str]:
         """Expose ownerless uncertain effects at the strict operator boundary.
 
@@ -2971,8 +3237,8 @@ class SqliteRuntimeStore:
                     status="UNKNOWN",
                     result_ref=row["result_ref"],
                     external_object_id=row["external_object_id"],
-                    error_code="TOOL_LEASE_RECOVERY_UNCERTAIN",
-                    error_message=(
+                    error_code=manual_error_code,
+                    error_message=manual_message or (
                         "parent worker lease expired after tool dispatch; "
                         "external outcome is unknown"
                     ),
@@ -2994,8 +3260,8 @@ class SqliteRuntimeStore:
             if not isinstance(prior_error, dict) or prior_error_size > 4096:
                 prior_error = {}
             error = {
-                "code": "TOOL_LEASE_RECOVERY_UNCERTAIN",
-                "message": (
+                "code": manual_error_code,
+                "message": manual_message or (
                     "cancellation requires explicit effect resolution"
                     if cancel_owned
                     else "unsafe ToolEffect cannot be replayed after parent lease expiry"
@@ -3229,11 +3495,41 @@ class SqliteRuntimeStore:
                     conn, activity["run_id"]
                 )
                 unresolved = [row["tool_execution_id"] for row in unresolved_rows]
+                pending_terminal = _pending_terminal_from_input(
+                    _loads(run["pending_input_json"], {})
+                )
                 automatically_replayable = bool(unresolved_rows) and all(
                     _effect_row_is_replay_safe(row)
                     and row["effect_status"] != "MANUAL_REQUIRED"
                     for row in unresolved_rows
                 )
+                if pending_terminal is not None and not unresolved:
+                    # The query hook/result may have committed before the
+                    # parent Worker lost its lease.  With the ledger now
+                    # conclusive, recovery commits the already-sticky failure;
+                    # it must not clear the marker and re-enter the Engine.
+                    await self._finalize_terminal_in_tx(
+                        conn,
+                        run_id=activity["run_id"],
+                        activity_id=activity["activity_id"],
+                        terminal_status=RunStatus.FAILED,
+                        payload={
+                            "code": pending_terminal["code"],
+                            "message": pending_terminal["message"],
+                            "reason": "pending terminal recovered after ToolEffect resolution",
+                            "remaining_unresolved_tool_execution_ids": [],
+                        },
+                        now_ms=now_ms,
+                        prior_state=RunStatus(run["state"]),
+                        activity_terminal_override=(
+                            ActivityStatus.FAILED
+                            if ActivityStatus(activity["state"])
+                            is ActivityStatus.RUNNING
+                            else ActivityStatus.CANCELLED
+                        ),
+                    )
+                    recovered += 1
+                    continue
                 if RunStatus(run["state"]) is RunStatus.CANCEL_REQUESTED and not unresolved:
                     # The cancelling worker disappeared after the cancel CAS.  With
                     # no uncertain effect there is nothing to reconcile, so recovery
@@ -3286,8 +3582,13 @@ class SqliteRuntimeStore:
                             unresolved_tool_execution_ids=unresolved,
                             invalid_tool_execution_ids=invalid,
                         )
-                    pending = {"type": "TOOL_RECONCILIATION",
-                               "unresolved_tool_execution_ids": actionable}
+                    pending = _with_pending_terminal(
+                        {
+                            "type": "TOOL_RECONCILIATION",
+                            "unresolved_tool_execution_ids": actionable,
+                        },
+                        _loads(run["pending_input_json"], {}),
+                    )
                     if interrupted_reconciliations:
                         pending["interrupted_reconcile_tool_execution_ids"] = (
                             interrupted_reconciliations
@@ -3357,7 +3658,8 @@ class SqliteRuntimeStore:
                     payload["unresolved_tool_execution_ids"] = unresolved
                 cursor = await conn.execute(
                     """UPDATE runs SET state='TIMED_OUT',terminal_status='TIMED_OUT',
-                       terminal_payload_json=?,revision=revision+1,updated_at=?
+                       terminal_payload_json=?,pending_input_json=NULL,
+                       revision=revision+1,updated_at=?
                        WHERE run_id=? AND terminal_status IS NULL""",
                     (canonical_json(payload), now_ms, run["run_id"]),
                 )

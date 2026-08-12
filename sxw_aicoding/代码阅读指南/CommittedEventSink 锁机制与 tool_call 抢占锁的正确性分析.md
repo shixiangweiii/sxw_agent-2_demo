@@ -78,15 +78,21 @@ buffer("A")
 但生产路径中的正常工具事件属于 Broker：
 
 - ADK 两引擎在 Broker PREPARE 之前显式 `force_flush()`，之后 Adapter 不会重复 emit Broker 投影；
-- Native 每个 text 帧都等待 `io.emit()` 并紧接着 `force_flush()`，模型完整结束后又先提交 `MODEL_RESPONSE_COMMITTED` checkpoint，再进入 Broker batch PREPARE。
+- Native 每个 text 帧都等待 `io.emit()` 完成 Sink admission，但不再每帧 `force_flush()`；模型完整结束后必须先提交 `MODEL_RESPONSE_COMMITTED` checkpoint，而 checkpoint 内部会先 flush 所有缓冲 text，然后才进入 Broker batch PREPARE。
 
 所以对 Broker-owned ToolCall，正确的因果屏障是“先 flush/checkpoint，再由 Broker 事务提交工具事实”，而不是让 ToolCall 与 text 去争 Sink 锁。
+
+这也解释了为什么 Native kernel 中的 `_call_events` 可以删除：正常 call 唯一权威是 Broker PREPARE，模型参数错误的整批零 dispatch call/result 则由 `_synthetic_events` 与 `NEXT_TURN` checkpoint 同事务提交，不需要另一个普通 call 投影 helper。
 
 ## 5. Native 与 ADK 的并发差异
 
 ### Native
 
-`NativeLoopAdapter` 直接循环消费 Native kernel 的 `StreamEvent`，每次都 `await io.emit(...)` 完成后才能拉取下一个事件。Skill UI sink 也直接 await 同一 RuntimeIO。这是自然背压：Runtime 提交被阻塞时，provider 拉流、checkpoint 和工具派发都不能绕过。Native 不经过后台无界队列。
+`NativeLoopAdapter` 为整个 attempt 创建一个 `native-stream-pump`，它与主消费协程之间只有一个 envelope slot。pump 把事件放入 slot 后等待 acknowledge；主协程必须完成 `await io.emit(...)` 才 acknowledge，因而下一次 `anext(kernel/provider)` 不会越过当前 Sink admission。Skill UI sink 也直接 await 同一 RuntimeIO。
+
+这里的背压是“no next pull + 有界交接”，不是强制每个 text delta 单独 durable。小 delta 可在 Sink 的 100 ms / 2 KiB buffer 中聚合；阈值写入、非 text 事件、checkpoint 或 close 被阻塞时，provider 拉流、PREPARE 和工具派发都不能绕过。Native 不经过后台无界队列。
+
+取消也不再与每帧拉取绑定：attempt-level `native-cancel-watch` 以固定短周期查持久取消，绝对 deadline 由外层 timeout 监督。退出时 pump/watcher 都必须取消并 await，再 `aclose()` stream，不留游离 task。
 
 ### ADK
 
@@ -102,12 +108,14 @@ buffer("A")
 - Event seq 无回滚空洞：`runs.next_seq` 与 event batch 同事务；
 - 丢失 attempt ownership 后不再写库：`abort()` 取消 timer 并丢弃未提交 buffer。
 
+Store 写入如返回 fencing/lease/CAS 类 `RuntimeFault`，这些错误不能被 Native executor 改写为模型 ToolResult；`RuntimeFault` / `AttemptOwnershipLost` 会跨过 Sink/Adapter 边界原样透传给 Worker。
+
 ## 7. 必须保持的不变量
 
 1. text buffer 不能跨 message_id 或 generation_id 聚合。
 2. 任何进入 Sink 的非 text 事件提交前，必须先 flush 已接收 text。
 3. 正常工具账本事实只能由 Broker/Store 提交一次。
-4. Native 必须等待前一个 RuntimeIO 提交，才能拉取下一个 provider 事件。
+4. Native 必须等待前一个 RuntimeIO admission 完成，才能拉取下一个 provider 事件；text durable 由 100 ms / 2 KiB 与语义 flush 边界决定。
 5. SSE 只读已提交 `run_events`，Sink 锁不参与 SSE 订阅者协调。
 
 ## 8. 建议的源码阅读顺序

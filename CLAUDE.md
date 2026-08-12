@@ -58,6 +58,8 @@ API 与 Worker 当前共享本机 `runtime.db` 和 Artifact CAS。这是实现�
 - history 由 committed USER + 仅成功 ASSISTANT + checkpoint 编译；失败 partial delta 不进入后续语义历史。
 - Canonical Event append-only；seq 分配和插入同事务。只有 committed event 可被 SSE 读取。
 - output delta 按 100ms/2KiB 聚合并在边界前 flush；final assistant + citation + success terminal 原子提交。
+- Native 的 awaited `RuntimeIO.emit(text)` 保证不继续 pull 与有界背压，不代表每帧 durable；禁止每 provider chunk `force_flush`，持久化仍由 100ms/2KiB 及非 text/checkpoint/close/terminal 触发。
+- `TIMED_OUT` 是唯一可带 unresolved ToolEffect 的 terminal。planned `FAILED` 被未决 effect 阻挡时，Store 持久化 sticky `pending_terminal`、进入 strict reconciliation，最后确定 effect 后原子提交原失败，不重跑 Engine；其他 non-timeout terminal 遇 unresolved 一律 fail closed。
 - SSE 断开只停止观看，不取消 Run。cursor 在客户端；首版无服务端 ACK/观看位置表。
 - lease/revision/fencing 抑制过期 Worker 迟到结果；Worker 丢失只触发恢复。
 - claim 必须精确匹配 `(engine, release_fingerprint)`；三份 active release 只能原子切换，存在不同 fingerprint 的非终态 Run 时启动失败。错误 release Worker 无权领取或终态化 Run。
@@ -110,6 +112,8 @@ Tool effect 必须显式分类：
 Worker 必须先完成 strict ToolCatalog 再计算 release；重名、缺 manifest、非法 Draft 2020-12 object schema、声明/适配失败或已返回目录中的畸形条目一律阻止启动。可选 Skill/A2A 下游连接不可用时可保持空目录 best-effort，但不允许部分跳过坏条目。
 
 Broker 核心只处理 strict `ToolExecutionOutput(ToolResultEnvelope, EvidenceSet | None)`；普通 JSON、`None` 与 Skill/A2A 协议错误在各自边界 adapter 完成归一。Evidence producer 必须填全 query/hash/document/index version/scope，Broker 不补造 legacy hits 或默认 provenance，契约不合法稳定失败 `EVIDENCE_CONTRACT_INVALID`。
+
+durable dispatch 之后，ownership loss 穿透 Broker/Native/ADK 到 Worker，不转 ToolResult 或 Run terminal；其他 RuntimeFault 先按 effect class 结算再保留原 code 上抛。模型侧 ToolResult 投影只有一份共享实现，ADK、Native fresh 和 Native recovery 必须一致。Evidence 账本身份显式使用 `tool_execution_id`，与 query/idempotency identity 解耦。
 
 未评审的新 Skill/A2A/Claude SKILL 默认 UNKNOWN_EFFECT。Skill UI 必须先 commit Canonical Event 再发布。
 

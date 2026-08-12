@@ -25,6 +25,11 @@ from google.adk.plugins.base_plugin import BasePlugin
 
 from agent.engine.agent_loop.loop_processor import LoopController
 from agent.plugins.tool_args_guard_plugin import build_tool_args_parse_error_response
+from agent.runtime.domain.errors import (
+    AttemptOwnershipLost,
+    RuntimeFault,
+    raise_if_ownership_lost,
+)
 from common.obs import get_logger, log_kv
 from common.trace import (
     KIND_LLM,
@@ -163,6 +168,17 @@ class AgentInvocationPlugin(BasePlugin):
             span.set_status(STATUS_ERROR)
             span.set(failure="tool_raised", error_type=type(error).__name__,
                      error=str(error)[:500])
+        # Runtime control faults are never model data. In particular, a stale
+        # fence/checkpoint CAS fault means this Worker no longer owns the
+        # attempt; feeding it back as a function response could let a stale
+        # owner continue producing effects. Convert ownership-coded
+        # RuntimeFault values at this last ADK boundary, and otherwise preserve
+        # the exact RuntimeFault instance/code for Coordinator/Worker policy.
+        if isinstance(error, AttemptOwnershipLost):
+            raise error
+        if isinstance(error, RuntimeFault):
+            raise_if_ownership_lost(error)
+            raise error
         log_kv(logger, logging.WARNING, "ToolErrorFeedback", "tool raised, feeding back",
                tool=getattr(tool, "name", "?"), error=type(error).__name__)
         return {

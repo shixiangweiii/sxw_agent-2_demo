@@ -11,7 +11,7 @@
 | `REL-001` | R1 | 同一幂等 key 并发/串行重放 10 次只有一个 Run，全部指向同一 run/turn/conversation |
 | `REL-002` | R1 | 同 scope key 不同规范化 digest 返回 409 `IDEMPOTENCY_KEY_REUSE`，原映射不变 |
 | `REL-003` | R1 | 同 conversation 两个真正新 Run 并发，只有一个成功，另一个 409 `CONVERSATION_BUSY`；幂等重放优先 |
-| `REL-004` | R1 | 每个 Run 最多一个 terminal 字段和一个 `RUN_TERMINATED`，并发 finalize 只有一个 CAS 获胜 |
+| `REL-004` | R1 | 每个 Run 最多一个 terminal 字段和一个 `RUN_TERMINATED`，并发 finalize 只有一个 CAS 获胜；除 TIMED_OUT 外 terminal 不得跨 unresolved ToolEffect，planned FAILED 须 sticky defer 后一次提交 |
 | `REL-005` | R1 | terminal 后不能回退或被 cancel 覆盖；cancel 返回 `RUN_ALREADY_TERMINAL` |
 | `REL-006` | R1 | `(run_id, seq)` 唯一；event batch 回滚时 `next_seq` 同步回滚、不留 seq 洞 |
 | `REL-007` | R1 | `ASSISTANT_MESSAGE_COMMITTED + CITATION_SET_COMMITTED + SUCCEEDED terminal` 原子提交；任一点注错全部不可见 |
@@ -25,8 +25,8 @@
 | `REL-015` | R1/R3 | WAITING_INPUT 时销毁 API/Worker/内存状态，重启后仍可用 committed signal 恢复 |
 | `REL-016` | R1/R3 | signal 重放只消费一次；同 ID 不同 digest 冲突；terminal 的迟到 signal 写 `REJECTED_LATE` 后 409 |
 | `REL-017` | R2A | 同一稳定 ToolExecution 重放/恢复不重复提交副作用；COMMITTED 复用完整 result/ref |
-| `REL-018` | R2A/R3 | Tool 成功但 ACK/result commit 丢失进入 UNKNOWN，并经 reconcile 或 manual 确定性收口 |
-| `REL-019` | R2A | NON_IDEMPOTENT_EFFECT/UNKNOWN_EFFECT 无确认能力时不透明自动重试；READ_ONLY/幂等 guard 分别验证 |
+| `REL-018` | R2A/R3 | Tool 成功但 ACK/result commit 丢失进入 UNKNOWN，并经 reconcile 或 manual 确定性收口；若 Run 已计划 FAILED，最后处置原子提交该失败且不重跑 Engine |
+| `REL-019` | R2A | NON_IDEMPOTENT_EFFECT/UNKNOWN_EFFECT 无确认能力时不透明自动重试；READ_ONLY/幂等 guard 分别验证；ownership loss 不结算，其他 dispatch 后 RuntimeFault 先 effect-aware settle |
 | `REL-020` | R2A/R3 | cancel 与 Tool complete 两种提交顺序均得到冻结结论；cancel-first 不可 SUCCEEDED，terminal-first cancel 409 |
 | `REL-021` | R2A | Artifact rename+fsync 后 metadata transaction 失败只产生可清理 orphan，绝不产生有效 ArtifactRef |
 | `REL-022` | R2A | Artifact 字节篡改后普通读取、Range、模型 adapter 都返回 `ARTIFACT_INTEGRITY_ERROR` |
@@ -48,7 +48,7 @@
 | `FI-03` | LLM 返回后、任何对应 event commit 前 kill | 未提交内容不可见；model Activity 按恢复等级重试；`REL-008/030` |
 | `FI-04` | Tool `PREPARED/TOOL_CALL` committed 后、dispatch 前 kill | 不产生副作用；稳定 slot 恢复；`REL-017/019` |
 | `FI-05` | Tool 已 dispatch、执行中 kill | effect 进入 UNKNOWN/reconcile 或只读安全重试；`REL-018/019` |
-| `FI-06` | Tool 外部成功，但 ACK 或 Runtime result commit 丢失 | 不盲目重发；reconcile/manual；`REL-017/018` |
+| `FI-06` | Tool 外部成功，但 ACK/Runtime result commit 丢失，或 planned FAILED 的 reconciliation settlement 前后 kill | 不盲目重发；pending terminal/code durable；最后 resolution/recovery 提交原 FAILED，deadline 优先；`REL-004/017/018/019` |
 | `FI-07` | Artifact rename+fsync 后、metadata commit 前 kill | 仅 orphan，可回收；`REL-021` |
 | `FI-08` | Run/Activity 已 WAITING_INPUT 时重启 | 不占 Worker，signal 可继续；`REL-015` |
 | `FI-09` | signal commit 后、resume Activity claim 前 kill | signal 只消费一次，恢复领取一次；`REL-014/016` |

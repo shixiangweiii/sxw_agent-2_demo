@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from agent.engine.loop_tools import LOOP_INSTRUCTION, TASK_PLAN_KEY
@@ -38,13 +39,13 @@ from agent.runtime.adapters.brokered_tools import (
     prepare_native_batch,
 )
 from agent.runtime.application.tool_broker import ToolBatchCall
+from agent.runtime.application.tool_outputs import project_tool_result_for_model
 from agent.runtime.domain.artifact import MAX_HTTP_RANGE_BYTES
 from agent.runtime.domain.errors import RuntimeFault, raise_if_ownership_lost
 from agent.runtime.domain.models import (
     EngineOutcome,
     EngineOutcomeKind,
     EventType,
-    ToolResultEnvelope,
     ToolResultStatus,
     WorkingState,
     canonical_json,
@@ -68,6 +69,15 @@ if TYPE_CHECKING:
 _HARD_CAP_MARGIN = 2
 _LARGE_CHECKPOINT_RESULT_BYTES = 8 * 1024
 _CONTROL_POLL_SECONDS = 0.1
+
+
+@dataclass(frozen=True)
+class _StreamEnvelope:
+    """One bounded hand-off from the attempt-level stream/control tasks."""
+
+    event: StreamEvent | None = None
+    error: BaseException | None = None
+    exhausted: bool = False
 
 
 def collect_native_tools(ctx: "AgentContext", *, run_engine: str = "native_loop") -> list[Any]:
@@ -111,10 +121,7 @@ class NativeLoopAdapter:
 
     async def execute(self, request: EngineRunRequest, io: RuntimeIO) -> EngineOutcome:
         settings = self.context.settings
-        try:
-            broker = io.tool_broker
-        except Exception as exc:
-            raise RuntimeError("Native Runtime requires RuntimeIO.ToolBroker") from exc
+        broker = io.tool_broker
 
         initial_messages = await self._compile_input(request)
         if request.checkpoint is None:
@@ -351,45 +358,85 @@ class NativeLoopAdapter:
             await io.emit(event.event, event.data)
 
         ui_token = set_ui_sink(direct_skill_sink)
-        stream = loop.run(state.messages, initial_state=state)
+        stream = loop.run(initial_state=state)
         cancelled = False
 
-        async def next_event() -> StreamEvent:
-            pull = asyncio.create_task(anext(stream), name="native-provider-pull")
+        stream_ready = asyncio.Event()
+        stream_acknowledged = asyncio.Event()
+        stop_pulling = asyncio.Event()
+        stream_slot: _StreamEnvelope | None = None
+        control_error: BaseException | None = None
+
+        async def pump_stream() -> None:
+            nonlocal stream_slot
             try:
-                while True:
-                    remaining = io.remaining_ms()
-                    if remaining <= 0:
-                        raise TimeoutError
-                    done, _ = await asyncio.wait(
-                        {pull},
-                        timeout=min(_CONTROL_POLL_SECONDS, remaining / 1000),
-                    )
-                    if done:
-                        return pull.result()
+                while not stop_pulling.is_set():
+                    try:
+                        event = await anext(stream)
+                    except StopAsyncIteration:
+                        stream_slot = _StreamEnvelope(exhausted=True)
+                        stream_ready.set()
+                        return
+                    stream_acknowledged.clear()
+                    stream_slot = _StreamEnvelope(event=event)
+                    stream_ready.set()
+                    await stream_acknowledged.wait()
+            except asyncio.CancelledError:
+                raise
+            except BaseException as exc:
+                stream_slot = _StreamEnvelope(error=exc)
+                stream_ready.set()
+
+        async def watch_cancel() -> None:
+            nonlocal control_error
+            try:
+                while not stop_pulling.is_set():
                     if await io.is_cancelled():
-                        raise NativeRunCancelled
-            finally:
-                if not pull.done():
-                    pull.cancel()
-                await asyncio.gather(pull, return_exceptions=True)
+                        control_error = NativeRunCancelled()
+                        stop_pulling.set()
+                        pump_task.cancel()
+                        stream_ready.set()
+                        return
+                    await asyncio.sleep(_CONTROL_POLL_SECONDS)
+            except asyncio.CancelledError:
+                raise
+            except BaseException as exc:
+                control_error = exc
+                stop_pulling.set()
+                pump_task.cancel()
+                stream_ready.set()
+
+        pump_task = asyncio.create_task(pump_stream(), name="native-stream-pump")
+        cancel_task = asyncio.create_task(watch_cancel(), name="native-cancel-watch")
 
         try:
             async with asyncio.timeout(max(0.001, io.remaining_ms() / 1000)):
                 while True:
+                    await stream_ready.wait()
+                    if control_error is not None:
+                        raise control_error
+                    envelope = stream_slot
+                    assert envelope is not None
+                    stream_slot = None
+                    stream_ready.clear()
+                    if envelope.error is not None:
+                        raise envelope.error
+                    if envelope.exhausted:
+                        break
+                    event = envelope.event
+                    assert event is not None
+                    emitted = False
                     try:
-                        event = await next_event()
-                    except StopAsyncIteration:
-                        break
-                    # Direct awaited commit: the kernel cannot pull another
-                    # provider chunk, checkpoint or dispatch a Tool while the
-                    # preceding event is blocked in Runtime authority.
-                    await io.emit(event.event, event.data)
-                    if event.event == "text":
-                        await io.force_flush()
-                    if await io.is_cancelled():
-                        cancelled = True
-                        break
+                        # RuntimeIO may aggregate text in memory, but the pump
+                        # cannot pull another provider item until this awaited
+                        # admission returns. Checkpoint/non-text/close remains
+                        # the durable flush boundary.
+                        await io.emit(event.event, event.data)
+                        emitted = True
+                    finally:
+                        if not emitted:
+                            stop_pulling.set()
+                        stream_acknowledged.set()
         except NativeRunCancelled:
             cancelled = True
         except TimeoutError:
@@ -402,6 +449,10 @@ class NativeLoopAdapter:
             raise_if_ownership_lost(exc)
             raise
         finally:
+            stop_pulling.set()
+            pump_task.cancel()
+            cancel_task.cancel()
+            await asyncio.gather(pump_task, cancel_task, return_exceptions=True)
             try:
                 await stream.aclose()
             finally:
@@ -505,7 +556,7 @@ class NativeLoopAdapter:
             except RuntimeFault as exc:
                 raise_if_ownership_lost(exc)
                 raise
-            projected = _model_result(result)
+            projected = project_tool_result_for_model(result)
             message.content = executor._to_text(projected)  # noqa: SLF001
             message.is_error = result.status not in {
                 ToolResultStatus.SUCCESS,
@@ -550,26 +601,6 @@ class NativeLoopAdapter:
         if offset != total_size:
             raise RuntimeError("artifact metadata size changed during materialization")
         return b"".join(chunks)
-
-
-def _model_result(result: ToolResultEnvelope) -> Any:
-    if result.status in {ToolResultStatus.SUCCESS, ToolResultStatus.NO_OUTPUT}:
-        if result.result_ref or result.external_object_id:
-            payload: dict[str, Any] = {"content": result.preview}
-            if result.result_ref:
-                payload["artifact_ref"] = result.result_ref
-            if result.external_object_id:
-                payload["external_object_id"] = result.external_object_id
-            return payload
-        return result.preview if result.preview is not None else {"status": "NO_OUTPUT"}
-    if result.status is ToolResultStatus.INTERRUPT:
-        return {"interrupt": True, "pending_input": result.pending_input}
-    return {
-        "isError": True,
-        "errorCode": result.error_code or result.status.value,
-        "content": result.error_message or "tool execution failed",
-        "unknownEffect": result.status is ToolResultStatus.UNKNOWN,
-    }
 
 
 __all__ = [

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from agent.engine.native_loop import executor
 from agent.engine.native_loop.checkpoint import (
     decode_native_checkpoint,
     encode_native_checkpoint,
@@ -10,6 +11,7 @@ from agent.engine.native_loop.llm_client import TextDelta, ToolCallReady, TurnEn
 from agent.engine.native_loop.loop import LoopConfig, LoopState, NativeLoop
 from agent.engine.native_loop.messages import Msg, ToolCall
 from agent.engine.native_loop.tools import NativeToolContext, ToolRegistry, ToolSpec
+from agent.runtime.domain.errors import AttemptOwnershipLost
 
 
 class _ScriptedClient:
@@ -34,6 +36,47 @@ def _config() -> LoopConfig:
         compact_buffer_tokens=4_000,
         compact_preserve_units=4,
     )
+
+
+@pytest.mark.asyncio
+async def test_native_loop_requires_exactly_one_initial_state_source() -> None:
+    loop = NativeLoop(
+        client=_ScriptedClient([]),
+        registry=ToolRegistry([]),
+        system_instruction="test",
+        config=_config(),
+    )
+    state = LoopState(messages=[Msg(role="user", content="resume")])
+
+    with pytest.raises(ValueError, match="exactly one"):
+        await anext(loop.run())
+    with pytest.raises(ValueError, match="exactly one"):
+        await anext(loop.run(state.messages, initial_state=state))
+
+
+@pytest.mark.asyncio
+async def test_native_executor_propagates_attempt_ownership_loss_unchanged() -> None:
+    lost = AttemptOwnershipLost("ACTIVITY_LEASE_EXPIRED", "lease expired")
+
+    async def lose_ownership(_args: dict, _context: NativeToolContext):
+        raise lost
+
+    registry = ToolRegistry([ToolSpec(
+        name="ownership_probe",
+        description="raise attempt ownership loss",
+        parameters={"type": "object", "properties": {}},
+        run=lose_ownership,
+    )])
+
+    with pytest.raises(AttemptOwnershipLost) as raised:
+        await executor.execute_one(
+            ToolCall(id="ownership-call", name="ownership_probe", arguments="{}"),
+            registry,
+            invocation_id="run-ownership",
+            state={},
+        )
+    assert raised.value is lost
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -121,7 +164,7 @@ async def test_native_kernel_recovers_durable_tool_boundary_without_duplicate_ef
         checkpoint=keep_checkpoint,
     )
     events = []
-    async for event in resumed.run(restored.messages, initial_state=restored):
+    async for event in resumed.run(initial_state=restored):
         events.append(event)
 
     assert effects == 1
@@ -180,7 +223,7 @@ async def test_native_model_request_reservation_is_not_refunded_after_crash() ->
         config=_config(),
         checkpoint=keep_checkpoint,
     )
-    async for _ in resumed.run(restored.messages, initial_state=restored):
+    async for _ in resumed.run(initial_state=restored):
         pass
 
     assert reservations == [2]
@@ -204,7 +247,7 @@ async def test_native_model_call_hard_cap_stops_before_another_provider_request(
         generation_counter=config.hard_cap,
     )
 
-    events = [event async for event in loop.run(state.messages, initial_state=state)]
+    events = [event async for event in loop.run(initial_state=state)]
 
     assert loop.error_code == "RUN_MODEL_CALL_LIMIT"
     assert client.requests == []

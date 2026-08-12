@@ -39,7 +39,7 @@ Browser
              → ToolBroker.execute_prepared
              → ToolResultEnvelope 放回模型消息
              → 下一轮 LLM
-  → Coordinator 原子提交 final assistant + terminal
+  → 成功路径由 Coordinator 原子提交 final assistant + terminal
   → SSE 从 committed run_events replay/tail
 ```
 
@@ -54,7 +54,7 @@ Browser
 | 外部工具执行 | 是 | effect-aware dispatch/retry/reconcile |
 | ToolResult | 是 | 严格适配、Artifact/Evidence、ledger/event 结算 |
 | 下一轮模型 | 间接 | Engine 使用 Broker 返回的 envelope 构造 tool message |
-| Run terminal | 否 | 正常 EngineOutcome 由 Coordinator 收口；cancel/deadline/recovery/reconciliation 可由 Store 权威事务直接提交 |
+| Run terminal | 否 | Coordinator 提交计划终态；Store 检查 unresolved，并可转入 sticky reconciliation 或由 deadline/recovery/signal 事务裁决 |
 | SSE | 间接 | SSE 读取 Broker 已提交的 canonical events |
 
 ## 3. Worker 启动时 Broker 已被 release 冻结
@@ -194,7 +194,24 @@ Broker 严格验证并结算后，Engine 才把 `ToolResultEnvelope` 投影成�
 - INTERRUPT → pending input；
 - UNKNOWN → 明确 unknown-effect 错误，进入对账/人工语义。
 
+投影只有一份：
+
+```text
+agent/runtime/application/tool_outputs.py
+  project_tool_result_for_model(...)
+```
+
+ADK、Native fresh execution 和 Native checkpoint recovery 全部调用它，保证
+`SUCCESS/NO_OUTPUT/FAILURE/INTERRUPT/UNKNOWN`、Artifact ref 和 external object id
+在 crash 前后语义一致。只有严格 `ToolResultEnvelope` 能进入该投影；
+`RuntimeFault`/`AttemptOwnershipLost` 绝不能被包装成模型可见 error dict。
+
 大结果不会完整复制进 Event 或 Checkpoint。Broker ledger 保存有界 preview/ref；Native 恢复时调用 `materialize_committed_result` 从 Artifact CAS 恢复完整 current envelope。
+
+Evidence identity 也不再借用请求字段：Broker 显式向工具上下文传递
+`tool_execution_id` 和 `idempotency_key`。前者写入 `EvidenceSet` 并关联 ledger，后者
+与 query 文本确定性生成检索 `query_id`。当前 SQLite slot 创建时两值恰好相同，
+但契约允许它们不同，producer 必须按各自语义使用。
 
 ## 9. 与 checkpoint 的顺序关系
 
@@ -224,19 +241,46 @@ Broker 管 Tool effect，Native checkpoint 管模型循环位置，两者不能�
 | stable slot 漂移 | Broker | `TOOL_REPLAY_MISMATCH`，终端 fail-closed |
 | result DTO 非严格 JSON | result adapter/Broker | `TOOL_RESULT_CONTRACT_INVALID` |
 | Evidence 缺 provenance | Broker | `EVIDENCE_CONTRACT_INVALID` |
+| 非 ownership `RuntimeFault` | Broker + Adapter | DISPATCHED 后先 effect-aware 结算，再保留原 code 上抛；不回模型 |
 | READ_ONLY 临时失败 | Broker | 在 deadline/max attempts 内可重试 |
 | 非幂等调用派发后结果不明 | Broker | reconcile 或 `MANUAL_REQUIRED` |
 | stale fencing/lease loss | Store/Worker | `AttemptOwnershipLost`，旧 attempt 不终态化 Run |
+| 普通 FAILED 但仍 unresolved | Store | `WAITING_INPUT + pending_terminal`，最后一次 strict reconciliation 提交原 FAILED |
 | provider silent EOF | Native provider boundary | `MODEL_STREAM_INCOMPLETE`；默认 `off` 为零 dispatch，实验模式取消剩余任务但可能已有已结算的安全只读前缀 |
 | Run cancel | API/Store、Worker + Adapter | Store 裁决终态；运行中的 Adapter 关闭流、取消并 await 工具任务，效应不明先对账 |
 
-控制故障和契约故障不能被 `execute_one` 吞成普通工具错误再喂回模型。
+控制故障和契约故障不能被 `execute_one` 或 ADK plugin 吞成普通工具错误再喂回模型。
+普通 Python 工具异常仍可按既有语义反馈模型；所有 `RuntimeFault` 和
+`AttemptOwnershipLost` 必须穿过 Engine Adapter。ADK 2.6.2 的 plugin wrapper 只按
+明确 causal chain 精确解包，不能把任意 `RuntimeError` 猜成控制异常。
+
+### 10.1 ToolEffect 如何阻挡普通失败终态
+
+ToolBroker 不拥有 Run terminal，但它留下的 ledger 会约束 Store：
+
+```text
+EngineOutcome TERMINAL_FAILURE
+-> Coordinator 调 finalize_failure
+-> Store 发现 unresolved ToolEffect
+-> effect 全部转为 operator-actionable MANUAL_REQUIRED
+-> Run WAITING_INPUT，父 Activity RECONCILE
+-> sticky pending_terminal 保存原 FAILED code/message
+-> strict mark_committed / mark_failed / reconcile
+-> 最后一个 effect 解决时原子提交原 FAILED
+```
+
+这条路径从不重新调用 Engine；`reconcile` 只授权 query hook。deadline 可以优先收成
+`TIMED_OUT` 并记录 unresolved IDs；cancel 获权后保持 `CANCEL_REQUESTED`，全部解决才
+`CANCELLED`。Store 的底层 terminal helper 会拒绝所有非 timeout terminal 带着
+unresolved effect 落库。
 
 ## 11. 三条最重要的阅读结论
 
 1. `ToolBroker` 位于 Engine 内部的工具边界，但它拥有 Tool effect 和工具公开 event 的权威；Engine 不能自说“工具成功了”。
 2. PREPARE 与 dispatch 分离：先冻结稳定意图，再接触外部世界；恢复身份来自 turn/call ordinal，不来自 provider id。
-3. SSE 只是 committed event 的投影；正常 EngineOutcome 由 Coordinator 原子收口，cancel/deadline/recovery/reconciliation 可由 Store 命令事务直接终态化，但任何路径都不能从某个 ToolResult 或 SSE EOF 推导终态。
+3. SSE 只是 committed event 的投影；正常 EngineOutcome 由 Coordinator 发起收口，但
+   Store 会让 unresolved effect 阻挡非 timeout terminal，并由 sticky reconciliation
+   最终提交原失败。任何路径都不能从某个 ToolResult 或 SSE EOF 推导终态。
 
 ## 12. 推荐源码阅读顺序
 

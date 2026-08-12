@@ -28,7 +28,7 @@ system instruction
 ```text
 NativeLoopAdapter.execute(request, RuntimeIO)
   → 严格恢复 LoopState
-  → NativeLoop.run(state)
+  → NativeLoop.run(initial_state=state)
        ├─ 每轮开始：_maybe_proactive_compact
        ├─ 压缩后保存 MODEL_REQUEST checkpoint
        ├─ provider stream
@@ -37,6 +37,8 @@ NativeLoopAdapter.execute(request, RuntimeIO)
 ```
 
 压缩算法位于 `agent/engine/native_loop/compact.py`，但两个触发入口和恢复语义位于 `agent/engine/native_loop/loop.py`。消息原子单元位于 `agent/engine/native_loop/messages.py`，压缩后状态通过 `agent/engine/native_loop/checkpoint.py` 的唯一 current codec 持久化。
+
+`NativeLoop.run` 不再允许“传 messages，同时再传 initial_state”这种双重来源。普通子 Runner 传 `messages=...`，生产 Adapter 与 checkpoint 恢复传 `initial_state=...`；恰好一个参数必须非空。因此 compaction 字段、generation 和恢复 phase 不会被另一份 messages 静默覆盖。
 
 ## 3. 配置与状态
 
@@ -226,10 +228,10 @@ Provider 在请求阶段报上下文超长时，`NativeLlmClient._classify` 将�
 kernel 捕获后调用 `_reactive_compact`，但必须同时满足：
 
 - 存在摘要用 `AgentChatClient`。
-- 本 generation 尚未向 Runtime 提交任何正文 delta。
+- 本 generation 尚未产生任何正文 delta。
 - `attempted_reactive_compact` 未达上限，默认只允许 1 次。
 
-“尚未输出正文”是防重闸门。如用户已经看到部分文本，在同一内部分支直接压缩并重跑会复制输出；该情况选择如实失败。
+“尚未产生正文”是防重闸门。kernel 以 `text_parts` 判定；只要 provider 已给出任何正文，该 delta 就可能已被 Adapter awaited-admit 到 Runtime buffer，也可能已因 100 ms / 2 KiB 或其他语义边界持久化。此时不能在同一内部分支静默重跑，否则会复制或混淆 generation 输出；应如实失败。
 
 反应式压缩成功后：
 
@@ -266,6 +268,8 @@ compact_cooldown = 3
 接下来 3 个 turn 跳过主动压缩，之后可再试。这避免摘要 provider 短暂抖动造成“每轮先失败一次”。
 
 反应式压缩如失败，则原始 context overflow 无法恢复，kernel 以 `CONTEXT_OVERFLOW` 失败收口。反应式次数上限还防止“压缩后仍超长”无限循环。
+
+需要另外区分 Runtime 控制故障：checkpoint CAS、fencing/lease loss、严格 ToolResult/Evidence 契约异常不是上下文超长，不参与 compaction 恢复，也不能转成模型可修正消息。`RuntimeFault` / `AttemptOwnershipLost` 保持原码向 Worker 透传。
 
 ## 11. 单条大 ToolResult 治理与历史压缩的分工
 

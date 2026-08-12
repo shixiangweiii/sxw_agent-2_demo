@@ -525,7 +525,7 @@ RUN_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
     }),
     RunStatus.WAITING_INPUT: frozenset({
         RunStatus.DISPATCH_PENDING, RunStatus.CANCEL_REQUESTED, RunStatus.CANCELLED,
-        RunStatus.TIMED_OUT,
+        RunStatus.FAILED, RunStatus.TIMED_OUT,
     }),
     RunStatus.CANCEL_REQUESTED: frozenset({RunStatus.CANCELLED, RunStatus.TIMED_OUT}),
     **{state: frozenset() for state in TERMINAL_RUN_STATUSES},

@@ -52,6 +52,8 @@ Checkpoint 只包含 WorkingState 与引擎 current typed state；不保存可�
 
 **Result 事务**：以 Activity revision/lease/fencing CAS 提交 `COMMITTED | FAILED | UNKNOWN`、result/payload_ref、external ref、sticky error，append `TOOL_RESULT_COMMITTED` 并迁移 Activity/Run。stale fencing 一律拒绝；完整 `COMMITTED` 结果可直接复用。Store 先把公开字段归一成冻结 ToolResultEnvelope，并强制 `COMMITTED→SUCCESS|NO_OUTPUT|INTERRUPT`、`FAILED→FAILURE`、`UNKNOWN/MANUAL_REQUIRED/RECONCILING→UNKNOWN`。`result_ref` 的 envelope/列/metadata/Event/Artifact Link 必须一致；已知 `external_object_id` 单调保留且不得改变，任何矛盾在写事实前整体回滚。
 
+executor 已进入且 `DISPATCHED` 已 durable 后，异常必须先区分控制所有权与执行结果。`AttemptOwnershipLost` 及其稳定 RuntimeFault code 原样冒泡，绝不结算 ToolExecution；新 owner 的 lease recovery 负责裁决。其余 executor/协议 RuntimeFault 必须先 effect-aware settle，再保留原错误码向上抛：`READ_ONLY → FAILED/FAILURE`，所有可能有副作用的 class → `UNKNOWN/UNKNOWN`。由此终端错误不会把一个已派发的外部 effect 留成无主 `DISPATCHED`，也不会把 ownership loss伪造成模型 ToolResult。
+
 `DISPATCHED` 后没有确定结果的 timeout/kill/ACK 丢失只能进入 `UNKNOWN`，不能伪装普通失败。`NON_IDEMPOTENT_EFFECT/UNKNOWN_EFFECT` 的 UNKNOWN 后只允许确定性 reconcile/manual；父 lease 或安全 wait boundary 丢失时，在同一 recovery 事务中保留有界 UNKNOWN result/error/ref/external correlation 并转 `MANUAL_REQUIRED/MANUAL`。READ_ONLY 或携带稳定下游 idempotency key 的 `IDEMPOTENT_EFFECT` 可先 reconcile，在未发现已提交结果且 attempt 未耗尽时以同一 ToolExecution/key 受控重试。Store 与 Broker 都按冻结 release/effect/capability guard；当前 manifest 漂移不可改变旧账本语义。人工 `action=reconcile` 只授权 query-only marker，绝不授予原 executor 重发权限。
 
 ### TB-5 Artifact
@@ -71,7 +73,23 @@ Coordinator 独占 terminal 权限。在 terminal 事务前强制 flush delta。
 - `runs` terminal payload/status/revision/next_seq；
 - 当前 Activity 的成功终态。
 
-任一步失败全部回滚，因此不会出现“可进入历史的 final message，但 Run 未成功”或相反情况。失败/取消/超时/不兼容 terminal 同样在一个事务中提交唯一 terminal 字段和 `RUN_TERMINATED`，但不提交成功 assistant message。
+任一步失败全部回滚，因此不会出现“可进入历史的 final message，但 Run 未成功”或相反情况。失败/取消/超时 terminal 同样在一个事务中提交唯一 terminal 字段和 `RUN_TERMINATED`，但不提交成功 assistant message。
+
+所有 terminal 写入口都在 Store 最后一层查询 unresolved ToolEffect。`TIMED_OUT` 是唯一允许保留 unresolved IDs 的 terminal，并须把它们写入 payload；`SUCCEEDED/FAILED/CANCELLED/REJECTED` 发现 unresolved 必须 fail closed。Coordinator 计划提交普通 `FAILED` 时，Store 在同一事务把全部 uncertainty 转为 `MANUAL_REQUIRED/MANUAL`，将父 Activity/Run 转为 `RECONCILE/WAITING_INPUT`，并在 `pending_input` 保存：
+
+```json
+{
+  "type": "TOOL_RECONCILIATION_REQUIRED",
+  "unresolved_tool_execution_ids": ["tool_..."],
+  "pending_terminal": {
+    "status": "FAILED",
+    "code": "原稳定错误码",
+    "message": "原错误消息"
+  }
+}
+```
+
+该 pending terminal 在 signal、query-only claim、Worker kill/recovery 间原样保留。最后一个 effect 被 `mark_committed/mark_failed` 或 query hook 确定后，同一 Store 事务提交原 `FAILED`，不再调 Engine/LLM。deadline 和 cancel-first 仍分别服从既有 `TIMED_OUT` 与 `CANCEL_REQUESTED` 所有权顺序。
 
 ### TB-7 Cancel
 

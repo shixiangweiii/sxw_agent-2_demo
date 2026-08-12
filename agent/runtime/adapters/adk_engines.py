@@ -16,6 +16,11 @@ from google.genai import types
 from agent.context import AgentContext
 from agent.engine.base import RunContext, build_engine
 from agent.runtime.domain.artifact import MAX_HTTP_RANGE_BYTES
+from agent.runtime.domain.errors import (
+    AttemptOwnershipLost,
+    RuntimeFault,
+    raise_if_ownership_lost,
+)
 from agent.runtime.domain.models import EngineOutcome, EngineOutcomeKind, EngineName, WorkingState
 from agent.runtime.ports.artifact import ArtifactStore
 from agent.runtime.ports.engine import EngineRunRequest, RuntimeIO
@@ -186,6 +191,18 @@ class AdkEngineAdapter:
                 error_code="DEADLINE_EXCEEDED",
                 message="engine attempt exceeded the absolute Run deadline",
             )
+        except RuntimeError as exc:
+            # ADK 2.6.2 PluginManager wraps exceptions raised by a plugin
+            # callback in RuntimeError. Unwrap only our explicit Runtime
+            # control types from the causal chain; arbitrary framework errors
+            # remain ordinary RuntimeError values and follow existing policy.
+            control_fault = _runtime_control_fault(exc)
+            if isinstance(control_fault, AttemptOwnershipLost):
+                raise control_fault
+            if isinstance(control_fault, RuntimeFault):
+                raise_if_ownership_lost(control_fault)
+                raise control_fault
+            raise
         finally:
             reset_request_context(token)
 
@@ -212,3 +229,16 @@ class AdkEngineAdapter:
         if offset != total_size:
             raise RuntimeError("artifact metadata size changed during materialization")
         return b"".join(chunks)
+
+
+def _runtime_control_fault(error: BaseException) -> RuntimeFault | AttemptOwnershipLost | None:
+    """Find an exact Runtime control fault in a framework wrapper chain."""
+
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (RuntimeFault, AttemptOwnershipLost)):
+            return current
+        current = current.__cause__ or current.__context__
+    return None

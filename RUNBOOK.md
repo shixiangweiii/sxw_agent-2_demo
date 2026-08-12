@@ -314,6 +314,8 @@ curl -X POST http://127.0.0.1:8000/api/v1/runs/run_xxx/signals \
 
 所有 action 都要求非空 evidence。evidence 最大 4KiB，inline result 最大 8KiB；大证据/结果先走 Artifact。Tool ID 不在当前 pending list、ref 不存在、状态已变化或两个不同 signal 竞争时返回 409，事务不会留下 signal/event/link 或错误唤醒。
 
+若 GET Run 还显示 `pending_input.pending_terminal.status=FAILED`，这不是已终态的 Run，而是被 unresolved effect 阻挡的 sticky 失败意图。仍按上述 strict signal 逐个处置；最后一个 effect 确定时，响应会直接显示原 `FAILED` 及原 code/message，不会重新调用 LLM/Engine。如在 query hook 结算后 Worker 丢失，lease recovery 也会提交同一原失败；deadline 先到则变为 `TIMED_OUT`。
+
 ToolResult 使用严格 v1 envelope：`FAILURE/UNKNOWN` 必须同时给有界 `error_code/error_message`，`INTERRUPT` 必须给 `pending_input`，`NO_OUTPUT` 不得携带 preview/ref，额外字段会被拒绝。账本 effect/result 必须匹配（例如 `COMMITTED` 不能配 `FAILURE`）。若同时给 `result_ref` 与 Artifact metadata，它们必须是同一个已注册 digest；envelope、账本列、canonical event 和 Artifact Link 任一不一致都会整笔回滚。
 
 `external_object_id` 是稳定 ToolExecution 的单调外部 correlation：ACK 丢失后已知的 provider job/task ID 不会在 retry、reconcile、manual 或 Worker 重启中被清掉，也不能由新 attempt 改成另一个 ID。reconcile hook 会收到既有 ref/external identity；hook 新发现但仍不能判断结论的 identity 也会先持久化，供下一次人工查询使用。

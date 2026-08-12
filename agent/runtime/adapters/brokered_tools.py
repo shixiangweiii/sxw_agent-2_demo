@@ -17,6 +17,7 @@ from agent.runtime.application.tool_outputs import (
     adapter_for_tool,
     claude_skill_output,
     plain_json_output,
+    project_tool_result_for_model,
     skill_center_output,
 )
 from agent.runtime.application.tool_catalog import (
@@ -597,7 +598,7 @@ class BrokeredAdkTool(BaseTool):
         )
         if self.name == "update_task_plan":
             await _persist_adk_plan(self._rc, result)
-        return _model_result(result)
+        return project_tool_result_for_model(result)
 
 
 def broker_adk_tools(
@@ -728,7 +729,7 @@ def build_brokered_native_registry(
             )
             if spec.name == "update_task_plan":
                 _restore_native_plan_mirror(context, result)
-            return _model_result(result)
+            return project_tool_result_for_model(result)
 
         wrapped.append(ToolSpec(
             name=original.name,
@@ -754,29 +755,6 @@ def _native_result_adapter(protocol: str) -> ToolResultAdapter:
         return adapters[protocol]
     except KeyError as exc:
         raise ValueError(f"unsupported Native tool result protocol: {protocol}") from exc
-
-
-def _model_result(result: ToolResultEnvelope) -> Any:
-    if result.status in {ToolResultStatus.SUCCESS, ToolResultStatus.NO_OUTPUT}:
-        # Provider object identity is part of a successful durable Tool result,
-        # not just ledger metadata.  Keep user preview under ``content`` when
-        # adding envelope metadata so a user-owned key can never be overwritten.
-        if result.result_ref or result.external_object_id:
-            projected = {"content": result.preview}
-            if result.result_ref:
-                projected["artifact_ref"] = result.result_ref
-            if result.external_object_id:
-                projected["external_object_id"] = result.external_object_id
-            return projected
-        return result.preview if result.preview is not None else {"status": "NO_OUTPUT"}
-    if result.status is ToolResultStatus.INTERRUPT:
-        return {"interrupt": True, "pending_input": result.pending_input}
-    return {
-        "isError": True,
-        "errorCode": result.error_code or result.status,
-        "content": result.error_message or "tool execution failed",
-        "unknownEffect": result.status is ToolResultStatus.UNKNOWN,
-    }
 
 
 def _restore_native_plan_mirror(
@@ -813,6 +791,7 @@ async def _with_tool_request_context(broker_context: Any, awaitable: Any) -> Any
         activity_id=broker_context.tool_activity_id,
         deadline_at_ms=broker_context.deadline_at_ms,
         idempotency_key=broker_context.idempotency_key,
+        tool_execution_id=broker_context.tool_execution_id,
     ))
     try:
         return await awaitable

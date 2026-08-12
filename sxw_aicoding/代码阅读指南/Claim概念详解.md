@@ -63,11 +63,16 @@ activity.type = ENGINE_RUN
 activity.state = PENDING
 activity.available_at <= now
 run.state = DISPATCH_PENDING
+run.pending_input 为空
 run.deadline_at > now
 (run.engine, run.release_fingerprint) 精确命中 release_map
 ```
 
-cancel-owned reconcile 路径还要求 `resume_payload` 是字段数量和类型都完全正确的 reconcile-only marker。普通、恢复和 reconcile claim 都必须通过同一 exact release predicate。
+`DISPATCH_PENDING` 还有一个刻意收窄的例外：Run 保存着
+`pending_terminal.status=FAILED` 时，只允许 `resume_payload` 为字段集合和类型都完全
+正确的 reconcile-only marker，不能当成普通 Engine Activity 领取。`CANCEL_REQUESTED`
+同样只允许这种 query-only claim。普通、恢复、deferred-failure reconcile 和
+cancel-owned reconcile 都必须通过同一 exact release predicate。
 
 ### 4.2 领取时原子更新 Activity
 
@@ -160,14 +165,29 @@ Store ownership fault
 
 不可以将它包装成模型可见 ToolResult，不可以记为普通 Engine failure，也不可以 terminalize Run。这不是“用户任务失败”，而是“当前 Worker 已无权裁决”。
 
+这条边界同时覆盖三个 Engine：
+
+- Native executor 对 `AttemptOwnershipLost` 和 `RuntimeFault` 直接上抛；
+- ADK `AgentInvocationPlugin` 只把普通工具异常转成模型可见反馈，Runtime 控制故障原样上抛；
+- ADK 2.6.2 会把 plugin 异常包成 `RuntimeError`，`AdkEngineAdapter` 只沿
+  `__cause__/__context__` 精确找回 `RuntimeFault`/`AttemptOwnershipLost`，不会把任意
+  `RuntimeError` 猜成控制故障。
+
+非 ownership 的 `RuntimeFault` 也不能回灌模型。若它发生在 Tool 已 durable
+`DISPATCHED` 之后，Broker 先按 effect class 把 ledger 结算为确定失败或不确定效应，
+再保留原错误码向上抛；这与“把异常包装成普通 ToolResult 让模型继续”是两回事。
+
 ## 8. 租约过期恢复不等于无条件重放
 
 `recover_expired()` 会扫描租约过期的 `CLAIMED/RUNNING` Activity，但恢复结果取决于持久化事实：
 
 1. deadline 已到：按 `TIMED_OUT` 收口，同时保留未决 effect 信息。
 2. cancel 已经获得裁决权且无未决 effect：可确定性收口 `CANCELLED`。
-3. 只有 READ_ONLY 或具有稳定幂等键的 IDEMPOTENT effect：可回到 `PENDING` 并复用稳定 slot。
-4. 存在不确定或不可透明重放的 ToolEffect：进入 `RECONCILE/MANUAL`，不再派原工具。
+3. 已有 sticky `pending_terminal=FAILED` 且所有 effect 已解决：直接提交原失败，不再运行 Engine。
+4. sticky failure 仍有未决 effect：保留 marker 并回到严格 `RECONCILE/MANUAL` 边界。
+5. 普通恢复中，只有 READ_ONLY 或具有稳定幂等键的 IDEMPOTENT effect 才可回到
+   `PENDING` 并复用稳定 slot。
+6. 存在不确定或不可透明重放的 ToolEffect：进入 `RECONCILE/MANUAL`，不再派原工具。
 
 所以 Claim 不仅是“抢任务”，还是 ToolEffect 恢复安全的第一道所有权边界。
 
@@ -188,6 +208,13 @@ Activity CLAIMED/RUNNING -> PENDING -> CLAIMED
 
 effect 不确定：
 Activity RUNNING -> RECONCILE/MANUAL
+
+Engine 已失败但 effect 尚不确定：
+Run      RUNNING -> WAITING_INPUT(pending_terminal=FAILED) -> FAILED
+Activity RUNNING -> RECONCILE -> FAILED                    # mark_* signal
+         RUNNING -> RECONCILE -> PENDING -> CLAIMED/RUNNING -> FAILED
+                                                            # query-only claim
+         两条都不重新执行 Engine
 ```
 
 ## 10. 常见误解
@@ -195,6 +222,12 @@ Activity RUNNING -> RECONCILE/MANUAL
 ### Claim 成功是否等于 Run 成功？
 
 不等于。Claim 只表示 Worker 当前有权执行某 Activity。正常 Engine 执行结束时，Coordinator 会结合 `EngineOutcome`、cancel、deadline 和 ToolEffect 做终态裁决；cancel API、deadline maintenance、lease recovery/reconciliation 等命令路径也可以由 Store 在权威写事务中直接提交终态。无论入口是谁，都必须经过 Run 状态 CAS 和唯一 terminal event 约束。
+
+若计划终态是普通 `FAILED` 但仍有 unresolved ToolEffect，`finalize_failure()` 不会
+返回终态，而是把原 code/message 保存为 sticky `pending_terminal` 并进入人工协调。
+最后一个 effect 经 signal 或 query 解决后，同一 Store 事务提交原 `FAILED`，不会再
+claim Engine。底层 `_finalize_terminal_in_tx()` 还禁止除 `TIMED_OUT` 外的任何终态
+跨过 unresolved effect，作为所有上层入口的最终防线。
 
 ### 可否只按 engine 过滤 claim？
 
@@ -211,4 +244,8 @@ fencing 解决 attempt 所有者，revision 则用于对 Activity 内部状态�
 - `agent/runtime/worker/dispatcher.py`：调度循环、attempt task 与 lease renewal task。
 - `agent/runtime/application/coordinator.py`：`mark_activity_running()`、release 防御断言、Engine 执行。
 - `agent/runtime/domain/errors.py`：`AttemptOwnershipLost`。
+- `agent/plugins/agent_invocation_plugin.py` 与 `agent/runtime/adapters/adk_engines.py`：ADK
+  Runtime 控制故障透传和精确解包。
+- `agent/runtime/application/tool_broker.py`：DISPATCHED 后 RuntimeFault 的 effect-aware
+  结算及 ownership-loss 不改账本边界。
 - `agent/runtime/adapters/sqlite/schema.sql`：Activity/Run 状态、claim 索引和 release 外键。

@@ -30,7 +30,7 @@ from agent.engine.native_loop.tools import (
     ToolSpec,
     call_tool,
 )
-from agent.runtime.domain.errors import RuntimeFault
+from agent.runtime.domain.errors import AttemptOwnershipLost, RuntimeFault
 from common.obs import get_logger, log_kv
 from common.trace import KIND_TOOL, start_span
 
@@ -131,7 +131,7 @@ async def execute_one(
     invocation_id: str,
     state: dict[str, Any],
 ) -> ToolOutcome:
-    """执行单个工具调用。**本函数永不抛异常**（CancelledError 除外，由上层处理）。"""
+    """执行单个工具调用；普通工具错误转结果，Runtime 控制异常原样透传。"""
     # span 字段与 ADK 侧 `tool.<name>` 逐个对齐（tool / failure / error_type），
     # 否则评测的失败归因规则得为两代引擎各写一套。
     with start_span(f"tool.{call.name}", KIND_TOOL,
@@ -167,6 +167,9 @@ async def execute_one(
         try:
             response = await call_tool(spec, args, ctx)
         except asyncio.CancelledError:
+            raise
+        except AttemptOwnershipLost:
+            # Ownership loss is Worker control flow, never model-visible data.
             raise
         except RuntimeFault:
             # Stable-slot drift, fencing/lease/CAS and strict Tool/Evidence

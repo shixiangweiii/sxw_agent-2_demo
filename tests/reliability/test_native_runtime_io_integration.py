@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from tests.reliability.support.runtime_releases import activate_test_release
+
 import asyncio
+import uuid
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -15,11 +18,16 @@ from agent.engine.native_loop.loop import LoopState
 from agent.engine.native_loop.messages import Msg, ToolCall
 from agent.engine.native_loop.tools import NativeToolContext, ToolRegistry, ToolSpec
 from agent.runtime.adapters.brokered_tools import build_runtime_tool_catalog
+from agent.runtime.adapters.sqlite import RuntimeDatabase, SqliteRuntimeStore
+from agent.runtime.application.admission import AdmissionService, CreateRunInput
+from agent.runtime.application.events import CommittedEventSink
 from agent.runtime.application.tool_broker import PreparedToolExecution
 from agent.runtime.domain.errors import RuntimeFault
 from agent.runtime.domain.models import (
     CheckpointRecord,
     EngineOutcomeKind,
+    EventType,
+    ReleaseManifest,
     RuntimeEnvelope,
     ToolResultEnvelope,
     ToolResultStatus,
@@ -27,6 +35,7 @@ from agent.runtime.domain.models import (
     sha256_json,
 )
 from agent.runtime.ports.engine import EngineRunRequest
+from agent.runtime.ports.clock import SystemClock
 
 
 _RUN_ID = "run_native_runtime_io"
@@ -69,6 +78,8 @@ class _RuntimeIO:
         self.phases: list[str] = []
         self.checkpoint_states: list[dict[str, Any]] = []
         self.final: tuple[str, str, str] | None = None
+        self.cancel_checks = 0
+        self.force_flushes = 0
 
     @property
     def tool_broker(self) -> Any:
@@ -81,7 +92,7 @@ class _RuntimeIO:
         self.events.append((event_type, dict(payload)))
 
     async def force_flush(self) -> None:
-        return None
+        self.force_flushes += 1
 
     async def abort(self) -> None:
         return None
@@ -112,6 +123,7 @@ class _RuntimeIO:
         )
 
     async def is_cancelled(self) -> bool:
+        self.cancel_checks += 1
         return self.cancelled
 
     def remaining_ms(self) -> int:
@@ -395,6 +407,128 @@ def _request(checkpoint: CheckpointRecord | None = None) -> EngineRunRequest:
     )
 
 
+async def _real_sink(tmp_path: Any) -> tuple[SqliteRuntimeStore, CommittedEventSink]:
+    clock = SystemClock()
+    store = SqliteRuntimeStore(RuntimeDatabase(tmp_path / "runtime.db"))
+    await store.initialize()
+    release = await activate_test_release(store, ReleaseManifest(
+        engine="native_loop",
+        components={"native-stream-aggregation": "current"},
+    ))
+    run = (await AdmissionService(
+        store,
+        clock=clock,
+        default_deadline_ms=60_000,
+    ).create(
+        CreateRunInput(
+            client_request_id=str(uuid.uuid4()),
+            conversation_id=None,
+            principal_id="demo-user",
+            agent_id="demo-agent",
+            engine="native_loop",
+            text="aggregate output",
+            attachment_refs=(),
+            deadline_at=None,
+        ),
+        idempotency_key=str(uuid.uuid4()),
+    )).run
+    claim = await store.claim_next(
+        release_map={"native_loop": release},
+        worker_id="native-stream-worker",
+        lease_ms=30_000,
+        now_ms=clock.now_ms(),
+    )
+    assert claim is not None
+    activity = await store.mark_activity_running(
+        claim.activity.activity_id,
+        worker_id="native-stream-worker",
+        fencing_token=claim.activity.fencing_token,
+        now_ms=clock.now_ms(),
+    )
+    return store, CommittedEventSink(
+        store,
+        run_id=run.envelope.run_id,
+        activity_id=activity.activity_id,
+        fencing_token=activity.fencing_token,
+        deadline_at_ms=run.envelope.deadline_at,
+        clock=clock,
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_committed_sink_aggregates_and_flushes_every_required_boundary(
+    tmp_path: Any,
+) -> None:
+    store, sink = await _real_sink(tmp_path)
+
+    await sink.emit("text", {"delta": "a" * 1024})
+    assert not any(
+        event.event_type is EventType.OUTPUT_DELTA_COMMITTED
+        for event in await store.list_events(sink.run_id, visibility=None)
+    )
+
+    # The default 2 KiB threshold commits both provider chunks as one event.
+    await sink.emit("text", {"delta": "b" * 1024})
+    await sink.emit("text", {"delta": "timer"})
+    immediate = await store.list_events(sink.run_id, visibility=None)
+    assert [
+        event.payload["delta"]
+        for event in immediate
+        if event.event_type is EventType.OUTPUT_DELTA_COMMITTED
+    ] == ["a" * 1024 + "b" * 1024]
+    async with asyncio.timeout(1):
+        while True:
+            timed = await store.list_events(sink.run_id, visibility=None)
+            if sum(
+                event.event_type is EventType.OUTPUT_DELTA_COMMITTED
+                for event in timed
+            ) == 2:
+                break
+            await asyncio.sleep(0.01)
+
+    # Checkpoint and non-text events are ordering barriers; close is the final
+    # attempt boundary. None of them relies on Native forcing every delta.
+    await sink.emit("text", {"delta": "checkpoint"})
+    await sink.checkpoint(
+        WorkingState(goal="aggregate output"),
+        expected_revision=0,
+        engine_state={"phase": "MODEL_REQUEST"},
+    )
+    await sink.emit("text", {"delta": "before-generation"})
+    await sink.emit("output_generation_started", {
+        "message_id": "msg-stream",
+        "generation_id": "gen-stream",
+        "supersedes_generation_id": None,
+        "reason": "initial",
+    })
+    await sink.emit("text", {"delta": "close"})
+    await sink.close()
+
+    events = await store.list_events(sink.run_id, visibility=None)
+    deltas = [
+        event.payload["delta"]
+        for event in events
+        if event.event_type is EventType.OUTPUT_DELTA_COMMITTED
+    ]
+    assert deltas == [
+        "a" * 1024 + "b" * 1024,
+        "timer",
+        "checkpoint",
+        "before-generation",
+        "close",
+    ]
+    generation = next(
+        event for event in events
+        if event.event_type is EventType.OUTPUT_GENERATION_STARTED
+    )
+    before_generation = next(
+        event for event in events
+        if event.event_type is EventType.OUTPUT_DELTA_COMMITTED
+        and event.payload["delta"] == "before-generation"
+    )
+    assert before_generation.seq < generation.seq
+
+
 async def _assert_no_native_tasks() -> None:
     await asyncio.sleep(0)
     leaked = [
@@ -402,11 +536,27 @@ async def _assert_no_native_tasks() -> None:
         for task in asyncio.all_tasks()
         if not task.done()
         and (
-            task.get_name() == "native-provider-pull"
+            task.get_name() in {"native-stream-pump", "native-cancel-watch"}
             or task.get_name().startswith("native-early-tool-")
         )
     ]
     assert leaked == []
+
+
+@pytest.mark.asyncio
+async def test_native_adapter_polling_and_flushes_are_not_proportional_to_deltas() -> None:
+    broker = _TrackingBroker()
+    client = _FinalTextClient(["x"] * 500)
+    io = _RuntimeIO(broker)
+    adapter = _adapter(client, broker, with_tools=False)
+
+    outcome = await asyncio.wait_for(adapter.execute(_request(), io), timeout=2)
+
+    assert outcome.kind is EngineOutcomeKind.COMPLETED
+    assert len([event for event, _ in io.events if event == "text"]) == 500
+    assert io.force_flushes == 0
+    assert io.cancel_checks <= 6
+    await _assert_no_native_tasks()
 
 
 @pytest.mark.asyncio
@@ -422,9 +572,10 @@ async def test_native_adapter_runtime_emit_backpressures_provider_and_tool_dispa
     execution = asyncio.create_task(adapter.execute(_request(), io))
     await asyncio.wait_for(io.text_emit_entered.wait(), timeout=1)
 
-    # MODEL_REQUEST + generation-start are durable, but the first text commit
-    # is blocked.  The adapter must not pull another provider item, PREPARE a
-    # ToolCall, or make external execution reachable across this barrier.
+    # MODEL_REQUEST + generation-start are durable, but admission of the first
+    # text frame is blocked. The adapter must not pull another provider item,
+    # PREPARE a ToolCall, or make execution reachable across this backpressure
+    # barrier; durability remains the Sink's 100 ms/2 KiB responsibility.
     await asyncio.sleep(0.05)
     assert io.phases == ["MODEL_REQUEST"]
     assert client.provider_pulls == 1
@@ -502,6 +653,23 @@ async def test_native_adapter_deadline_closes_blocked_provider_stream() -> None:
     outcome = await asyncio.wait_for(adapter.execute(_request(), io), timeout=2)
     assert outcome.kind is EngineOutcomeKind.TERMINAL_FAILURE
     assert outcome.error_code == "DEADLINE_EXCEEDED"
+    await asyncio.wait_for(client.closed.wait(), timeout=1)
+    await _assert_no_native_tasks()
+
+
+@pytest.mark.asyncio
+async def test_native_adapter_attempt_task_cancel_closes_blocked_provider_stream() -> None:
+    broker = _TrackingBroker()
+    client = _BlockedClient()
+    io = _RuntimeIO(broker)
+    adapter = _adapter(client, broker, with_tools=False)
+
+    execution = asyncio.create_task(adapter.execute(_request(), io))
+    await asyncio.wait_for(client.started.wait(), timeout=1)
+    execution.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await execution
     await asyncio.wait_for(client.closed.wait(), timeout=1)
     await _assert_no_native_tasks()
 

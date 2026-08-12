@@ -42,8 +42,11 @@ def build_knowledge_search_tool(settings: AgentSettings) -> Callable[..., Any]:
         with start_span("retrieval.knowledge_search", KIND_RETRIEVAL) as span:
             span.set_payload("query", query)
             retrieval_request = _retrieval_request(query)
+            request_context = get_request_context()
+            # _retrieval_request validates the complete Runtime identity.
+            assert request_context is not None
+            tool_execution_id = request_context.tool_execution_id
             try:
-                request_context = get_request_context()
                 request_timeout = timeout
                 if (
                     request_context is not None
@@ -77,6 +80,7 @@ def build_knowledge_search_tool(settings: AgentSettings) -> Callable[..., Any]:
                     request=retrieval_request,
                     response=data,
                     chunks=chunks,
+                    tool_execution_id=tool_execution_id,
                 )
                 retrieval_status = evidence_set.retrieval_status.value
                 degraded = retrieval_status in {"DEGRADED", "ERROR"}
@@ -157,6 +161,7 @@ def build_knowledge_search_tool(settings: AgentSettings) -> Callable[..., Any]:
                         "degraded_reasons": [type(exc).__name__],
                     },
                     chunks=[],
+                    tool_execution_id=tool_execution_id,
                 )
                 return ToolExecutionOutput(
                     result=ToolResultEnvelope(
@@ -178,11 +183,10 @@ def build_knowledge_search_tool(settings: AgentSettings) -> Callable[..., Any]:
 def _retrieval_request(query: str) -> dict[str, Any]:
     """Build the lossless Runtime → ARAG retrieval context.
 
-    The Broker replaces ``activity_id`` and ``idempotency_key`` with the stable
-    ToolExecution identity before invoking the function.  Deriving ``query_id``
-    from that identity keeps Evidence ids stable across a safe READ_ONLY retry,
-    while the absolute deadline lets ARAG/downstream calls respect the Run
-    budget instead of starting a fresh request-local timeout.
+    The Broker supplies both the stable execution identity and its independent
+    idempotency key before invoking the function. ``query_id`` deliberately
+    derives from the idempotency key so a safe READ_ONLY retry is stable, while
+    Evidence authority uses the explicit ToolExecution id.
     """
     context = get_request_context()
     if context is None:
@@ -191,7 +195,12 @@ def _retrieval_request(query: str) -> dict[str, Any]:
             "knowledge_search requires a Runtime ToolExecution context",
             500,
         )
-    if not context.run_id or not context.activity_id or not context.idempotency_key:
+    if (
+        not context.run_id
+        or not context.activity_id
+        or not context.idempotency_key
+        or not context.tool_execution_id
+    ):
         raise RuntimeFault(
             "EVIDENCE_CONTRACT_INVALID",
             "knowledge_search context lacks stable Runtime identities",
@@ -221,6 +230,7 @@ def _evidence_from_retrieval(
     request: dict[str, Any],
     response: dict[str, Any],
     chunks: list[dict[str, Any]],
+    tool_execution_id: str,
 ) -> EvidenceSet:
     """Validate ARAG provenance as-is; missing facts are never synthesized."""
 
@@ -241,7 +251,7 @@ def _evidence_from_retrieval(
             rewrites=tuple(response["rewrites"]),
             cost_ms=response.get("cost_ms"),
             degraded_reasons=tuple(response["degraded_reasons"]),
-            tool_execution_id=request["idempotency_key"],
+            tool_execution_id=tool_execution_id,
             evidence=evidence,
             retrieved_at=ms_to_rfc3339(utc_now_ms()),
         )

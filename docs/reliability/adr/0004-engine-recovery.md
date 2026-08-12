@@ -79,6 +79,8 @@ Native 生产路径强制使用 Tool Broker；stable identity 由 Runtime slot �
 
 Adapter 在 model、tool、batch、checkpoint 安全边界检查 cancel 与绝对 deadline。cancel、deadline、GeneratorExit、Adapter 异常或 lease loss 都必须关闭 provider stream，取消并 await 工具任务、HTTP 调用和 Skill 子进程。stale fence、lease loss 和 checkpoint CAS 冲突统一为 `AttemptOwnershipLost`，直接冒泡给 Worker，不转成模型 ToolResult 或 Run terminal。
 
+这条控制异常边界延伸到 Tool Broker executor：`AttemptOwnershipLost` 不得被 `except Exception` 捕获或结算账本；其他发生在 durable `DISPATCHED` 之后的 RuntimeFault 则必须先按 effect class 结算，再由 Coordinator 计划 terminal。若 planned `FAILED` 遇到 unresolved effect，Store 保存 sticky pending terminal 并进入 strict reconciliation，最后确定 effect 后提交原失败，不能用一次新的 Engine invocation“补做收口”。
+
 ## Consequences
 
 三引擎共享一个 Runtime/Event/Tool/Artifact 契约，但 Native 不再受 ADK 兼容层的提交顺序限制。默认 `off` 模式的模型输出、ToolCall 事实、ToolExecution 和 checkpoint 具有可测试的 happens-before 关系；ADK 两引擎仍只承诺粗粒度恢复。

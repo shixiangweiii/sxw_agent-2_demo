@@ -435,7 +435,10 @@ class RunCoordinator:
             )
             # 重试不是终态，Run 仍然活着；重读一下拿到 schedule_retry 写完后的状态。
             final = await self.store.get_run(run.envelope.run_id)
-        # 分支 12：其他情况（终端失败、取消、重试次数耗尽等）直接结束 Run。
+        # 分支 12：其他情况（终端失败、取消、重试次数耗尽等）提交计划终态。
+        # Store 会在同一写事务里再次检查 ToolEffect：普通 FAILED 若仍有
+        # unresolved effect，不会越过账本写终态，而是保存 sticky pending
+        # terminal 并进入严格人工协调；最后一个 effect 被处置后才提交原 FAILED。
         else:
             # 先按 outcome 种类定终态：取消→CANCELLED，其余→FAILED。
             status = RunStatus.CANCELLED if outcome.kind is EngineOutcomeKind.CANCELLED else RunStatus.FAILED

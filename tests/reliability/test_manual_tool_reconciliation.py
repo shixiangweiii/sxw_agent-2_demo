@@ -264,6 +264,279 @@ async def _submit(store, clock, run_id: str, parent_id: str, payload: dict, *, s
     )
 
 
+async def _pending_failed_tool_boundary(
+    store,
+    clock,
+    *,
+    key: str,
+    supports_reconcile: bool = False,
+):
+    """Create a durable DISPATCHED effect, then plan a sticky FAILED terminal."""
+    run = await _admit(store, clock, key=key)
+    _claim, parent = await _claim_and_start(store, clock)
+    execution = await store.prepare_tool_execution(
+        run_id=run.envelope.run_id,
+        parent_activity_id=parent.activity_id,
+        fencing_token=parent.fencing_token,
+        logical_key="pending-failure-effect:0",
+        tool_name="pending_failure_effect",
+        release_digest="pending-failure-effect-v1",
+        effect_class="UNKNOWN_EFFECT",
+        request_digest=sha256_json({"value": 1}),
+        request={"value": 1},
+        supports_reconcile=supports_reconcile,
+        now_ms=clock.now_ms(),
+    )
+    await store.mark_tool_dispatched(
+        tool_execution_id=execution["tool_execution_id"],
+        parent_activity_id=parent.activity_id,
+        fencing_token=parent.fencing_token,
+        now_ms=clock.now_ms(),
+    )
+    waiting = await store.finalize_failure(
+        run_id=run.envelope.run_id,
+        activity_id=parent.activity_id,
+        fencing_token=parent.fencing_token,
+        code="EVIDENCE_CONTRACT_INVALID",
+        message="producer returned contradictory Evidence authority",
+        terminal_status=RunStatus.FAILED,
+        now_ms=clock.now_ms(),
+    )
+    assert waiting.status is RunStatus.WAITING_INPUT
+    assert waiting.terminal_status is None
+    assert waiting.pending_input == {
+        "type": "TOOL_RECONCILIATION_REQUIRED",
+        "unresolved_tool_execution_ids": [execution["tool_execution_id"]],
+        "pending_terminal": {
+            "status": "FAILED",
+            "code": "EVIDENCE_CONTRACT_INVALID",
+            "message": "producer returned contradictory Evidence authority",
+        },
+    }
+    assert (await store.get_tool_execution(execution["tool_execution_id"]))[
+        "effect_status"
+    ] == "MANUAL_REQUIRED"
+    assert (await store.get_activity(execution["activity_id"])).status is ActivityStatus.MANUAL
+    assert (await store.get_activity(parent.activity_id)).status is ActivityStatus.RECONCILE
+    return run, parent, execution
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["mark_committed", "mark_failed"])
+async def test_terminal_failure_waits_for_manual_effect_then_commits_original_failure(
+    tmp_path,
+    action,
+):
+    store, clock, _release = await _runtime(tmp_path)
+    run, parent, execution = await _pending_failed_tool_boundary(
+        store, clock, key=f"pending-failed-{action}",
+    )
+    result = (
+        {"status": "SUCCESS", "preview": {"external": "committed"}}
+        if action == "mark_committed"
+        else {
+            "status": "FAILURE",
+            "error_code": "EFFECT_NOT_COMMITTED",
+            "error_message": "external authority confirms no effect",
+        }
+    )
+    resolved = await _submit(
+        store,
+        clock,
+        run.envelope.run_id,
+        parent.activity_id,
+        {
+            "tool_execution_id": execution["tool_execution_id"],
+            "action": action,
+            "evidence": {"source": "operator-ledger"},
+            "result": result,
+        },
+        signal_id=f"resolve-pending-failed-{action}",
+    )
+
+    assert resolved.run.terminal_status is RunStatus.FAILED
+    assert resolved.run.terminal_payload["code"] == "EVIDENCE_CONTRACT_INVALID"
+    assert resolved.run.terminal_payload["message"] == (
+        "producer returned contradictory Evidence authority"
+    )
+    assert resolved.run.terminal_payload["remaining_unresolved_tool_execution_ids"] == []
+    assert await store.unresolved_tool_execution_ids(run.envelope.run_id) == []
+    events = await store.list_events(run.envelope.run_id, visibility=None)
+    assert sum(event.event_type is EventType.RUN_TERMINATED for event in events) == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_failed_reconcile_only_commits_failure_without_engine_replay(tmp_path):
+    store, clock, _release = await _runtime(tmp_path)
+    run, parent, execution = await _pending_failed_tool_boundary(
+        store,
+        clock,
+        key="pending-failed-reconcile-only",
+        supports_reconcile=True,
+    )
+    await _submit(
+        store,
+        clock,
+        run.envelope.run_id,
+        parent.activity_id,
+        {
+            "tool_execution_id": execution["tool_execution_id"],
+            "action": "reconcile",
+            "evidence": {"source": "operator"},
+        },
+        signal_id="pending-failed-reconcile-query",
+    )
+    scheduled = await store.get_run(run.envelope.run_id)
+    assert scheduled.status is RunStatus.DISPATCH_PENDING
+    assert scheduled.pending_input["pending_terminal"]["code"] == (
+        "EVIDENCE_CONTRACT_INVALID"
+    )
+    _claim, running_parent = await _claim_and_start(
+        store, clock, worker_id="pending-failed-query-worker",
+    )
+    marker = running_parent.resume_payload
+    assert marker is not None
+
+    executor_calls = 0
+    reconcile_calls = 0
+
+    async def original_executor(_arguments, _context):
+        nonlocal executor_calls
+        executor_calls += 1
+        raise AssertionError("pending terminal must never redispatch the executor")
+
+    async def confirmed(_context):
+        nonlocal reconcile_calls
+        reconcile_calls += 1
+        return ToolResultEnvelope(status=ToolResultStatus.NO_OUTPUT)
+
+    broker = ToolBroker(
+        store, FilesystemArtifactStore(tmp_path / "artifacts"), clock=clock,
+    )
+    broker.register(
+        ToolManifest(
+            name="pending_failure_effect",
+            release_digest="pending-failure-effect-v1",
+            effect_class=ToolEffectClass.UNKNOWN_EFFECT,
+            timeout_seconds=1,
+            max_attempts=1,
+            supports_reconcile=True,
+        ),
+        original_executor,
+        reconcile=confirmed,
+    )
+    await broker.reconcile_only(
+        tool_execution_id=execution["tool_execution_id"],
+        parent_activity_id=parent.activity_id,
+        fencing_token=running_parent.fencing_token,
+        expected_effect_revision=marker["expected_effect_revision"],
+        deadline_at_ms=run.envelope.deadline_at,
+    )
+    terminal = await store.settle_reconciliation_query(
+        run_id=run.envelope.run_id,
+        activity_id=parent.activity_id,
+        fencing_token=running_parent.fencing_token,
+        tool_execution_id=execution["tool_execution_id"],
+        signal_id=marker["signal_id"],
+        expected_effect_revision=marker["expected_effect_revision"],
+        now_ms=clock.now_ms(),
+    )
+
+    assert terminal.terminal_status is RunStatus.FAILED
+    assert terminal.terminal_payload["code"] == "EVIDENCE_CONTRACT_INVALID"
+    assert executor_calls == 0
+    assert reconcile_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_failed_hook_commit_then_worker_kill_recovers_original_failure(tmp_path):
+    store, clock, _release = await _runtime(tmp_path)
+    run, parent, execution = await _pending_failed_tool_boundary(
+        store,
+        clock,
+        key="pending-failed-hook-commit-kill",
+        supports_reconcile=True,
+    )
+    await _submit(
+        store,
+        clock,
+        run.envelope.run_id,
+        parent.activity_id,
+        {
+            "tool_execution_id": execution["tool_execution_id"],
+            "action": "reconcile",
+            "evidence": {"source": "operator"},
+        },
+        signal_id="pending-failed-hook-commit-kill-query",
+    )
+    _claim, running_parent = await _claim_and_start(
+        store, clock, worker_id="pending-failed-dying-worker",
+    )
+    marker = running_parent.resume_payload
+    assert marker is not None
+    broker = ToolBroker(
+        store, FilesystemArtifactStore(tmp_path / "artifacts"), clock=clock,
+    )
+
+    async def must_not_dispatch(_arguments, _context):
+        raise AssertionError("original executor must remain unreachable")
+
+    async def confirmed(_context):
+        return ToolResultEnvelope(status=ToolResultStatus.NO_OUTPUT)
+
+    broker.register(
+        ToolManifest(
+            name="pending_failure_effect",
+            release_digest="pending-failure-effect-v1",
+            effect_class=ToolEffectClass.UNKNOWN_EFFECT,
+            timeout_seconds=1,
+            max_attempts=1,
+            supports_reconcile=True,
+        ),
+        must_not_dispatch,
+        reconcile=confirmed,
+    )
+    await broker.reconcile_only(
+        tool_execution_id=execution["tool_execution_id"],
+        parent_activity_id=parent.activity_id,
+        fencing_token=running_parent.fencing_token,
+        expected_effect_revision=marker["expected_effect_revision"],
+        deadline_at_ms=run.envelope.deadline_at,
+    )
+    clock.value += 30_001
+    restarted = SqliteRuntimeStore(RuntimeDatabase(tmp_path / "runtime.db"))
+    await restarted.initialize()
+
+    assert await restarted.recover_expired(now_ms=clock.now_ms()) == 1
+    terminal = await restarted.get_run(run.envelope.run_id)
+    assert terminal.terminal_status is RunStatus.FAILED
+    assert terminal.terminal_payload["code"] == "EVIDENCE_CONTRACT_INVALID"
+    assert await restarted.claim_next(
+        release_map=await restarted.active_releases(),
+        worker_id="must-not-replay-engine",
+        lease_ms=30_000,
+        now_ms=clock.now_ms(),
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_pending_failed_boundary_deadline_wins_and_lists_unresolved_effect(tmp_path):
+    store, clock, _release = await _runtime(tmp_path)
+    run, _parent, execution = await _pending_failed_tool_boundary(
+        store, clock, key="pending-failed-deadline-wins",
+    )
+    clock.value = run.envelope.deadline_at + 1
+
+    assert await store.expire_deadlines(now_ms=clock.now_ms()) == 1
+    terminal = await store.get_run(run.envelope.run_id)
+    assert terminal.terminal_status is RunStatus.TIMED_OUT
+    assert terminal.pending_input is None
+    assert terminal.terminal_payload["code"] == "DEADLINE_EXCEEDED"
+    assert terminal.terminal_payload["unresolved_tool_execution_ids"] == [
+        execution["tool_execution_id"]
+    ]
+
+
 @pytest.mark.asyncio
 async def test_manual_mark_committed_is_one_atomic_effect_activity_event_and_artifact_boundary(
     tmp_path,

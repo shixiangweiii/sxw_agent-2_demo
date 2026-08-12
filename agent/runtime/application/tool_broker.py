@@ -10,7 +10,11 @@ from pydantic import ValidationError
 
 from agent.runtime.application.tool_outputs import ToolResultAdapter, plain_json_output
 from agent.runtime.domain.artifact import MAX_HTTP_RANGE_BYTES, ArtifactPurpose
-from agent.runtime.domain.errors import AttemptOwnershipLost, RuntimeFault
+from agent.runtime.domain.errors import (
+    AttemptOwnershipLost,
+    RuntimeFault,
+    raise_if_ownership_lost,
+)
 from agent.runtime.domain.models import (
     ToolEffectClass,
     EvidenceSet,
@@ -865,6 +869,12 @@ class ToolBroker:
                     value = tool.executor(arguments, ctx)
                     if inspect.isawaitable(value):
                         value = await value
+            except AttemptOwnershipLost:
+                # Attempt ownership is Runtime control flow, not a Tool result.
+                # In particular, do not mutate the already-dispatched ledger:
+                # lease recovery under the new fence is the only authority
+                # allowed to classify that uncertain effect.
+                raise
             except TimeoutError as exc:
                 await settlement_boundary()
                 result, execution = await self._settle_dispatch_failure(
@@ -872,21 +882,20 @@ class ToolBroker:
                     code="TOOL_TIMEOUT", message=str(exc) or "tool timed out",
                 )
             except RuntimeFault as exc:
-                # Contract/replay/ownership faults are Runtime control signals,
-                # never model-visible tool failures.
-                if exc.code in {
-                    "TOOL_RESULT_CONTRACT_INVALID",
-                    "EVIDENCE_CONTRACT_INVALID",
-                }:
-                    await settlement_boundary()
-                    await self._settle_dispatch_failure(
-                        tool,
-                        execution,
-                        parent_activity_id,
-                        fencing_token,
-                        code=exc.code,
-                        message=exc.message,
-                    )
+                # A RuntimeFault raised by the executor is still an execution
+                # outcome once DISPATCHED is durable.  First exclude ownership
+                # loss, then settle effect-aware (READ_ONLY=FAILED, every
+                # effectful class=UNKNOWN) before preserving the Runtime code.
+                raise_if_ownership_lost(exc)
+                await settlement_boundary()
+                await self._settle_dispatch_failure(
+                    tool,
+                    execution,
+                    parent_activity_id,
+                    fencing_token,
+                    code=exc.code,
+                    message=exc.message,
+                )
                 raise
             except ValidationError as exc:
                 if not _is_tool_output_validation_error(exc):
@@ -926,19 +935,16 @@ class ToolBroker:
                 try:
                     output = self._adapt_execution_output(tool, value, execution)
                 except RuntimeFault as exc:
-                    if exc.code in {
-                        "TOOL_RESULT_CONTRACT_INVALID",
-                        "EVIDENCE_CONTRACT_INVALID",
-                    }:
-                        await settlement_boundary()
-                        await self._settle_dispatch_failure(
-                            tool,
-                            execution,
-                            parent_activity_id,
-                            fencing_token,
-                            code=exc.code,
-                            message=exc.message,
-                        )
+                    raise_if_ownership_lost(exc)
+                    await settlement_boundary()
+                    await self._settle_dispatch_failure(
+                        tool,
+                        execution,
+                        parent_activity_id,
+                        fencing_token,
+                        code=exc.code,
+                        message=exc.message,
+                    )
                     raise
                 result = output.result
                 if result.status not in {

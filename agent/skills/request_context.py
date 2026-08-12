@@ -20,6 +20,7 @@ class SkillRequestContext:
     activity_id: str = ""
     deadline_at_ms: int | None = None
     idempotency_key: str = ""
+    tool_execution_id: str = ""
 
 
 _var: contextvars.ContextVar[Optional[SkillRequestContext]] = contextvars.ContextVar(

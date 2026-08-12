@@ -19,6 +19,7 @@
 | 幂等 key 对应的请求摘要与 Run | Authority | `run_requests`；Admission Service | CreateRun 的 `reused` 响应 | 在 Worker、Engine、Session 中另建幂等账本；先做 conversation busy 检查再做幂等重放 |
 | Conversation 身份和下一 turn 序号 | Authority | `conversations`；Admission Service | UI conversation 列表 | 从 Session 消息数量推导 turn；多个 writer 分配 turn |
 | Run 当前状态、revision、terminal | Authority | `runs`；RunCoordinator/命令处理器通过 CAS | GET Run、UI 状态、指标 | Engine、SSE `done`/EOF、Trace、ADK Session、native History 直接裁决 Run |
+| 被 ToolEffect uncertainty 阻挡的计划失败 | Authority | `runs.pending_input_json.pending_terminal`；Store 仅从 Coordinator 的 `finalize_failure` 写入 | strict reconciliation UI、状态事件 | 从 Activity error/Event/Trace 重建原错误；effect 解决后重新运行 Engine；用 pending intent 冒充已提交 terminal |
 | 同一 Conversation 是否有活动 Run | Authority | `runs` 的非终态唯一索引 | 409 `CONVERSATION_BUSY` | 进程锁或查询后再插入的 TOCTOU 检查代替数据库约束 |
 | Activity 调度与完成进度 | Authority | `activities`；Dispatcher/Coordinator，受 revision、lease、fencing 保护 | Plan UI、Worker 指标、Trace | WorkingState/model plan 复制 completed activities；旧 fencing token 提交结果 |
 | 模型对任务的认知计划 | Authority | 最新 committed `checkpoints.working_state.model_plan`；Checkpoint Store CAS | `MODEL_PLAN_UPDATED` 事件、Plan UI | 把 model plan item 当 Activity；由 `update_task_plan` 裁决 Activity/Run |
@@ -82,3 +83,7 @@ Event 提交后即 AVAILABLE。首版没有服务端 Delivery 状态机；客户
 ### 4.4 Runtime ToolEffect 与外部对象
 
 Runtime 只裁决自己掌握的 `PREPARED/DISPATCHED/COMMITTED/FAILED/UNKNOWN/...` 证据；外部工单、消息或业务对象的真实状态仍由外部系统裁决。二者通过稳定 idempotency key 和 `external_object_ref` 关联，不伪造跨系统原子事务。
+
+### 4.5 Planned terminal 与 committed terminal
+
+`pending_input.pending_terminal` 只在普通 `FAILED` 已被决定、但 unresolved ToolEffect 禁止 terminal commit 时存在；它保存精确 status/code/message，是后续人工处置和恢复必须保留的 intent authority。真正 Run terminal 仍只由 `runs.terminal_status/terminal_payload_json + RUN_TERMINATED` 原子事务裁决。两者不能混为一谈：pending terminal 不释放 conversation，也不让客户端宣称 Run 已结束；最后一个 effect 确定后才由 Store 提交原失败。
