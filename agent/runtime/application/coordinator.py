@@ -95,7 +95,7 @@ class RunCoordinator:
         # 第 1 步：把 Activity 从 CLAIMED 推进到 RUNNING。这一步带 fencing token 做 CAS，
         # 如果租约已被别的 Worker 抢走会抛 STALE_FENCING_TOKEN，从而在做任何实质工作
         # 之前就阻止陈旧 Worker 继续往下跑。
-        activity = await self.store.mark_activity_running( # 标记为activity执行中
+        activity = await self.store.mark_activity_running(
             claim.activity.activity_id,
             worker_id=worker_id,
             fencing_token=claim.activity.fencing_token,
@@ -422,7 +422,7 @@ class RunCoordinator:
         # RETRYABLE_FAILURE 同时成立，否则会落到分支 12 直接判失败。
         elif outcome.kind is EngineOutcomeKind.RETRYABLE_FAILURE and activity.attempt < self.max_model_attempts:
             # 优先尊重引擎给的 retry_after（例如上游 429 带的退避时间），
-            # 没给才用本地指数退避 + 拖动。
+            # 没给才用本地指数退避 + 抖动。
             delay_ms = outcome.retry_after_ms or self._retry_delay_ms(activity.attempt)
             await self.store.schedule_retry(
                 run_id=run.envelope.run_id,

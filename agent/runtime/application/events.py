@@ -225,7 +225,11 @@ class CommittedEventSink:
                 )
                 return
             if event_type == "citation":
-                self.citations.extend(payload.get("citations") or []) # 引用信息只收集到内存，不立即写 DB。最终由 terminal 提交时一起落库（final assistant + citation + success terminal 同一事务）
+                # 目前没有引擎会发出 "citation" 事件；这份内存列表也从未被读取——
+                # RunCoordinator 调用 finalize_success 时固定传 citations=[]，
+                # 真正落库的 citation 由 Store 在 finalize 时从已提交的 EvidenceSet
+                # 独立派生（见 SqliteRuntimeStore._derive_citations_in_tx）。
+                self.citations.extend(payload.get("citations") or [])
                 return
             canonical = _EVENT_MAP.get(event_type) # 通过 _EVENT_MAP 将引擎内部事件名映射为规范 EventType
             if canonical is None:

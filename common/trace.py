@@ -557,8 +557,8 @@ def start_span(name: str, kind: str, **attributes: Any) -> Iterator[Any]:
         yield span
     except (GeneratorExit, StopAsyncIteration):
         # 客户端断开时消费方 aclose() 抛来的是 GeneratorExit——它既不是 Exception
-        # 也不是 CancelledError（本仓库在 native_loop/loop.py:214 已踩过这个坑）。
-        # 漏了它，取消路径上的 span 会被记成 ok，或者干脆不收口。
+        # 也不是 CancelledError（本仓库在 native_loop/loop.py 的工具派发路径上
+        # 已踩过这个坑）。漏了它，取消路径上的 span 会被记成 ok，或者干脆不收口。
         span.status = STATUS_CANCELLED
         raise
     except BaseException as exc:
