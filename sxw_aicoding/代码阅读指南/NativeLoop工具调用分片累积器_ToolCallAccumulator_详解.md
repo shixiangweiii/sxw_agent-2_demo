@@ -1,5 +1,7 @@
 # NativeLoop 工具调用分片累积器 `_ToolCallAccumulator` 详解
 
+> 文档基线：2026-08-12 当前项目源码；已删除的测试模块和门禁脚本不再作为行为依据。
+
 > `_ToolCallAccumulator` 位于 `agent/engine/native_loop/llm_client.py`，它的任务是将 OpenAI-compatible provider 的 ToolCall delta 分片，收敛成有界、可校验的 `ToolCall`。它不是工具执行器，也不是 Tool Broker。
 
 ## 1. 为什么 ToolCall 不能看到一个 chunk 就执行

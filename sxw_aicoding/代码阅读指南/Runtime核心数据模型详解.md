@@ -1,5 +1,7 @@
 # Runtime 核心数据模型详解
 
+> 文档基线：2026-08-12 当前项目源码；已删除的测试模块和门禁脚本不再作为行为依据。
+
 本文以当前源码为准，介绍 Runtime 的领域模型、SQLite 持久化模型以及它们之间的权威边界。核心不是“把一次 LLM 调用存下来”，而是用 Run、Activity、Canonical Event、Checkpoint、ToolExecution 和 Release 构造一个可裁决、可恢复的执行运行时。
 
 ## 1. 先建立全景图
@@ -207,7 +209,8 @@ Coordinator 保留 code/message 转成 terminal failure，`AttemptOwnershipLost`
 `knowledge_search` 的 `EvidenceSet.tool_execution_id` 必须使用前者；检索 `query_id`
 则由后者与 query 文本确定性生成。当前 SQLite stable slot 初始化时两字段恰好同值，
 但它们仍是独立契约，producer 不能再借用 idempotency key 填 Evidence execution
-identity；边界测试也会用不同值验证这种解耦。
+identity。应从 `SkillRequestContext` 的两个显式字段和 Broker 的身份校验理解这种解耦，
+不能从当前值偶然相等反推出二者可以互换。
 
 ## 4. 状态机
 

@@ -1,5 +1,7 @@
 # SSE 保活机制详解
 
+> 文档基线：2026-08-12 当前项目源码；已删除的测试模块和门禁脚本不再作为行为依据。
+
 本文以 `agent/runtime/api/runs.py::stream_events` 为准。SSE heartbeat 是 API subscription 的保活字节，不是 Worker heartbeat、Run progress 或终态。
 
 ## 1. 为什么需要它

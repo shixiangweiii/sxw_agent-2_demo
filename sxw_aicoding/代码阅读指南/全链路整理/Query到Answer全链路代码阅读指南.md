@@ -1,5 +1,7 @@
 # Query 到 Answer 全链路代码阅读指南
 
+> 文档基线：2026-08-12 当前项目源码；已删除的测试模块和门禁脚本不再作为行为依据。
+
 本文按当前 Runtime 解释一条 Query 如何被 durable admission、exact-release 执行、写入 Canonical Events 并展示为最终 Answer。符号名比行号可靠。
 
 ## 1. 架构和 authority
@@ -117,3 +119,4 @@ agent/main.py
 - 当前没有跨节点 HA、PostgreSQL/Temporal/Redis 或服务端 delivery ACK。
 - ADK 引擎没有 mid-turn deterministic replay；Native 也不承诺 provider token 级 replay。
 - LocalSandbox 不是生产安全隔离；Runtime signal/Artifact 不代表所有子 Runner 自动支持 HITL 或跨 Skill Artifact。
+- 当前目录不再包含 `tests/` 和 `scripts/check.sh`；仍存在的脚本是 `scripts/run_all.sh` 与 `scripts/probe_dashscope_tool_stream.py`。本文只描述能从生产源码、current schema、配置和运行链路直接核对的能力，不宣称仓库仍有自动化可靠性回归门禁。

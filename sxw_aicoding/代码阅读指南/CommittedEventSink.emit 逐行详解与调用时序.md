@@ -1,5 +1,7 @@
 # CommittedEventSink.emit 逐段详解与调用时序
 
+> 文档基线：2026-08-12 当前项目源码；已删除的测试模块和门禁脚本不再作为行为依据。
+
 本文以当前 `agent/runtime/application/events.py` 为准，解释 `CommittedEventSink.emit()` 的每个语义段。不使用固定行号，避免后续加注释或重排方法时文档失效。
 
 ## 1. 它的当前定位

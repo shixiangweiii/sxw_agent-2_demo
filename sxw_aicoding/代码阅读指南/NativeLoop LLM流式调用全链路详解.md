@@ -1,5 +1,7 @@
 # NativeLoop LLM 流式调用全链路详解
 
+> 文档基线：2026-08-12 当前项目源码；已删除的测试模块和门禁脚本不再作为行为依据。
+
 > 本文以当前代码为准，说明 `native_loop` 从 Runtime 领取一次 Activity，到模型流、工具批次、checkpoint 和最终 Assistant 提交的完整链路。重点不是 OpenAI SDK 的调用语法，而是“哪些事实何时成为可恢复的权威状态”。
 
 ## 1. 先建立正确的分层图
@@ -160,7 +162,7 @@ provider 吐出 delta
 - attempt `close()`；
 - 其他明确需要顺序屏障的调用方主动 `force_flush()`。
 
-Native Adapter 现在**不再对每个 text delta 调用 `force_flush()`**。这保留了冻结协议的 100 ms / 2 KiB 聚合语义，同时 checkpoint/非 text/close 保证不会跨语义边界滞留。测试会用大量小 delta 验证 `force_flush` 和 cancel 查询次数不随 delta 线性增长。
+Native Adapter 现在**不再对每个 text delta 调用 `force_flush()`**。这保留了 100 ms / 2 KiB 聚合语义，同时 checkpoint/非 text/close 保证不会跨语义边界滞留。当前实现还把取消探测放在 attempt 级 `native-cancel-watch` 中，因此 `force_flush` 和 SQLite cancel 查询都不随 delta 数量线性增长。
 
 ## 7. Provider 流协议：只接受显式完成
 

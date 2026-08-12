@@ -1,5 +1,7 @@
 # RuntimeWorker._maintenance 维护任务详解
 
+> 文档基线：2026-08-12 当前项目源码；已删除的测试模块和门禁脚本不再作为行为依据。
+
 ## 1. 方法定位
 
 `RuntimeWorker._maintenance(now)` 位于 `agent/runtime/worker/dispatcher.py`，是 Worker 主调度循环每次尝试 claim 之前执行的 durable housekeeping。
@@ -114,7 +116,7 @@ sticky-failure reconciliation，过期后也提交 `TIMED_OUT`，并把仍未决
 `CANCELLED`。这是唯一允许带 unresolved ToolEffect 的 terminal；Store 的通用
 terminal helper 会拒绝 `SUCCEEDED/FAILED/CANCELLED/REJECTED` 跨过未决效应。
 
-注意实现使用 `getattr(self.store, "expire_deadlines", None)`。这是为了让精简的测试 fake 可以不实现扩展方法；生产 SQLite Store 提供了该能力，不能把 deadline 解释为进程内最佳努力。
+注意当前 `RuntimeStore` Protocol 没有声明 `expire_deadlines()`，dispatcher 因此用 `getattr(self.store, "expire_deadlines", None)` 探测具体适配器能力；生产 `SqliteRuntimeStore` 实现了该方法。这个兼容写法不改变权威语义：当前生产装配中的 deadline 仍由 SQLite 持久状态扫描收口，不是进程内最佳努力。
 
 ## 6. Artifact 孤儿回收
 

@@ -1,5 +1,7 @@
 # Claim 概念详解
 
+> 文档基线：2026-08-12 当前项目源码；已删除的测试模块和门禁脚本不再作为行为依据。
+
 ## 1. 一句话定义
 
 **Claim 是 Worker 从 SQLite 原子领取 Activity 后获得的、带 exact release、lease 和 fencing 约束的当前 attempt 执行凭证。**

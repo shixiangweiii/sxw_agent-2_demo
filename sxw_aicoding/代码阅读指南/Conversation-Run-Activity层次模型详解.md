@@ -1,5 +1,7 @@
 # Conversation-Run-Activity 层次模型详解
 
+> 文档基线：2026-08-12 当前项目源码；已删除的测试模块和门禁脚本不再作为行为依据。
+
 本文解释 Conversation、Run、Activity 三个聚合层的职责，以及当前 exact release、Canonical Event 历史、lease/fencing 和 final assistant 语义如何贯穿三层。
 
 ## 1. 层次结构

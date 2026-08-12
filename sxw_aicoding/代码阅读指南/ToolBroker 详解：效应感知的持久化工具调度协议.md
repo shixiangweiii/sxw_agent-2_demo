@@ -1,5 +1,7 @@
 # ToolBroker 详解：效应感知的持久化工具调度协议
 
+> 文档基线：2026-08-12 当前项目源码；已删除的测试模块和门禁脚本不再作为行为依据。
+
 本文按当前代码解释 `ToolBroker`。它不是一个普通的工具函数路由器，而是 Runtime 对“外部动作是否发生过、能否重试、结果是什么”的持久化裁决层。
 
 建议先记住一条总不变量：
@@ -200,7 +202,9 @@ Broker 只核对身份和内部一致性，不从普通 hits 猜 provenance，�
 `SkillRequestContext` 中显式传入两者；`EvidenceSet.tool_execution_id` 必须来自真正的
 ToolExecution ledger identity，`knowledge_search.query_id` 则由稳定 idempotency key
 与 query 文本生成。current SQLite Store 创建 stable slot 时两字段恰好同值，但
-producer 也不能借用其中一个冒充另一个；两者不同的契约测试仍必须成立。
+producer 也不能借用其中一个冒充另一个。阅读时应沿
+`SkillRequestContext -> brokered_tools -> ToolBroker._validate_evidence_identity()`
+核对两条身份链，而不是从当前值相等推断它们是同一个契约。
 
 ## 4. stable slot：恢复身份不是 provider call id
 
@@ -484,7 +488,7 @@ SQLite 写事务中不会等待模型、工具、网络或文件系统；外部�
 5. `agent/runtime/adapters/brokered_tools.py`：Native/ADK bridge；
 6. `agent/runtime/adapters/sqlite/store.py`：ToolExecution 事务；
 7. `agent/engine/native_loop/engine.py`：生产 Native 调度顺序；
-8. `tests/reliability/test_brokered_tool_adapters.py` 及 Native recovery/RuntimeIO 测试：冻结不变量。
+8. `agent/engine/native_loop/checkpoint.py` 与 `agent/runtime/application/events.py`：恢复重物化和 RuntimeIO 提交边界。
 
 排障时优先查看 ToolExecution 的 stable slot、effect status、effect revision、request/release digest、Activity fencing，再看 committed events。Trace 只用于诊断，不能反向裁决工具是否执行过。
 

@@ -1,5 +1,7 @@
 # CommittedEventSink 锁机制与 ToolCall 边界的正确性分析
 
+> 文档基线：2026-08-12 当前项目源码；已删除的测试模块和门禁脚本不再作为行为依据。
+
 本文对照当前 `agent/runtime/application/events.py`、`agent/runtime/adapters/adk_engines.py`、`agent/engine/native_loop/engine.py` 与 Tool Broker/Store 实现，说明 `CommittedEventSink` 的锁到底保护什么，以及 ToolCall 为什么会形成 text 的提交边界。
 
 ## 1. 先记住两个不同的写入权威

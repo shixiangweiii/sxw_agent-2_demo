@@ -1,5 +1,7 @@
 # CommittedEventSink：ToolCall 与后续 text 分片的持久化时序
 
+> 文档基线：2026-08-12 当前项目源码；已删除的测试模块和门禁脚本不再作为行为依据。
+
 本文专门回答一个时序问题：已有 text 在 buffer 中，中间出现 ToolCall，随后又来了 text，新旧分片会怎么入库？
 
 ## 1. 最短结论

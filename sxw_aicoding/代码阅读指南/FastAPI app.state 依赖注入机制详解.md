@@ -1,5 +1,7 @@
 # FastAPI `app.state` 依赖注入机制详解
 
+> 文档基线：2026-08-12 当前项目源码；已删除的测试模块和门禁脚本不再作为行为依据。
+
 ## 1. 当前结论
 
 `agent/main.py` 的 API 进程只把三个已组装的本进程对象放进 FastAPI `app.state`：
@@ -56,9 +58,9 @@ Worker 不读取 API 的 `app.state`，也不是 FastAPI 后台 task。它在所
 
 两个 ADK Adapter 的 session/artifact service 都是 per-attempt 临时对象；NativeLoopAdapter 直连 RuntimeIO，使用严格 checkpoint、awaited event admission、Broker 和 explicit final assistant。它们都不应被放进 API `app.state`。
 
-## 6. 测试和并发含义
+## 6. 启动验证和并发含义
 
-集成测试要触发 lifespan，验证 current-schema identity 和三项 state 已注入。单元测试可以显式设置 fake state，但 fake 仍应保持 claim release map、checkpoint revision CAS 和 `AttemptOwnershipLost` 穿透等契约。
+判断 API 装配是否完成，应以 FastAPI lifespan 已成功越过 `store.initialize()`、三项 `app.state` 已注入以及 `/healthz` 能读取 active release 为准。`/healthz` 仍不是完整 Worker readiness；后者由 `scripts/run_all.sh` 结合新鲜 Worker heartbeat 与三份 exact release pointer 判断。
 
 `app.state` 仅保存对象引用，不自动提供协程安全。当前 Store 用短 `BEGIN IMMEDIATE` 写事务和 fencing，CAS 用 digest/原子 rename。每个 API 进程有自己的 `app.state`；当前共享 SQLite/CAS 是本机多进程边界，不是跨节点 HA。
 
