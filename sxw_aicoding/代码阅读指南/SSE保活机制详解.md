@@ -33,7 +33,7 @@
 
 ### 1.2 答案
 
-**服务端发送 heartbeat 保持连接，不会主动断开。**
+**服务端发送 heartbeat 保持未终态连接；连接不会因为暂时没有业务事件而主动断开，Run 进入终态后会按协议结束。**
 
 ---
 
@@ -287,6 +287,7 @@ async function watchRun(assistant) {
         `/api/v1/runs/${state.runId}/events?after_seq=${state.lastSeq}`,
         { signal: state.watchController.signal }
       );
+      if (!response.ok || !response.body) throw new Error(`SSE 订阅失败`);
       await consumeSse(response, assistant);
       // 连接断开但未终态：等待 500ms 后重连
       if (!state.terminal && state.watching) {
@@ -322,9 +323,8 @@ async function watchRun(assistant) {
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `RUNTIME_SSE_HEARTBEAT_SECONDS` | 15 | Heartbeat 间隔（秒） |
+| `RUNTIME_SSE_HEARTBEAT_SECONDS` | 15 | 无业务事件多久后发送 heartbeat |
 | `RUNTIME_SSE_POLL_MS` | 250 | 轮询间隔（毫秒） |
-| `RUNTIME_SSE_HEARTBEAT_SECONDS` | 15 | 无数据多久后发送 heartbeat |
 
 ---
 
@@ -348,5 +348,5 @@ async function watchRun(assistant) {
 
 ---
 
-*文档生成时间: 2026-08-09*
+*文档生成时间: 2026-08-12*
 *基于项目版本: sxw_agent-2_demo R0 冻结规格*

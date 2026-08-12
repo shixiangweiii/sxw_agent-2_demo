@@ -46,7 +46,7 @@ for ev in self._result_events(outcome):
 2. 产出统一的事件草稿（`StreamEvent`）；
 3. 在关键阶段调用 `checkpoint` hook，保存引擎恢复状态。
 
-而“事件是否落盘、如何落盘、何时对外可见”属于 **Runtime 编排语义**，由更上层的 `LegacyEngineAdapter` + `CommittedEventSink` 统一保证。这样三代引擎（`plan_execute`、`agent_loop`、`native_loop`）可以共享同一套持久化与 SSE 可见性语义，避免每个引擎各自实现一半、行为不一致。
+而“事件是否落盘、如何落盘、何时对外可见”属于 **Runtime 编排语义**，由 `LegacyEngineAdapter` 路由、`CommittedEventSink` 处理 engine-owned 投影，以及 ToolBroker/Store 提交 Broker-owned 工具账本和公开投影共同保证。这样三代引擎（`plan_execute`、`agent_loop`、`native_loop`）可以共享同一套持久化与 SSE 可见性语义，避免每个引擎各自实现一半、行为不一致。
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -243,7 +243,7 @@ async for event in merge_runner_events(
     yield event
 ```
 
-注意：`persist()` 保存的是 **WorkingState + engine_state（恢复状态）**，不是 SSE 事件本身。SSE 事件的持久化由 `CommittedEventSink.emit()` 负责。
+注意：`persist()` 保存的是 **WorkingState + engine_state（恢复状态）**，不是 SSE 事件本身。engine-owned SSE 事件由 `CommittedEventSink.emit()` 持久化，Broker-owned 工具事件由 ToolBroker/Store 的 ToolExecution 准备/结算事务持久化。
 
 ### 3.3 Runtime 适配层：`LegacyEngineAdapter.execute()`
 
@@ -251,15 +251,16 @@ async for event in merge_runner_events(
 
 职责：
 - 消费 `engine.run_stream(rc)`；
-- 判断事件是否已被 Tool Broker 持久化；
-- 对需要持久化的事件调用 `io.emit()`。
+- 判断工具事件投影归 Engine 还是 Tool Broker 所有；
+- 对归 Engine 所有、需由 Sink 持久化的事件调用 `io.emit()`。
 
 关键代码：
 
 ```python
 # legacy_engines.py:154-170
 async for event in engine.run_stream(rc):
-    # Tool Broker 已经 committed 权威 call/result 事件。
+    # 注册工具的 call/result 投影归 Tool Broker 所有，
+    # 由 prepare/settle 事务提交，不经 Sink 重复写入。
     # Native unknown-tool 和参数解析失败没有外部 ToolExecution，
     # 所以它们的 authority=engine 投影必须成为 durable facts。
     # ADK 投影没有 hint，默认归属 Broker authority。
@@ -357,14 +358,14 @@ async def checkpoint(...):
 
 ### 3.5 持久化存储：`RuntimeStore.append_events()`
 
-`CommittedEventSink` 依赖 `RuntimeStore` 端口。实际写入 SQLite 的实现通常位于 `agent/runtime/persistence/repository.py` 或 `service.py`。该层保证：
+`CommittedEventSink` 依赖 `RuntimeStore` 端口。实际写入 SQLite 的实现位于 `agent/runtime/adapters/sqlite/store.py`，主要查看 `SqliteRuntimeStore.append_events()` 与 `save_checkpoint()`。该层保证：
 
 - `BEGIN IMMEDIATE` 短事务；
 - `runs.next_seq` 与 event batch 同事务更新；
 - 回滚不留 seq 洞；
 - 启用 WAL、`synchronous=FULL`、外键、busy timeout。
 
-SSE 端点只读取已提交的事件，因此**数据库 commit 是前端可见的唯一前提**。
+SSE 端点只读取已提交且默认 `visibility=PUBLIC` 的 `run_events`，因此**数据库 commit 是前端可见的唯一前提**；被过滤的 INTERNAL 事件仍会占用 seq，客户端不应假设 seq 连续。
 
 ---
 
@@ -396,28 +397,19 @@ NativeLoop                NativeLoopEngine          LegacyEngineAdapter       Co
 ### 4.2 一个 tool_call 的完整链路
 
 ```text
-NativeLoop                NativeLoopEngine          LegacyEngineAdapter       ToolBroker               SQLite              SSE API           前端
-   │                           │                           │                        │                     │                  │              │
-   │──yield StreamEvent(       │                           │                        │                     │                  │
-   │    tool_call,             │                           │                        │                     │                  │
-   │    authority=broker)─────>│                           │                        │                     │                  │
-   │                           │──yield StreamEvent(       │                        │                     │                  │
-   │                           │    tool_call)────────────>│                        │                     │                  │
-   │                           │                           │──_broker_owns_tool_    │                     │                  │
-   │                           │                           │   projection=True       │                     │                  │
-   │                           │                           │──io.force_flush()─────>│                     │                  │
-   │                           │                           │   (把前面 text buffer   │                     │                  │
-   │                           │                           │    先 commit)           │                     │                  │
-   │                           │                           │                        │                     │                  │
-   │                           │                           │                        │──commit ToolExecution│                  │
-   │                           │                           │                        │  (tool_executions)  │                  │
-   │                           │                           │                        │                     │                  │
-   │                           │                           │                        │──emit broker events? │                  │
-   │                           │                           │                        │  (取决于 Broker 实现) │                  │
-   │                           │                           │   continue              │                     │                  │
+NativeLoop yield tool_call(authority=broker)
+  → LegacyEngineAdapter 判定 Broker-owned
+    → CommittedEventSink.force_flush()
+      → SQLite 提交前置 text buffer
+    → continue，不调用 io.emit(tool_call)
+  → 生成器恢复，NativeLoop 进入 tool_broker.execute()
+    → prepare 事务：ToolExecution + TOOL_CALL_COMMITTED
+    → 事务外 executor
+    → settle 事务：effect result + TOOL_RESULT_COMMITTED
+  → SSE API 从 run_events list_events/replay
 ```
 
-注意：Broker 拥有的 tool_call/tool_result **不重复 emit**，因为 Tool Broker 已经通过 `tool_executions` 等表保存了权威事实。`force_flush()` 只是为了保持“text 在前、tool 在后”的模型流顺序。
+注意：上图展示 `native_loop` 路径。ADK 路径由 `BrokeredToolBridge` 在批量 prepare 前直接 `force_flush()`。两条路径都保证 Broker-owned tool_call/tool_result **不重复 emit**：`tool_executions` 是工具效应的权威来源，`run_events` 保存 SSE 使用的公开事件投影，`force_flush()` 保证前置 text 先于 ToolCall 事实提交。
 
 ### 4.3 checkpoint 的完整链路
 
@@ -456,22 +448,22 @@ NativeLoop                NativeLoopEngine          CommittedEventSink        SQ
 | RuntimeIO 协议 | `agent/runtime/ports/engine.py` | `RuntimeIO` Protocol | 定义 emit / checkpoint / force_flush 等接口 |
 | 数据模型 | `agent/runtime/domain/models.py` | `EventType`, `WorkingState`, `CheckpointRecord`, `Visibility` | 事件类型与领域模型 |
 | SSE 读取 | `agent/runtime/api/runs.py` | `stream_events` / `list_events` | 只读已提交事件 |
-| 存储实现 | `agent/runtime/persistence/repository.py` / `service.py` | `RuntimeStore.append_events`, `save_checkpoint` | SQLite 事务写入 |
+| 存储实现 | `agent/runtime/adapters/sqlite/store.py` | `SqliteRuntimeStore.append_events`, `save_checkpoint` | SQLite 事务写入 |
 
 ---
 
 ## 6. 关键不变量
 
 1. **先 commit，后 SSE 可见**
-   - `CommittedEventSink` 必须在 `store.append_events()` 事务提交成功后，事件才能被 SSE 读取。
+   - 进入 Sink 的事件必须在 `store.append_events()` 事务提交成功后才能被 SSE 读取；Broker-owned 工具事件则必须在 ToolBroker/Store 的结算事务提交后才能被 SSE 读取。
 
 2. **引擎层只产草稿，不拥有持久化语义**
    - `NativeLoop` 的 `yield StreamEvent(...)` 只是事件草稿 transport。
-   - 是否落盘、如何落盘由上层 `LegacyEngineAdapter` + `CommittedEventSink` 决定。
+   - 是否落盘、如何落盘由上层 `LegacyEngineAdapter`、`CommittedEventSink` 和 ToolBroker/Store 的事件归属共同决定。
 
 3. **Broker 权威事件不重复 emit**
    - 对于 `authority != "engine"` 的 `tool_call` / `tool_result`，`LegacyEngineAdapter` 只 `force_flush()` 前面的 text buffer，然后 `continue`，不调用 `io.emit()`。
-   - Tool Broker 的 `tool_executions` 表是这些事件的唯一事实来源。
+   - Tool Broker 的 `tool_executions` 表是工具效应的唯一事实来源；对应的公开事件投影仍在 `run_events`，供 SSE 重放和订阅。
 
 4. **text delta 聚合后统一落盘**
    - 单条 text delta 不立即写库，而是按 100ms / 2KiB 聚合，在 `_flush_locked()` 中统一 `append_events()`。
@@ -488,11 +480,11 @@ NativeLoop                NativeLoopEngine          CommittedEventSink        SQ
 
 ### Q1：`loop.py` 里直接 `yield` 事件，如果进程崩溃，事件会丢失吗？
 
-不会。`yield` 只是给上层消费，真正写库发生在 `CommittedEventSink.emit()` / `_flush_locked()` / `checkpoint()`。只要上层成功消费并 commit，事件就是 durable 的。如果在上层 commit 之前进程崩溃，那段草稿本就不该被前端看到。
+不会。`yield` 只是给上层消费；engine-owned 事件真正写库发生在 `CommittedEventSink.emit()` / `_flush_locked()` / `checkpoint()`，Broker-owned 工具事件则在 ToolBroker/Store 的准备或结算事务中写入。只要对应事务成功 commit，事件就是 durable 的；如果在 commit 之前进程崩溃，那段草稿本就不该被前端看到。
 
-### Q2：Tool Broker 已经持久化了 tool_call，为什么还要有 `tool_call` 这个 SSE 事件？
+### Q2：Tool Broker 已有 `tool_executions` 账本，为什么还要写 `tool_call` SSE 投影？
 
-SSE 事件是**面向 UI 的投影**，而 `tool_executions` 是**面向调度和恢复的事实**。UI 需要知道“模型现在调用了什么工具”，所以 `LegacyEngineAdapter` 会消费 `NativeLoop` 产出的 `tool_call` 草稿并交给 `CommittedEventSink` 写入 `run_events`（如果 authority=engine），或者由 Broker 自己的机制写入。最终 SSE 读取的是同一张 `run_events` 表。
+SSE 事件是**面向 UI 的投影**，而 `tool_executions` 是**面向调度和恢复的事实**。UI 需要知道“模型现在调用了什么工具”：`authority=engine` 的草稿交给 `CommittedEventSink` 写入，Broker-owned 草稿由 ToolBroker/Store 在 ToolExecution 事务中写入；最终 SSE 统一读取 `run_events`。
 
 ### Q3：`emit_text()` 为什么不每条 delta 都写库？
 
@@ -500,7 +492,7 @@ SSE 事件是**面向 UI 的投影**，而 `tool_executions` 是**面向调度�
 
 ### Q4：`NativeLoop` 的 `_checkpoint()` 保存的是事件吗？
 
-不是。`_checkpoint()` 保存的是 **WorkingState + 引擎私有状态**（`engine_state`），用于恢复。SSE 事件由 `CommittedEventSink` 通过 `io.emit()` 单独保存。两者是并行的持久化路径：
+不是。`_checkpoint()` 保存的是 **WorkingState + 引擎私有状态**（`engine_state`），用于恢复。engine-owned SSE 事件由 `CommittedEventSink` 通过 `io.emit()` 保存，Broker-owned 工具事件由 ToolBroker/Store 保存。两者是并行的持久化路径：
 - `checkpoint`：恢复状态；
 - `emit`：对外可见的事件历史。
 
@@ -538,4 +530,4 @@ SSE 事件是**面向 UI 的投影**，而 `tool_executions` 是**面向调度�
 
 ## 9. 一句话总结
 
-> `native_loop` 的 `yield StreamEvent(...)` 只是引擎内部事件草稿；“先持久化、再对外可见”的语义由 `LegacyEngineAdapter` 路由、`CommittedEventSink` 统一 commit、SQLite 作为唯一事实来源、SSE 只读已提交事件共同保证。引擎层不直接落盘，是刻意为之的分层设计。
+> `native_loop` 的 `yield StreamEvent(...)` 只是引擎内部事件草稿；“先持久化、再对外可见”的语义由 `LegacyEngineAdapter` 路由、`CommittedEventSink`/ToolBroker 按事件归属提交、SQLite 作为唯一事实来源、SSE 只读已提交事件共同保证。引擎层不直接落盘，是刻意为之的分层设计。

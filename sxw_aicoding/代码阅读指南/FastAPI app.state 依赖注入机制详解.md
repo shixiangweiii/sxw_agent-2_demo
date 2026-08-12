@@ -7,7 +7,7 @@
 ### 1.1 核心概念
 
 **`app.state`** 是 FastAPI/Starlette 提供的应用级状态容器：
-- 生命周期与应用绑定，应用启动时创建，停止时销毁
+- 生命周期与应用绑定，应用启动时创建，应用实例结束后不再使用
 - 可在 lifespan 中初始化单例资源（数据库连接、配置等）
 - 通过 `request.app.state` 在请求处理中访问
 - 本质是一个命名空间对象，可动态添加属性
@@ -46,13 +46,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     log_kv(logger, logging.INFO, "Boot", "runtime API starting", ...)
     yield  # 应用运行期间
     
-    # ④ 应用停止时的清理逻辑
+    # ④ 当前 agent/main.py 在 yield 之后只记录停止日志；若资源拥有显式 close()
+    #    能力，应在这里补充释放。RuntimeDatabase 当前按操作打开/关闭连接。
     log_kv(logger, logging.INFO, "Boot", "runtime API stopped")
 ```
 
 **关键点**：
 - `lifespan` 是 FastAPI 的异步上下文管理器，应用启动时执行 `yield` 之前，停止时执行之后
-- 所有单例资源在此初始化，保证全局唯一
+- 当前 FastAPI 应用实例的进程内资源在此初始化并复用；不提供跨服务/跨节点唯一性
 - `app.state` 作为 IoC 容器，存储所有共享资源
 
 ---
@@ -239,7 +240,7 @@ async def create_run(
 | **代码风格** | 命令式，显式调用 | 声明式，隐式注入 | app.state 更统一 |
 
 **核心决策因素**：
-1. **统一性**：项目有多个服务（Agent API、Worker、ARAG、SkillCenter、A2A），统一使用 `app.state` 降低心智负担
+1. **局部统一性**：Agent API 和 ARAG 将进程级资源放在 `app.state`；Worker、SkillCenter、A2A 的装配方式不同，不能概括为所有服务统一使用该模式
 2. **显式控制**：依赖获取位置明确，便于调试和追踪
 3. **无类型约束**：部分依赖是动态类型（如 `SimpleNamespace` 配置的测试），`Depends` 的类型推断反而成为限制
 4. **历史原因**：项目早期采用此模式，已形成惯例
@@ -282,9 +283,9 @@ async def create_run(
 
 ### 6.1 资源初始化原则
 
-1. **单例模式**：所有 `app.state` 资源在 `lifespan` 中初始化，保证全局唯一
+1. **应用实例内单例**：`app.state` 资源在当前 `lifespan` 中初始化，只保证当前 FastAPI 应用实例/进程内复用同一对象；不是跨服务或跨节点的全局单例
 2. **异步初始化**：使用 `await store.initialize()` 执行耗时操作（如 schema 建库/身份校验，见 `common/sqlite_schema.py` 的 `ensure_current_schema`）
-3. **资源清理**：`yield` 之后执行清理逻辑（如关闭连接、刷新缓存）
+3. **资源清理**：若资源有显式生命周期，`yield` 之后执行清理逻辑（如关闭连接、刷新缓存）；不要把“离开 lifespan”误写成当前 API 已自动关闭所有资源。
 
 ```python
 @asynccontextmanager
@@ -442,7 +443,7 @@ async def lifespan(app: FastAPI):
 **核心优势**：
 1. **简单直接**：无需学习复杂的依赖解析机制
 2. **显式控制**：依赖获取位置明确，便于调试
-3. **统一风格**：所有服务使用相同模式
+3. **边界清晰**：在使用它的 HTTP 服务中，资源获取位置明确
 4. **性能优越**：无额外函数调用开销
 
 **适用场景**：

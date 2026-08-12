@@ -112,7 +112,7 @@ class RuntimeEnvelope(BaseModel):
 
 **设计意图**：
 - 封装 Run 的"身份与执行上下文"，是 Run 的不可变核心
-- `release_fingerprint` 锁定执行时的代码版本，保证恢复兼容性
+- `release_fingerprint` 锁定本次 Run 使用的不可变 release；恢复时若 Worker 无法解释该 release/schema，必须 fail-closed 为 `INCOMPATIBLE_RELEASE`，项目当前没有跨版本 checkpoint 升级路径
 - `deadline_at` 是绝对时间，向下传递剩余预算
 
 ---
@@ -398,6 +398,9 @@ class Claim:
 | `signals` | 信号记录 | 幂等消费，late 拒绝 |
 | `timers` | 定时器 | SCHEDULED → FIRED 一次 |
 | `runtime_workers` | Worker 注册 | heartbeat，release map |
+| `release_manifests` | 不可变 release 清单 | release fingerprint 权威内容 |
+| `active_releases` | 当前引擎 release 指针 | 指向 `release_manifests` |
+| `cancellation_commands` | 取消命令账本 | `(run_id, command_id)` 幂等 |
 
 ---
 
@@ -418,7 +421,7 @@ CREATE TABLE runs (
     engine TEXT NOT NULL CHECK (engine IN ('plan_execute','agent_loop','native_loop')),
     deadline_at INTEGER NOT NULL,
     cancel_token_id TEXT NOT NULL UNIQUE,
-    release_fingerprint TEXT NOT NULL,
+    release_fingerprint TEXT NOT NULL REFERENCES release_manifests(release_fingerprint),
     input_event_id TEXT NOT NULL UNIQUE,
     attachment_refs_json TEXT NOT NULL,
     input_text TEXT NOT NULL,
@@ -449,6 +452,8 @@ CREATE INDEX ix_runs_status_created ON runs(state, created_at);
 - `uq_active_run_per_conversation`：保证同一 conversation 最多一个非终态 Run
 - `terminal_status IS NULL OR state = terminal_status`：终态时 state 必须等于 terminal_status
 - `next_seq`：事件序列号生成器，与 event append 同事务递增
+
+> 上述 SQL 是阅读用的核心片段；`schema.sql` 中还包含 state/visibility/sensitivity 等完整 CHECK、STRICT 和外键约束，实际 schema 以当前文件为准。
 
 ---
 
@@ -536,6 +541,8 @@ WHERE event_type = 'RUN_TERMINATED';
 - `UNIQUE(run_id, seq)`：seq 单调递增
 - `uq_run_terminal_event`：最多一个终态事件
 
+> 上述 SQL 是简化片段；完整的 `visibility`/`sensitivity` 枚举约束、STRICT 声明和索引请以 `agent/runtime/adapters/sqlite/schema.sql` 为准。
+
 ---
 
 ### 4.5 tool_executions 表
@@ -573,6 +580,8 @@ CREATE TABLE tool_executions (
 - `logical_key`：stable slot，重放时校验 tool_name/digest 一致
 - `effect_status`：ToolEffect 状态机
 - `supports_reconcile`：是否支持人工查询
+
+> `supports_reconcile` 只表示是否存在受保护的查询能力；它不等同于允许普通副作用重试。完整 effect class/status 约束见 `schema.sql`。
 
 ---
 
@@ -653,5 +662,5 @@ BEGIN IMMEDIATE
 
 ---
 
-*文档生成时间: 2026-08-09*
+*文档生成时间: 2026-08-12*
 *基于项目版本: sxw_agent-2_demo R0 冻结规格*

@@ -58,8 +58,10 @@
 ┌─────────────────────────────────┴───────────────────────────────────────────┐
 │                         Runtime Worker 进程                                 │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  EngineAdapter → CommittedEventSink → io.emit() → store.append_events │   │
-│  │  └─ 引擎执行过程中产出 event drafts，聚合后原子提交                    │   │
+│  │  EngineAdapter 路由事件：                                         │   │
+│  │  ├─ engine-owned → CommittedEventSink → io.emit() → append_events() │   │
+│  │  └─ Broker-owned tool → ToolBroker/Store 事务提交 ToolExecution +   │   │
+│  │     TOOL_CALL/TOOL_RESULT 投影；适配器只 force_flush()              │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -89,39 +91,45 @@
       │                         │<─COMMIT───────────────│                    │
       │<─202 {run_id}───────────│                       │                    │
       │                         │                       │                    │
-      │                         │                       │    (250ms轮询)     │
-      │                         │                       │<─────claim_next────│
-      │                         │                       │  UPDATE state=RUNNING
-      │                         │                       │                    │
       │──GET /runs/{id}/events──>│                       │                    │
       │  ?after_seq=0           │                       │                    │
       │                         │──list_events─────────>│                    │
       │                         │<─返回 seq 1-4─────────│                    │
-      │<─SSE id:1 event:run_status──│                    │                    │
+      │<─SSE id:1 event:user_message─│                    │                    │
       │<─SSE id:2 event:run_status──│                    │                    │
       │<─SSE id:3 event:run_status──│                    │                    │
       │<─SSE id:4 event:activity_status─│                │                    │
       │                         │                       │                    │
+      │                         │                       │    (250ms轮询)     │
+      │                         │                       │<─────claim_next────│
+      │                         │                       │  ACTIVITY CLAIMED(seq=5)
+      │                         │                       │  RUN RUNNING(seq=6)
+      │<─SSE id:5 event:activity_status─│                │                    │
+      │<─SSE id:6 event:run_status──│                    │                    │
+      │                         │                       │<─mark_activity_running│
+      │                         │                       │  ACTIVITY RUNNING(seq=7)
+      │<─SSE id:7 event:activity_status─│                │                    │
+      │                         │                       │                    │
       │                         │                       │    (引擎执行)      │
       │                         │                       │                    │
       │                         │                       │<─append_events─────│
-      │                         │                       │  OUTPUT_DELTA(seq=5)
-      │<─SSE id:5 event:text────│                       │                    │
+      │                         │                       │  OUTPUT_DELTA(seq=N)
+      │<─SSE id:N event:text────│                       │                    │
       │  data: {delta:"混合"}   │                       │                    │
       │                         │                       │                    │
       │                         │                       │<─append_events─────│
-      │                         │                       │  OUTPUT_DELTA(seq=6)
-      │<─SSE id:6 event:text────│                       │                    │
+      │                         │                       │  OUTPUT_DELTA(seq=M, M>N)
+      │<─SSE id:M event:text────│                       │                    │
       │  data: {delta:"召回"}   │                       │                    │
       │                         │                       │                    │
       │                         │                       │<─append_events─────│
-      │                         │                       │  TOOL_CALL(seq=7)
-      │<─SSE id:7 event:tool_call─│                     │                    │
+      │                         │                       │  TOOL_CALL(seq=K, K>M)
+      │<─SSE id:K event:tool_call│                     │                    │
       │  data: {tool_name:"..."}│                       │                    │
       │                         │                       │                    │
       │                         │                       │<─append_events─────│
-      │                         │                       │  TOOL_RESULT(seq=8)
-      │<─SSE id:8 event:tool_result─│                   │                    │
+      │                         │                       │  TOOL_RESULT(seq=L, L>K)
+      │<─SSE id:L event:tool_result│                   │                    │
       │  data: {result:"..."}   │                       │                    │
       │                         │                       │                    │
       │<─...────────────────────│                       │                    │
@@ -133,6 +141,8 @@
       │                         │                       │                    │
       │──连接关闭────────────────│                       │                    │
 ```
+
+上图为便于阅读，假设 SSE 在 Worker claim 前完成首次 admission replay。实际调度中 claim 可能先于订阅发生，此时首批 `list_events` 会一并返回 seq=5 以后的已提交事件；事件类型和 seq 顺序不变。引擎开始后的 `N/M/K/L` 只表示递增 cursor，INTERNAL checkpoint 或 Activity 事件可以占用中间 seq，因此公开 SSE id 不保证连续。
 
 ### 2.2 断线重连时序
 
@@ -213,7 +223,9 @@ stream_events() runs.py:272
       │
       │  while True:
       ├─ list_events(run_id, after_seq=cursor, limit=500)
-      │   └─ SELECT * FROM run_events WHERE run_id=? AND seq>? ORDER BY seq LIMIT 500
+      │   └─ SELECT * FROM run_events
+      │      WHERE run_id=? AND seq>? AND visibility='PUBLIC'
+      │      ORDER BY seq LIMIT 500
       │
       ├─ for event in events:
       │   ├─ cursor = event.seq
@@ -481,12 +493,11 @@ RuntimeWorker.run() dispatcher.py:57
 └─ RunCoordinator.execute_claim() coordinator.py:65
     └─ LegacyEngineAdapter.execute() legacy_engines.py:65
         └─ engine.run_stream(rc)
-            └─ CommittedEventSink.emit() events.py
-                └─ store.append_events() store.py:582
-                    └─ BEGIN IMMEDIATE 事务
-                        ├─ INSERT run_events
-                        ├─ UPDATE runs.next_seq
-                        └─ COMMIT
+        ├─ Engine-owned event → CommittedEventSink.emit() events.py
+        │   └─ store.append_events() store.py:582
+        │       └─ BEGIN IMMEDIATE：INSERT run_events + UPDATE runs.next_seq → COMMIT
+        └─ Broker-owned tool event → ToolBroker/Store prepare/settle transaction
+            └─ tool_executions + canonical TOOL_CALL/TOOL_RESULT in run_events → COMMIT
                             │
                             ▼ (API 进程轮询发现)
 [API 进程 SSE]
@@ -543,8 +554,8 @@ handleSubmit() app.js:401
 
 ### 6.2 为什么 cursor 是 opaque 而不是连续计数器？
 
-**原因**: `seq` 是 SQLite 自增 ID，但 visibility 过滤会造成跳号。例如：
-- seq=5 是 PRIVATE 事件（不对外）
+**原因**: `seq` 由 Run 的 `next_seq` 分配，但 SSE 默认按 `visibility=PUBLIC` 过滤，会造成跳号。例如：
+- seq=5 是 INTERNAL 事件（不对外）
 - seq=6 是 PUBLIC 事件
 - 客户端看到 4 → 6，中间有"空洞"
 
@@ -678,5 +689,5 @@ watchRun(document.querySelector(".message.assistant"));
 
 ---
 
-*文档生成时间: 2026-08-09*
+*文档生成时间: 2026-08-12*
 *基于项目版本: sxw_agent-2_demo R0 冻结规格*

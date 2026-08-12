@@ -36,7 +36,7 @@ async def _maintenance(self, now: int) -> None:
 |---|---|---|---|
 | 1 | 触发到期定时器 | `fire_due_timers` | 执行 `runtime.db` 中到期的 Timer |
 | 2 | 恢复过期 Activity | `recover_expired` | 把 lease 过期、原 Worker 可能崩溃的 Activity 重新变为可领取 |
-| 3 | 处理 deadline 超时 | `expire_deadlines` | 将超出绝对 deadline 的 Run/Activity 推进到 `TIMED_OUT` 等终态 |
+| 3 | 处理 deadline 超时 | 可选的 `expire_deadlines` Store 能力（SQLite 实现） | 将超出绝对 deadline 的 Run/Activity 推进到 `TIMED_OUT` 等终态 |
 | 4 | Artifact 孤儿清理 | `cleanup_orphans` | 删除超过 24 小时且不再被 metadata 引用的 Artifact blob |
 | 5 | Worker 心跳 | `heartbeat_worker` | 每 5 秒写入 `ACTIVE` 心跳与当前 release map |
 
@@ -70,7 +70,7 @@ if expire is not None:
 
 CreateRun 时可以传入绝对 `deadline_at`，缺省使用 `RUNTIME_DEFAULT_DEADLINE_SECONDS`（默认 600 秒）。`_maintenance` 会扫描超出 deadline 的 Run/Activity，并将它们推进到 `TIMED_OUT` 等终态。
 
-使用 `getattr` 做防御性判断，是为了兼容测试用的 fake store 可能没有实现该方法。
+使用 `getattr` 做防御性判断，是为了让测试用的 fake store 可以省略该可选能力；生产 SQLite Store 实现了 `expire_deadlines`，不能据此把 deadline 扫描理解为进程内状态。
 
 ### 4.4 Artifact 孤儿清理
 
@@ -133,8 +133,8 @@ if now - self._last_heartbeat >= 5_000:
 
 `_maintenance` 只负责状态推进和 housekeeping，真正执行 Run 的逻辑在 `_execute(claim)` 中。二者解耦：
 
-- `_maintenance` 失败不会阻塞 `_execute`；
-- `_execute` 失败也不会影响下一次 `_maintenance`。
+- `_maintenance` 在领取前执行；除 Artifact GC 外的 Store 操作异常会传播到 Worker 主循环，因此可能阻止本轮领取并触发 Worker drain；
+- `_execute` 在独立 task 中运行，其异常由 Worker 收口，不会改变已经提交的维护事务。
 
 ### 5.2 错误隔离
 
@@ -146,7 +146,7 @@ if now - self._last_heartbeat >= 5_000:
 
 ### 5.4 测试入口
 
-`run_once()` 也调用 `_maintenance(now)`，保证单步测试时同样会推进定时器、恢复过期 Activity 和刷新心跳。
+`run_once()` 也调用 `_maintenance(now)`，因此单步测试会推进定时器、恢复过期 Activity，并在满足同一个 5 秒门槛时刷新心跳；`run()` 启动时另有一次显式初始 heartbeat。
 
 ## 6. 相关配置参数
 

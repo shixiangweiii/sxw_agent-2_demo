@@ -336,13 +336,14 @@ async for item in self._client.stream(...):
     elif isinstance(item, ToolCallReady):
         # 收集 tool_call，同一轮多个 tool_call 会批量并发执行
     elif isinstance(item, TurnEnd):
-        # 本轮结束，根据 finish_reason 决定下一步
+        # 本轮结束；NativeLoop 实际根据是否存在 tool call 决定继续还是完成，
+        # finish_reason 只作为诊断/观测信息保存
 ```
 
 下游主循环：
 - 把连续的 `TextDelta` 聚合成 assistant message；
 - 把同一轮内连续出现的多个 `ToolCallReady` 收集成一个批次，调用 `executor.run_calls(...)` 并发执行；
-- 根据 `TurnEnd.finish_reason` 决定是继续下一轮、输出最终结果还是终止。
+- `TurnEnd.finish_reason` 会被记录用于观测，但当前 `NativeLoop` 不以它裁决完成；循环根据本轮是否有 `ToolCallReady` 决定继续执行工具/下一轮，还是完成。
 
 ---
 

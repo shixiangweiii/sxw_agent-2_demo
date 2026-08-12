@@ -1,6 +1,6 @@
 # Native Loop 上下文压缩（Context Compaction）全链路详解
 
-本文档深入分析 `native_loop` 的上下文压缩机制：在 token 逼近窗口上限前用 LLM 做"结构化摘要"替换早期历史，并对 413 / 上下文超长提供反应式恢复。
+本文档深入分析 `native_loop` 的上下文压缩机制：在 token 逼近窗口上限前用 LLM 做"结构化摘要"替换早期历史，并对上下文超长错误（常见为 400/413）提供反应式恢复。
 
 整体设计对应 CC（Claude Code）的 `autoCompact.ts` / `compact.ts` / `prompt.ts`（合计约 2400 行），本仓库实现了其**最小完整版**——保留形状与关键取舍，砍掉与本项目无关的部分（microcompact、snip、context-collapse、post-compact 文件恢复）。
 
@@ -27,7 +27,7 @@
 
 ### 1.1 问题场景
 
-长对话 / 多工具调用的 Agent 循环中，`state.messages` 会持续膨胀。当总 token 逼近模型上下文窗口上限时，下一次请求会被上游返回 `413 context_length_exceeded`，会话就此中断。
+长对话 / 多工具调用的 Agent 循环中，`state.messages` 会持续膨胀。当总 token 逼近模型上下文窗口上限时，下一次请求可能被上游以 `400/413 context_length_exceeded` 拒绝；若没有恢复就会话中断。
 
 ### 1.2 设计思路
 
@@ -78,7 +78,7 @@
         继续正常的模型请求流程 ...
 
                   │
-                  │  若模型报 413
+                  │  若模型报上下文超长错误（常见为 400/413）
                   ▼
    ┌──────────────────────────┐
    │ _reactive_compact()      │  ← 反应式压缩（兜底）
@@ -122,7 +122,7 @@ class LoopConfig:
 ```
 
 **阈值计算**：`threshold = context_window_tokens - compact_buffer_tokens`
-（CC 用 13k buffer；本项目由配置决定，目的是让压缩在撞上 413 之前主动触发。）
+（CC 用 13k buffer；本项目由配置决定，目的是让压缩在撞上上游窗口限制之前主动触发。）
 
 ### 3.2 `LoopState` —— 压缩相关可变状态
 
@@ -430,7 +430,7 @@ def _extract_summary(raw: str) -> str:
 
 ```python
 async def _maybe_proactive_compact(self, state: LoopState) -> None:
-    """估算上下文逼近窗口上限时先摘要，避免真的撞上 413。"""
+    """估算上下文逼近窗口上限时先摘要，避免真的撞上游窗口限制。"""
     if self._chat is None:
         return
     if state.compact_cooldown > 0:
@@ -469,7 +469,7 @@ async def _maybe_proactive_compact(self, state: LoopState) -> None:
 ```python
 # loop.py:171-180
 with start_span("native.turn", KIND_TURN, iter=state.iters) as turn_span:
-    # ── 主动压缩：估算逼近窗口上限就先摘要，别等真的 413 ─────────
+    # ── 主动压缩：估算逼近窗口上限就先摘要，别等真的超长错误 ────────
     await self._maybe_proactive_compact(state)
     # 持久化模型 I/O 前的边界；半个 stream 失败时从此重放。
     await self._checkpoint(state, "MODEL_REQUEST")
@@ -632,7 +632,7 @@ sequenceDiagram
     participant CD as _enter_compact_cooldown
 
     Loop->>LLM: stream(request_messages, ...)
-    LLM-->>Loop: ContextOverflowError (413)
+    LLM-->>Loop: ContextOverflowError (400/413 等)
     Loop->>RC: _reactive_compact(state, already_emitted)
     alt already_emitted = True 或 budget 耗尽
         RC-->>Loop: return False (放弃)
@@ -783,7 +783,7 @@ agent/engine/native_loop/loop.py:175
 | 摘要有损 | 早期原文被整体替换，**不可回溯** | 这是 CC 的主动取舍：内存与上下文真正压下去 |
 | 二次摘要 | 摘要本身也会成为后续压缩的输入 | 通过冷却、置空 usage 与 preserve_units 缓解 |
 | 单轮超限 | `to_summarize` 为空时 `compact()` 返回 None | 压缩帮不上忙，交给调用方熔断 |
-| 流式输出后 413 | `already_emitted=True` 时放弃反应式压缩 | 避免用户看到两遍内容 |
+| 流式输出后上下文超长 | `already_emitted=True` 时放弃反应式压缩 | 避免用户看到两遍内容 |
 | 工具体积治理 | `apply_tool_result_budget` 在请求副本上做，不写回历史 | 与"整段丢弃"分工明确 |
 
 ### 12.3 与 CC 的差异（本仓库最小完整版）
@@ -792,7 +792,7 @@ agent/engine/native_loop/loop.py:175
 - ❌ 不做 snip
 - ❌ 不做 context-collapse
 - ❌ 不做 post-compact 文件恢复
-- ✅ 保留阈值触发、结构化摘要、compact boundary、413 反应式恢复
+- ✅ 保留阈值触发、结构化摘要、compact boundary、上下文超长错误的反应式恢复
 
 ---
 

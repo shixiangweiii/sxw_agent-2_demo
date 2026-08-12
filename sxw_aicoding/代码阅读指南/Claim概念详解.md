@@ -81,7 +81,7 @@ Claim    = 厨师从订单架取走订单后，获得"这道菜由我做"的凭�
 
 ### 3.4 关键点
 
-1. **Activity 可以多次被 Claim** — 每次重试 `attempt+1`，但 Activity 行不变
+1. **Activity 可以多次被 Claim** — 同一逻辑 Activity 的身份和数据库行保留，重试时 `attempt/state/revision/fencing_token` 等可变字段会更新
 2. **Claim 包含 Run 快照** — Worker 执行时需要 Run 的 input_text、engine、deadline 等
 3. **Claim 附带 fencing token** — 证明"我是当前合法的执行者"
 4. **Claim 有租约** — `lease_expires_at` 过期后，其他 Worker 可重新领取
@@ -108,7 +108,7 @@ claim_next() store.py:721
 │     )
 │     AND r.deadline_at > now         -- 未过期
 │     AND r.engine IN (...)           -- Worker 支持的引擎
-│   ORDER BY a.available_at, a.created_at  -- FIFO
+│   ORDER BY a.available_at, a.created_at, a.activity_id  -- 稳定 FIFO
 │   LIMIT 1
 │
 ├─ UPDATE activities SET
@@ -222,23 +222,28 @@ COMMIT;
 ### 6.1 Activity 状态
 
 ```text
-PENDING ──claim_next──► CLAIMED ──mark_running──► RUNNING ──完成──► SUCCEEDED/FAILED
-    ▲                                                      │
-    │                                                      └──► 新建 PENDING (重试)
-    │
-    └─── lease 过期 + recover_expired
+PENDING ──claim_next──► CLAIMED ──mark_running──► RUNNING
+   ▲                         │                     ├──► SUCCEEDED/FAILED/CANCELLED
+   │                         │                     ├──► WAITING_RETRY ──timer──► PENDING
+   │                         │                     ├──► WAITING_INPUT ──signal──► PENDING
+   │                         │                     ├──► RECONCILE ──query/人工──► PENDING/终态
+   │                         │                     └──► MANUAL ──受审计处置──► PENDING/终态
+   └── lease 过期 + recover_expired(classifier=REQUEUE) ──┘
+
+lease 恢复若发现不可安全普通重放的 unresolved ToolEffect，会进入 RECONCILE/MANUAL，不会直接回到 PENDING。
 ```
 
 ### 6.2 Run 状态
 
 ```text
-DISPATCH_PENDING ──claim_next──► RUNNING ──┬──► SUCCEEDED
-                                           │
-                                           ├──► FAILED
-                                           │
-                                           ├──► CANCELLED
-                                           │
-                                           └──► TIMED_OUT
+ACCEPTED ──admission──► DISPATCH_PENDING ──claim_next──► RUNNING
+   ├──► REJECTED/CANCELLED/TIMED_OUT                         │
+   │                                                         ├──► WAITING_RETRY ──timer──► DISPATCH_PENDING
+   │                                                         ├──► WAITING_INPUT ──signal──► DISPATCH_PENDING
+   │                                                         ├──► CANCEL_REQUESTED ──安全边界/reconcile──► CANCELLED/TIMED_OUT
+   │                                                         └──► SUCCEEDED/FAILED/CANCELLED/TIMED_OUT/INCOMPATIBLE_RELEASE
+
+完整邻接表以 `docs/reliability/state-machines.md` 为准；以上只保留 Claim 阅读所需的主路径。
 ```
 
 ### 6.3 关键事件
@@ -277,12 +282,12 @@ DISPATCH_PENDING ──claim_next──► RUNNING ──┬──► SUCCEEDED
 
 ### Q3: 多 Worker 同时 claim 同一条 Activity 会怎样？
 
-**A**: SQLite 事务保证只有一个成功。其他 Worker 的 `UPDATE ... WHERE state='PENDING'` 影响 0 行，`claim_next` 返回 `None`。
+**A**: SQLite 的短 `BEGIN IMMEDIATE` 写事务会串行化 claim。前一个事务提交后，后一个 Worker 会基于最新状态重新选择，不会再领到同一条 Activity；它可能领取其他可用 Activity，若没有则 `claim_next` 返回 `None`。
 
 ### Q4: Claim 后 Worker 执行失败，Activity 会怎样？
 
 **A**: 根据 `outcome.kind` 决定：
-- `RETRYABLE_FAILURE` → `schedule_retry`，Activity 重新变为 PENDING
+- `RETRYABLE_FAILURE` → `schedule_retry`，同一 Activity 与 Run 先进入 `WAITING_RETRY`；唯一 retry timer 首次触发后，Activity 回到 `PENDING`，Run 回到 `DISPATCH_PENDING`
 - `TERMINAL_FAILURE` → Run 终结，Activity 终结
 - `COMPLETED` → Run 成功，Activity 成功
 
@@ -292,5 +297,5 @@ DISPATCH_PENDING ──claim_next──► RUNNING ──┬──► SUCCEEDED
 
 ---
 
-*文档生成时间: 2026-08-09*
+*文档生成时间: 2026-08-12*
 *基于项目版本: sxw_agent-2_demo R0 冻结规格*

@@ -54,8 +54,8 @@
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
 │  │  1. claim_next() → 领取 Activity                                     │   │
 │  │  2. RunCoordinator.execute_claim() → 执行引擎                        │   │
-│  │  3. EngineAdapter.execute() → 产出 Events                            │   │
-│  │  4. CommittedEventSink → append_events()                             │   │
+│  │  3. EngineAdapter.execute() → 路由引擎事件                           │   │
+│  │  4. engine-owned → CommittedEventSink；Broker-owned tool → Store      │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -67,7 +67,7 @@
 | HTTP 入口 | CreateRun 请求 | Pydantic 校验通过 |
 | Admission | Run 创建成功 | run_id, conversation_id |
 | Worker 领取 | Claim 获得执行权 | fencing_token, lease |
-| 引擎执行 | 产出 Events | text/tool_call/tool_result |
+| 引擎执行 | 产出/提交 Events | text/tool_call/tool_result（工具公开投影由 Broker 或 engine-owned 路由提交） |
 | SSE 推送 | 前端收到事件 | 增量渲染 |
 | 终态 | Run 完成 | terminal 事件 |
 
@@ -140,7 +140,7 @@
       │                         │                        │    │  │ CommittedEventSink
       │                         │                        │    │  │  ┌───────────────┤
       │                         │                        │    │  │  │ emit() events │
-      │                         │                        │    │  │  │ flush() 聚合  │
+      │                         │                        │    │  │  │ _flush_locked() 聚合 │
       │                         │                        │    │  │  └───────────────┤
       │                         │                        │    │  │ engine_outcome   │
       │                         │                        │    │  └─────────────────┤
@@ -635,22 +635,22 @@ LegacyEngineAdapter.execute(request, io) legacy_engines.py:65
 **文件**: `agent/runtime/application/events.py`
 
 ```python
-class CommittedEventSink(RuntimeIO):
-    """三代引擎唯一共同的事件出口"""
+class CommittedEventSink:
+    """三代引擎共同使用的事件实现；RuntimeIO 是独立的 Protocol。"""
     
     async def emit(self, event_type: str, data: dict) -> None:
-        # 聚合: 100ms 或 2048 bytes
-        self._buffer.append(EventDraft(...))
-        if self._should_flush():
-            await self.flush()
-    
-    async def flush(self) -> None:
-        # 先 commit，后 SSE 可见
-        await self.store.append_events(self.run_id, self._buffer, ...)
-        self._buffer.clear()
-    
-    async def close(self) -> None:
-        await self.flush()  # 确保所有事件提交
+        if event_type == "text":
+            await self.emit_text(data.get("delta", ""))
+            return
+        async with self._lock:
+            await self._flush_locked()
+            # engine-owned non-text 事件即时 append；Broker-owned tool 事件
+            # 在 LegacyEngineAdapter 层 force_flush 后跳过，不重复写入。
+            await self.store.append_events(self.run_id, [EventDraft(...)], ...)
+
+    async def force_flush(self) -> None:
+        async with self._lock:
+            await self._flush_locked()
 ```
 
 ---
@@ -857,7 +857,8 @@ RuntimeWorker.run() dispatcher.py:57
     ├─ compile_history()
     └─ LegacyEngineAdapter.execute() legacy_engines.py:65
         └─ engine.run_stream()
-            └─ CommittedEventSink.emit() → flush() → append_events()
+            ├─ engine-owned → CommittedEventSink.emit() → _flush_locked()/append_events()
+            └─ Broker-owned tool → ToolBroker/Store prepare/settle → tool_executions + run_events
 ```
 
 ---
@@ -909,5 +910,5 @@ RuntimeWorker.run() dispatcher.py:57
 
 ---
 
-*文档生成时间: 2026-08-09*
+*文档生成时间: 2026-08-12*
 *基于项目版本: sxw_agent-2_demo R0 冻结规格*

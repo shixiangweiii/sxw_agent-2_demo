@@ -47,7 +47,7 @@ class ToolManifest(BaseModel):
 **关键字段**：
 - `effect_class`：决定重试策略（见第三节）
 - `supports_idempotency`：幂等工具必须透传 `idempotency_key`
-- `supports_reconcile`：非幂等副作用工具必须提供对账钩子
+- `supports_reconcile`：非幂等副作用工具若要自动恢复，必须提供对账钩子；缺失时进入 `MANUAL_REQUIRED`
 
 ---
 
@@ -69,7 +69,7 @@ class ToolEffectClass(StrEnum):
 |---|---|---|---|---|
 | `READ_ONLY` | ✅ 安全重试 | ❌ 不需要 | ❌ 不需要 | 直接失败 |
 | `IDEMPOTENT_EFFECT` | ✅ 安全重试 | ✅ 必须透传 | ⚠️ 可选 | 对账确认 |
-| `NON_IDEMPOTENT_EFFECT` | ❌ 不透明重试 | ⚠️ 可选 | ✅ 必须 | 对账或人工 |
+| `NON_IDEMPOTENT_EFFECT` | ❌ 不透明重试 | ⚠️ 可选 | 自动恢复需要 | 对账或人工 |
 | `UNKNOWN_EFFECT` | ❌ 不透明重试 | ❌ 不需要 | ⚠️ 可选 | 对账或人工 |
 
 **注册校验**（`tool_broker.py:85-91`）：
@@ -578,7 +578,7 @@ manifest = ToolManifest(
     timeout_seconds=20.0,
     max_attempts=1,  # 不重试
     supports_idempotency=False,
-    supports_reconcile=True,  # 必须提供对账钩子
+    supports_reconcile=True,  # 需要同时注册 reconcile hook；否则会进入 MANUAL_REQUIRED
     result_policy="INLINE_OR_ARTIFACT",
     concurrency_safe=False,
 )

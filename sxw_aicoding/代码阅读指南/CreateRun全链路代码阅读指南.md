@@ -39,7 +39,7 @@
 ┌───────────────────────────────────────────────────────────────────────────┐
 │                         Runtime Worker (无HTTP端口)                        │
 │    ┌─────────────────────────────────────────────────────────────────┐   │
-│    │  RunCoordinator → EngineAdapter → ToolBroker → CommittedEventSink│   │
+│    │  RunCoordinator → EngineAdapter → ToolBroker / CommittedEventSink│   │
 │    └─────────────────────────────────────────────────────────────────┘   │
 └───────────────────────────────────────────────────────────────────────────┘
         │                      │                      │
@@ -450,8 +450,8 @@ LegacyEngineAdapter.execute() legacy_engines.py:65
 **文件**: `agent/runtime/application/events.py`
 
 ```python
-class CommittedEventSink(RuntimeIO):
-    """三代引擎唯一共同的事件出口"""
+class CommittedEventSink:
+    """三代引擎共同使用的事件实现；RuntimeIO 是独立的 Protocol。"""
 ```
 
 **关键设计**:
@@ -648,7 +648,7 @@ DISPATCH_PENDING ──claim_next──► RUNNING ──┬──► SUCCEEDED 
        │                                    │              │
        │                                    ├──► TIMED_OUT │
        │                                    │              │
-       │                                    └──► WAITING_INPUT ──signal──► RUNNING
+       │                                    └──► WAITING_INPUT ──signal──► DISPATCH_PENDING
        │
        └─── 幂等重放返回原 Run
 ```
@@ -656,14 +656,16 @@ DISPATCH_PENDING ──claim_next──► RUNNING ──┬──► SUCCEEDED 
 ### Activity 状态迁移
 
 ```text
-PENDING ──claim_next──► CLAIMED ──mark_running──► RUNNING ──完成──► SUCCEEDED/FAILED
-    ▲                                                      │
-    │                                                      └──► 新建 PENDING (重试)
-    │
-    └─── lease 过期恢复
+PENDING ──claim_next──► CLAIMED ──mark_running──► RUNNING ──完成──► SUCCEEDED/FAILED/CANCELLED
+RUNNING ──retryable failure──► WAITING_RETRY ──timer──► PENDING
+RUNNING ──interrupt──► WAITING_INPUT ──signal──► PENDING
+CLAIMED/RUNNING ──lease 过期 + classifier=REQUEUE──► PENDING
+CLAIMED/RUNNING ──lease 恢复发现 unresolved effect──► RECONCILE/MANUAL
 ```
+
+重试和 lease 恢复都更新同一条 Activity，不会为同一 logical key 新建 Activity。
 
 ---
 
-*文档生成时间: 2026-08-09*
+*文档生成时间: 2026-08-12*
 *基于项目版本: sxw_agent-2_demo R0 冻结规格*

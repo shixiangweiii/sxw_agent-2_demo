@@ -114,7 +114,7 @@ CREATE TABLE runs (
 
 **核心职责**：
 - 封装一次用户 query 的执行上下文
-- 管理执行状态（DISPATCH_PENDING → RUNNING → 终态）
+- 管理执行状态；主路径是 `ACCEPTED → DISPATCH_PENDING → RUNNING`，同时可能进入 `WAITING_RETRY`、`WAITING_INPUT` 或 `CANCEL_REQUESTED`，最终进入六种终态
 - 关联所有产生的 Activity 和 Event
 
 **关键约束**：
@@ -341,5 +341,5 @@ CreateRun:
 
 ---
 
-*文档生成时间: 2026-08-09*
+*文档生成时间: 2026-08-12*
 *基于项目版本: sxw_agent-2_demo R0 冻结规格*

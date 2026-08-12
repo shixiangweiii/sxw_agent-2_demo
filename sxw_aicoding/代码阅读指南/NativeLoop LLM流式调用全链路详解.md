@@ -31,7 +31,7 @@
 
 1. **各家分片规则不一致**：标准 OpenAI 首片带 `id + name`、后续片只追加 `arguments` 字符串；部分厂商一次性吐完整 tool_call。累积器必须两种都吃。
 2. **流式工具执行**：为降低端到端延迟，希望**一个 tool call 参数凑齐就立刻派发执行**，不等整轮流完。但 JSON 参数可能半截，必须有"已就绪"的安全闸。
-3. **上下文超长恢复**：模型报 413 不是终止条件，而是"压缩后重来一轮"。
+3. **上下文超长恢复**：模型报上下文超限错误（常见为 400/413）不是终止条件，而是"压缩后重来一轮"。
 4. **token 用量回压**：流尾的 `usage` 用于压缩阈值估算，但 provider 不一定支持 `include_usage`，要优雅降级。
 
 ### 1.2 总体架构
@@ -171,8 +171,8 @@ chunk #008  <no choices>  (finish_reason=None)
 chunk #009  finish_reason='tool_calls'  usage=Usage(prompt_tokens=..., completion_tokens=..., total_tokens=...)
 ```
 
-**关键事实（所有 OpenAI 兼容 provider 都遵循）**：
-- `id` / `name` **只在首片出现**，后续片为空
+**关键事实（本探针和常见 OpenAI 兼容实现观察到的形态）**：
+- `id` / `name` 通常只在首片出现，后续片为空；provider 变化时必须重跑探针验证
 - `arguments` 是**字符串分片**，必须逐片拼接
 - `index` 区分同一轮内的多个 tool call
 - `usage` 通常单独一个 chunk（无 choices），且仅在启用 `include_usage` 时返回
@@ -206,10 +206,10 @@ StreamItem = TextDelta | ToolCallReady | TurnEnd
 ```python
 @dataclass
 class ToolCall:
-    id: str                  # provider 给的 call id（native 后续覆盖为 logical_key）
+    id: str                  # provider 给的 call id（用于消息关联）
     name: str                # 工具名，例如 "knowledge_search"
     arguments: str = ""      # ★ 原始 JSON 字符串（不解析），保留失败可喂回模型
-    logical_key: str = ""    # native_loop 自造的稳定身份（用于 replay / Broker 匹配）
+    logical_key: str = ""    # native_loop 另行设置的稳定身份（用于 replay / Broker 匹配）
 ```
 
 ---
@@ -222,7 +222,7 @@ class ToolCall:
 
 ```python
 payload: dict[str, Any] = {
-    "model": self._model,                      # e.g. "qwen-max"
+    "model": self._model,                      # 来自 settings.llm_model（当前默认 qwen3.7-plus）
     "messages": to_wire(messages),             # ★ 见上文 3.1 的 messages 示例
     "stream": True,                            # ★ 必须流式
     "temperature": 0.2,
@@ -480,7 +480,7 @@ partial.emitted == False
 elif isinstance(item, ToolCallReady):
     item.call.logical_key = (
         f"native:turn:{state.iters - 1}:call:{len(ready_calls)}"
-    )                                                   # ★ 覆盖为稳定身份
+    )                                                   # ★ 单独设置稳定身份，不覆盖 provider call id
     ready_calls.append(item.call)                       # ★ 累积本轮
     for ev in self._call_events(item.call):
         yield ev                                        # ★ 翻译为 StreamEvent

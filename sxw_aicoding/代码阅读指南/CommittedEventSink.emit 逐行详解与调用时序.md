@@ -1,6 +1,6 @@
 # CommittedEventSink.emit 逐行详解与调用时序
 
-本文档围绕 `agent/runtime/application/events.py:130` 的 `CommittedEventSink.emit` 方法，逐行解释其内部实现逻辑，并给出完整的调用时序图。该方法是三代引擎（`plan_execute`、`agent_loop`、`native_loop`）对外产出事件的**唯一持久化出口**，承载了聚合、分派、诊断旁路与 DB 写入四重职责。
+本文档围绕 `agent/runtime/application/events.py:130` 的 `CommittedEventSink.emit` 方法，逐行解释其内部实现逻辑，并给出完整的调用时序图。该方法是三代引擎共享的 **engine-owned 事件持久化入口**，承载聚合、分派、诊断旁路与 DB 写入职责；Broker-owned 工具事件则由 ToolBroker/Store 的 ToolExecution 事务提交，不经该方法重复写入。
 
 ---
 
@@ -40,7 +40,8 @@
 ┌───────────────────────────────▼─────────────────────────────────────────────┐
 │                  持久化层：CommittedEventSink (events.py:55)                 │
 │  - text delta：100ms / 2KiB 聚合后写 DB                                    │
-│  - tool_call/plan_step/...：立即写 DB                                       │
+│  - 进入 Sink 的 engine-owned tool_call/plan_step/...：立即写 DB             │
+│  - Broker-owned tool_call/tool_result：由 ToolBroker/Store 事务提交          │
 │  - citation：只收集，terminal 事务统一落库                                   │
 │  - error：诊断旁路，不决定终态                                              │
 │  - 诊断 Trace 旁路：TTFT + event_counts + answer payload                   │
@@ -51,7 +52,7 @@
 
 - **三代引擎共享同一套持久化语义**：引擎只 `yield` 事件草稿，不接触 DB；避免每个引擎各自实现持久化导致行为不一致。
 - **先 commit、后 SSE 可见**：所有事件先写入 `run_events` 表（同一事务内更新 `runs.next_seq`），再由 SSE 订阅者可见，避免断线重连丢事件。
-- **text 走聚合，非 text 走即时**：模型流式输出一次回答几百个 delta，逐条写 DB 代价过高；非 text 事件（tool_call 等）是事实，必须即时持久化。
+- **text 走聚合，进入 Sink 的非 text 走即时**：模型流式输出一次回答几百个 delta，逐条写 DB 代价过高；进入 Sink 的 engine-owned 非 text 事件（例如未知工具/参数错误）是事实，必须即时持久化。归 ToolBroker 所有的 Broker-owned `tool_call/tool_result` 由 ToolExecution 准备/结算事务提交，不会再次进入 Sink。
 - **诊断与业务分离**：Trace 旁路只记计数/关键字段，绝不参与提交语义。
 
 ---
@@ -194,7 +195,7 @@ async def emit_text(self, delta: str) -> None:
 async with self._lock:
 ```
 
-**意图**：非 text 事件（tool_call、plan_step、error 等）走锁保护的同步写入路径。锁保证 flush text buffer 和写入新事件之间的顺序——模型流输出必须在 ToolCall 事实之前完成持久化。
+**意图**：进入 Sink 的非 text 事件（engine-owned tool projection、plan_step、error 等）走锁保护的同步写入路径。锁保证 flush text buffer 和写入新事件之间的顺序——模型流输出必须在后续事实事件之前完成持久化。Broker-owned `tool_call/tool_result` 的 ToolExecution 与公开事件由 Broker/Store 事务负责，适配器只在其前面调用 `force_flush()`。
 
 ### 3.6 Flush text buffer（143）
 

@@ -11,7 +11,7 @@
 
 **ToolBroker 位于全链路阶段五「Engine 执行 → Event 产出」的内部，是 Engine 调用外部工具时的可靠执行层。**
 
-它把 LLM 生成的 `tool_call` 意图，转换为一次**持久化、可重试、可对账、崩溃可恢复**的外部动作，并把结果以 `tool_result` 事件的形式交还给 Engine，最终通过 `CommittedEventSink` 落库并 SSE 推送给前端。
+它把 LLM 生成的 `tool_call` 意图，转换为一次**持久化、可重试、可对账、崩溃可恢复**的外部动作。ToolBroker/Store 在准备和结算时提交 `tool_executions` 账本及对应的公开 `TOOL_CALL_COMMITTED`/`TOOL_RESULT_COMMITTED` 投影；结果仍会以 `ToolResultEnvelope` 返回 Engine，但已由 Broker 拥有的事件不会再次经过 `CommittedEventSink`，最终由 SSE 从 `run_events` 推送给前端。
 
 ---
 
@@ -82,7 +82,7 @@ ToolBroker.execute(
     └─ 返回 ToolResultEnvelope
 ```
 
-返回的 `ToolResultEnvelope` 被 Engine 消费，并触发 `CommittedEventSink.emit("tool_result", {...})`。
+返回的 `ToolResultEnvelope` 被 Engine 消费，并生成 `tool_result` 草稿。对于已由 Broker 执行并结算的注册工具，`LegacyEngineAdapter` 识别其 `authority != "engine"`，只执行 `io.force_flush()` 后跳过 `io.emit()`；对应的公开 `TOOL_RESULT_COMMITTED` 已在 Broker 的结算事务中写入 `run_events`。只有未知工具或参数解析失败等 `authority="engine"` 投影才由 `CommittedEventSink.emit("tool_result", ...)` 负责写入。
 
 ---
 
@@ -101,12 +101,12 @@ ToolBroker.execute(
 
 其内部实际发生的是：
 
-1. Engine 生成 `tool_call`，调用 `io.emit("tool_call", ...)` → SSE 推 `tool_call`；
-2. Engine 调用 `tool_broker.execute(...)`；
-3. ToolBroker 内部完成状态机：`PREPARED → DISPATCHED → executor → COMMITTED/FAILED/UNKNOWN`；
-4. 结果返回 Engine，调用 `io.emit("tool_result", ...)` → SSE 推 `tool_result`。
+1. Engine 生成 `tool_call` 意图，任何 `TOOL_CALL_COMMITTED` 出现前都必须先 `force_flush()` 前置 text buffer；
+2. ADK 路径由 `BrokeredToolBridge` 先 `force_flush()`，再批量 `prepare_tool_execution_batch()`；`native_loop` 则先 `yield authority="broker"` 草稿，`LegacyEngineAdapter` 完成 `force_flush()` 并跳过 `io.emit()`，生成器恢复后才进入 `tool_broker.execute()` 和 `prepare_tool_execution()`；
+3. ToolBroker 在 prepare 事务中提交 ToolExecution + `TOOL_CALL_COMMITTED`，事务外执行 `PREPARED → DISPATCHED → executor`，再在结算事务中提交 `COMMITTED/FAILED/UNKNOWN` 与 `TOOL_RESULT_COMMITTED`；
+4. 结果返回 Engine，适配器跳过 Broker-owned `tool_result` 草稿。未知工具/参数错误等没有 ToolExecution 的 engine-owned 事件，才经 `CommittedEventSink` 写入。
 
-因此，**SSE 中相邻的 `tool_call` 与 `tool_result` 事件，中间隔着的正是 ToolBroker 的完整执行周期**。
+因此，`tool_call` 与对应 `tool_result` 标记了 ToolBroker 执行周期的两端；多工具并发或 Activity 状态事件可能插入其间，SSE 不保证二者在 seq 上相邻，应使用 `tool_execution_id`/stable logical key 做关联。
 
 ---
 
@@ -219,7 +219,7 @@ class ToolEffectStatus(StrEnum):
 |---|---|---|---|---|
 | `READ_ONLY` | 是 | 不需要 | 不需要 | 直接 FAILED |
 | `IDEMPOTENT_EFFECT` | 是 | 必须透传 | 可选 | 可对账 |
-| `NON_IDEMPOTENT_EFFECT` | 否 | 可选 | 必须 | 必须对账或人工 |
+| `NON_IDEMPOTENT_EFFECT` | 否 | 可选 | 建议提供；缺失时无法自动对账 | 进入 `UNKNOWN` 后对账或人工 |
 | `UNKNOWN_EFFECT` | 否 | 不需要 | 可选 | 对账或人工 |
 
 对应到当前系统的工具注册：
@@ -265,7 +265,7 @@ class ToolEffectStatus(StrEnum):
 | `RuntimeStore` | 持久化 `tool_executions` 状态与结果 |
 | `ArtifactStore` | 大结果（> 8KiB）写入 CAS |
 | `Clock` | 计算 `remaining_ms`，控制超时 |
-| `CommittedEventSink` | 工具相关事件的统一出口（间接通过 Engine） |
+| `CommittedEventSink` | engine-owned 工具投影及其他引擎事件的出口；Broker-owned 工具事件不经此处重复写入 |
 | `ToolExecutor` | 实际执行业务逻辑的函数 |
 | `ReconcileHook` | 非幂等副作用工具失败后的对账钩子 |
 
@@ -277,10 +277,10 @@ class ToolEffectStatus(StrEnum):
 
 | 原则 | ToolBroker 中的体现 |
 |---|---|
-| **先 commit，后 SSE 可见** | `prepare_tool_execution()` 先写 `PREPARED`，再调用 executor；结果通过 `settle_tool_execution()` 提交后才返回 Engine |
+| **先 commit，后 SSE 可见** | `prepare_tool_execution()`/`settle_tool_execution()` 在调用副作用前后提交 ToolExecution 账本及公开事件投影；结果提交后才返回 Engine |
 | **lease/fencing** | 每次状态变更都校验 `fencing_token`，防止旧 Worker 过期提交 |
 | **幂等** | `IDEMPOTENT_EFFECT` 工具必须透传 `idempotency_key` 给下游 |
-| **append-only** | `tool_executions` 状态单向推进，不直接修改历史状态 |
+| **稳定账本 + CAS** | `tool_executions` 保留同一 stable slot，通过 `revision`/CAS 更新效应状态；append-only 审计与 SSE 投影位于 `run_events` |
 | **deadline 向下传递** | `deadline_at_ms` 在 `ToolCallContext` 中传递，`executor` 使用剩余预算而非本地重算 |
 | **大结果不入 Event** | 大结果写入 Artifact，Event/Checkpoint 中只保留 `result_ref` |
 | **崩溃恢复** | 从 `tool_executions` 表重放时，根据 `effect_class` 判断 safe_replay；`request_digest` 不一致时触发 `TOOL_REPLAY_MISMATCH` |
@@ -310,7 +310,7 @@ ToolBroker 是 Query→Answer 全链路中**阶段五「Engine 执行 → Event 
 
 - **入口**：Engine 内部产生 `tool_call` 后，调用 `ToolBroker.execute()`；
 - **职责**：持久化工具执行状态、按 effect_class 决定重试/对账策略、透传幂等键、控制 deadline、管理大结果 Artifact；
-- **出口**：返回 `ToolResultEnvelope`，Engine 再产出 `tool_result` 事件，经 `CommittedEventSink` 落库并由 SSE 推送给前端；
+- **出口**：返回 `ToolResultEnvelope` 给 Engine；注册工具的 `tool_result` 公开投影已经由 Broker 结算事务写入 `run_events`，Engine-owned 异常投影才经 `CommittedEventSink` 落库，再由 SSE 推送给前端；
 - **价值**：把一次普通的函数调用，提升为具备**持久化、幂等、对账、崩溃恢复、人工介入**能力的生产级工具调度协议。
 
 因此，《ToolBroker 详解》可以视为《Query 到 Answer 全链路代码阅读指南》**阶段五的放大切片**：全链路指南回答“请求怎么从头到尾跑完”，ToolBroker 详解回答“其中一次工具调用是怎么被安全可靠地执行的”。

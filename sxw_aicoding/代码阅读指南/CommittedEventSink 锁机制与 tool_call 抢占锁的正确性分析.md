@@ -8,6 +8,8 @@
 
 结论先行：**`tool_call` 先抢到锁不仅不会出错，反而正是设计想要的行为**。下面从源码出发逐层解释。
 
+> 范围说明：注册工具的 Broker-owned `tool_call/tool_result` 归 ToolBroker/Store 所有，并由 ToolExecution 准备/结算事务提交；`LegacyEngineAdapter` 对这类草稿只 `force_flush()` 后跳过 `io.emit()`。对 `native_loop` 的 `tool_call` 而言，Broker prepare 发生在草稿被跳过、生成器恢复之后，不能笼统说成适配器看到草稿时“已经提交”。下文关于 Sink 抢锁和即时写库的分析，适用于真正进入 `CommittedEventSink.emit()` 的 engine-owned 事件；不把 Sink 锁当作 Broker 工具账本的并发控制。
+
 ---
 
 ## 目录
@@ -42,9 +44,9 @@ delta1 → delta2 → tool_call → delta3 → tool_result → ...
 但 Runtime 为了性能，对 `text` 做了特殊处理：
 
 - **text delta**：先攒到 buffer，按 `100ms / 2KiB` 聚合后再写库；
-- **非 text 事件（tool_call、tool_result、plan_step、error 等）**：立即写库。
+- **进入 Sink 的非 text 事件（engine-owned tool_call/tool_result、plan_step、error 等）**：立即写库；Broker-owned 工具事件由 ToolBroker/Store 负责提交。
 
-这就引入了一个时间差：`delta1` 和 `delta2` 可能被合并成一条 `OUTPUT_DELTA_COMMITTED`，而 `tool_call` 必须在它们之后落库。**聚合策略 + 立即提交策略之间需要同步**，这就是锁存在的原因。
+这就引入了一个时间差：`delta1` 和 `delta2` 可能被合并成一条 `OUTPUT_DELTA_COMMITTED`，而进入 Sink 的 engine-owned `tool_call` 必须在它们之后落库。**聚合策略 + 立即提交策略之间需要同步**，这就是锁存在的原因。
 
 ---
 
@@ -67,7 +69,7 @@ async def emit(self, event_type: str, payload: dict[str, Any]) -> None:
         ...
 ```
 
-引擎收到 `tool_call`、`tool_result`、`error`、`plan_step` 等非 text 事件时，会进入 `emit()` 的锁保护分支。
+引擎产生 engine-owned `tool_call`、`tool_result`、`error`、`plan_step` 等非 text 事件时，会进入 `emit()` 的锁保护分支；Broker-owned 工具事件在适配器层被跳过。
 
 ### 2.2 text 聚合后台定时器：`_flush_after_delay`
 
@@ -291,7 +293,7 @@ OUTPUT_DELTA_COMMITTED "结果如下"      ← 后续 text 继续聚合后 flush
 | 不变量 | 说明 |
 |---|---|
 | **先 commit，后 SSE 可见** | 所有事件先写入 `run_events` 表（同一事务更新 `runs.next_seq`），SSE 只读已提交事件。 |
-| **text 聚合，非 text 即时** | text 按 100ms/2KiB 聚合；tool_call 等事实事件立即落库。 |
+| **text 聚合，Sink 内非 text 即时** | text 按 100ms/2KiB 聚合；进入 Sink 的 engine-owned tool_call 等事实事件立即落库，Broker-owned 工具事件由 Broker 事务落库。 |
 | **切换事件类型前必须 flush** | 写 tool_call/tool_result/plan_step/terminal 前，必须先 `_flush_locked()` 清空 text buffer。 |
 | **单 Run 内写入串行化** | 所有对 `_buffer` / `_timer` / `store.append_events` 的访问必须通过同一把 `asyncio.Lock`。 |
 | **fencing token 保证所有权** | `store.append_events` 带 `fencing_token`，旧 Worker 的结果即使抢到锁也会被拒绝。 |
