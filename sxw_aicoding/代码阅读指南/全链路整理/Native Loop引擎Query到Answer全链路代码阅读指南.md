@@ -50,7 +50,7 @@ sequenceDiagram
     participant Worker as Runtime Worker
     participant Coord as RunCoordinator
     participant Native as NativeLoopAdapter
-    participant Loop as NativeLoop (循环主体)
+    participant LoopCore as NativeLoop (循环主体)
     participant LLM as LLM Provider
     participant Broker as ToolBroker
     participant Sink as CommittedEventSink (RuntimeIO)
@@ -90,57 +90,57 @@ sequenceDiagram
     Native->>Native: 构造 NativeBrokerSession
     Native->>Native: build_brokered_native_registry()
 
-    Note over Loop: ⑥ NativeLoop.run() — 核心 while 循环
-    Native->>+Loop: loop.run(initial_state)
+    Note over LoopCore: ⑥ NativeLoop.run() — 核心 while 循环
+    Native->>+LoopCore: loop.run(initial_state)
 
     rect rgb(240, 248, 255)
-        Note over Loop: 循环开始 (每次迭代)
-        Loop->>Sink: probe_control() — 检查 cancel/deadline
-        Loop->>Sink: is_cancelled() / remaining_ms()
+        Note over LoopCore: 循环开始 (每次迭代)
+        LoopCore->>Sink: probe_control() — 检查 cancel/deadline
+        LoopCore->>Sink: is_cancelled() / remaining_ms()
 
-        Note over Loop: 主动压缩检查
-        Loop->>Loop: _maybe_proactive_compact()
+        Note over LoopCore: 主动压缩检查
+        LoopCore->>LoopCore: _maybe_proactive_compact()
 
-        Note over Loop: 预留模型请求 checkpoint
-        Loop->>Sink: checkpoint(MODEL_REQUEST,<br/>events=[output_generation_started])
+        Note over LoopCore: 预留模型请求 checkpoint
+        LoopCore->>Sink: checkpoint(MODEL_REQUEST,<br/>events=[output_generation_started])
         Sink->>DB: save_checkpoint() + append_events() 原子事务
 
-        Note over Loop: 组装模型请求
-        Loop->>Loop: _build_request(state) — system + 历史 + 提醒
+        Note over LoopCore: 组装模型请求
+        LoopCore->>LoopCore: _build_request(state) — system + 历史 + 提醒
 
-        Note over Loop,LLM: ⑦ 调用 LLM — 流式
-        Loop->>+LLM: client.stream(messages, tools)
-        LLM-->>Loop: TextDelta / ToolCallReady / TurnEnd
-        Loop->>Sink: emit("text", {delta, message_id, generation_id})
+        Note over LoopCore,LLM: ⑦ 调用 LLM — 流式
+        LoopCore->>+LLM: client.stream(messages, tools)
+        LLM-->>LoopCore: TextDelta / ToolCallReady / TurnEnd
+        LoopCore->>Sink: emit("text", {delta, message_id, generation_id})
         Note over Sink: 100ms/2KiB 聚合后批量写 DB
-        Loop->>Loop: 累积 ToolCall 列表
-        LLM-->>-Loop: TurnEnd(finish_reason)
+        LoopCore->>LoopCore: 累积 ToolCall 列表
+        LLM-->>-LoopCore: TurnEnd(finish_reason)
 
-        Note over Loop: 模型响应落历史
-        Loop->>Sink: checkpoint(MODEL_RESPONSE_COMMITTED)
+        Note over LoopCore: 模型响应落历史
+        LoopCore->>Sink: checkpoint(MODEL_RESPONSE_COMMITTED)
 
         alt 无 ToolCall → 完成
-            Loop->>Sink: checkpoint(COMPLETED)
-            Loop->>Sink: set_final_assistant(text, msg_id, gen_id)
-            Loop-->>-Native: 迭代结束, stop_reason=T_COMPLETED
+            LoopCore->>Sink: checkpoint(COMPLETED)
+            LoopCore->>Sink: set_final_assistant(text, msg_id, gen_id)
+            LoopCore-->>-Native: 迭代结束, stop_reason=T_COMPLETED
         else 有 ToolCall → 工具执行
-            Note over Loop: ⑧ 工具批次预处理
-            Loop->>Broker: prepare_native_batch() — 原子冻结 slot
+            Note over LoopCore: ⑧ 工具批次预处理
+            LoopCore->>Broker: prepare_native_batch() — 原子冻结 slot
             Broker->>DB: prepare_tool_execution_batch() 单事务
-            Loop->>Sink: checkpoint(TOOL_BATCH_COMMITTED)
+            LoopCore->>Sink: checkpoint(TOOL_BATCH_COMMITTED)
 
-            Note over Loop: ⑨ 执行工具
+            Note over LoopCore: ⑨ 执行工具
             loop 每个 ToolCall
-                Loop->>Broker: execute_prepared()
+                LoopCore->>Broker: execute_prepared()
                 Broker->>DB: mark_tool_dispatched()
                 Broker->>Broker: tool.executor(args, ctx)
                 Broker->>DB: settle_tool_execution() 原子结算
-                Broker-->>Loop: ToolResultEnvelope
-                Loop->>Sink: checkpoint(TOOL_RESULT_COMMITTED)
+                Broker-->>LoopCore: ToolResultEnvelope
+                LoopCore->>Sink: checkpoint(TOOL_RESULT_COMMITTED)
             end
 
-            Loop->>Sink: checkpoint(NEXT_TURN)
-            Note over Loop: continue — 进入下一轮迭代
+            LoopCore->>Sink: checkpoint(NEXT_TURN)
+            Note over LoopCore: continue — 进入下一轮迭代
         end
     end
 
@@ -155,7 +155,7 @@ sequenceDiagram
     API-->>Client: event: terminal<br/>event: assistant_message
     API-->>-Client: SSE EOF
 
-    Worker-->>-Coord: 返回 final status
+    Coord-->>-Worker: 返回 final status
 ```
 
 ---
